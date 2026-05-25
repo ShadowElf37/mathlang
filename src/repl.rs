@@ -15,7 +15,7 @@ pub const BUILTIN_FNS: &[&str] = &[
     "min", "max", "pow", "hypot", "gcd", "lcm",
     "and", "or", "xor", "nand", "nor", "xnor", "not", "shl", "shr",
     "sum", "prod", "integral", "deriv", "map",
-    "sinc",
+    "sinc", "graph",
 ];
 
 pub const BUILTIN_CONSTS: &[&str] = &["pi", "e", "phi", "inf", "i"];
@@ -246,6 +246,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "Ranges:    (0..10)   (10..0)    (a..b)\n",
             "Operators: + - * / // % ^ **   -> (lambda)\n",
             "Aggregates: sum(f,a,b)  prod(f,a,b)  integral(f,a,b[,n])  deriv(f,x[,dx])\n",
+            "Grapher:   graph(f[,a,b])  saves graph_TIMESTAMP.png to cwd\n",
             "Builtins:  sin cos tan asin acos atan atan2  sinh cosh tanh\n",
             "           sqrt cbrt abs sign floor ceil round\n",
             "           ln log log2 exp  min max pow hypot  gcd lcm\n",

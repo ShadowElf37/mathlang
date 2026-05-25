@@ -49,7 +49,7 @@ impl Env {
             "atan2", "min", "max", "pow", "hypot",
             "gcd", "lcm",
             "and", "or", "xor", "nand", "nor", "xnor", "shl", "shr",
-            "sum", "prod", "integral", "deriv", "map",
+            "sum", "prod", "integral", "deriv", "map", "graph",
         ] {
             vars.insert(name.to_string(), Val::Builtin(name.to_string()));
         }
@@ -68,7 +68,7 @@ pub fn is_protected(name: &str) -> bool {
         | "sign" | "signum" | "id" | "delta" | "fact" | "factorial" | "not" | "sinc"
         | "min" | "max" | "pow" | "hypot" | "gcd" | "lcm"
         | "and" | "or" | "xor" | "nand" | "nor" | "xnor" | "shl" | "shr"
-        | "sum" | "prod" | "integral" | "deriv" | "map"
+        | "sum" | "prod" | "integral" | "deriv" | "map" | "graph"
     )
 }
 
@@ -535,6 +535,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                     "prod"     => return eval_agg(arg_exprs, env, true),
                     "integral" => return eval_integral(arg_exprs, env),
                     "deriv"    => return eval_deriv(arg_exprs, env),
+                    "graph" => return crate::graph::eval_graph(arg_exprs, env),
                     "map" => {
                         if arg_exprs.len() != 2 {
                             return Err("map(f, tuple) expects 2 args".into());
