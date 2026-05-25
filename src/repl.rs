@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use crate::lexer::Lexer;
 use crate::ast::Def;
 use crate::parser::Parser;
-use crate::eval::{Val, Env, eval, fmt_val};
+use crate::eval::{Val, Env, eval, fmt_val, is_protected};
 
 pub const BUILTIN_FNS: &[&str] = &[
     "id", "fact", "factorial", "delta",
@@ -15,9 +15,10 @@ pub const BUILTIN_FNS: &[&str] = &[
     "min", "max", "pow", "hypot", "gcd", "lcm",
     "and", "or", "xor", "nand", "nor", "xnor", "not", "shl", "shr",
     "sum", "prod", "integral", "deriv", "map",
+    "sinc",
 ];
 
-pub const BUILTIN_CONSTS: &[&str] = &["pi", "e", "tau", "phi", "inf", "i"];
+pub const BUILTIN_CONSTS: &[&str] = &["pi", "e", "phi", "inf", "i"];
 
 // ── REPL helper ───────────────────────────────────────────────────────────────
 
@@ -33,8 +34,9 @@ impl MathHelper {
     fn update(&self, env: &Env) {
         let mut n = self.user_names.borrow_mut();
         n.clear();
-        n.extend(env.fns.keys().cloned());
-        n.extend(env.vars.keys().filter(|k| !BUILTIN_CONSTS.contains(&k.as_str())).cloned());
+        n.extend(env.vars.keys().filter(|k| {
+            !BUILTIN_CONSTS.contains(&k.as_str()) && !BUILTIN_FNS.contains(&k.as_str())
+        }).cloned());
     }
 }
 
@@ -150,10 +152,14 @@ pub fn eval_line(line: &str, env: &mut Env, repl: bool) -> bool {
     for def in &defs {
         match def {
             Def::Var(name, expr) => {
+                if is_protected(name) {
+                    eprintln!("error: cannot redefine built-in '{name}'");
+                    return false;
+                }
                 let fvars = crate::eval::free_vars(expr, env);
                 if !fvars.is_empty() {
                     // Implicit function: f = x^2 stored as Val::Fn(["x"], x^2)
-                    env.vars.insert(name.clone(), crate::eval::Val::Fn(fvars, expr.clone()));
+                    env.vars.insert(name.clone(), crate::eval::Val::Fn(fvars, expr.clone(), env.vars.clone()));
                 } else {
                     match eval(expr, env) {
                         Ok(v) => { env.vars.insert(name.clone(), v); }
@@ -162,7 +168,14 @@ pub fn eval_line(line: &str, env: &mut Env, repl: bool) -> bool {
                 }
             }
             Def::Func(name, params, body) => {
-                env.fns.insert(name.clone(), (params.clone(), body.clone()));
+                if is_protected(name) {
+                    eprintln!("error: cannot redefine built-in '{name}'");
+                    return false;
+                }
+                let mut captured = env.vars.clone();
+                let fn_val = Val::Fn(params.clone(), body.clone(), captured.clone());
+                captured.insert(name.clone(), fn_val);
+                env.vars.insert(name.clone(), Val::Fn(params.clone(), body.clone(), captured));
             }
         }
     }
@@ -185,15 +198,12 @@ pub fn eval_line(line: &str, env: &mut Env, repl: bool) -> bool {
 pub fn show_defs(env: &Env) {
     let mut items: Vec<(String, String)> = vec![];
     for (k, v) in &env.vars {
-        if BUILTIN_CONSTS.contains(&k.as_str()) || k == "result" { continue; }
+        if BUILTIN_CONSTS.contains(&k.as_str()) || BUILTIN_FNS.contains(&k.as_str()) || k == "result" { continue; }
         let display = match v {
-            Val::Fn(params, _) => format!("fn({}) = …", params.join(", ")),
+            Val::Fn(params, _, _) => format!("fn({}) = …", params.join(", ")),
             _ => fmt_val(v),
         };
         items.push((k.clone(), display));
-    }
-    for (k, (params, _)) in &env.fns {
-        items.push((k.clone(), format!("fn({}) = …", params.join(", "))));
     }
     items.sort_by(|(a,_),(b,_)| a.cmp(b));
     if items.is_empty() { println!("(nothing defined)"); }
@@ -230,7 +240,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
         "help" => print!(concat!(
             "Commands:  !help  !import <file>  !defs  !clear\n",
             "Init file: ~/.mathlangrc (auto-imported on start; override with $MATHLANG_INIT)\n",
-            "Exit:      q / quit / exit / Ctrl-D\n\n",
+            "Exit:      quit / exit / Ctrl-D\n\n",
             "Syntax:    x = 3              variable\n",
             "           f(x) = x^2         named function\n",
             "           f = x -> x^2       lambda (first-class)\n",
@@ -252,12 +262,22 @@ fn bang_command(cmd: &str, env: &mut Env) {
         "import" => {
             if arg.is_empty() { eprintln!("usage: !import <file>"); return; }
             let path = expand_path(arg);
-            import_file(&path, arg, env, true);
+            if std::path::Path::new(&path).exists() {
+                import_file(&path, arg, env, true);
+            } else {
+                let math_path = format!("{path}.math");
+                if std::path::Path::new(&math_path).exists() {
+                    import_file(&math_path, &math_path, env, true);
+                } else {
+                    import_file(&path, arg, env, true);
+                }
+            }
         }
         "defs" | "vars" | "fns" => show_defs(env),
         "clear" => {
-            let n = env.vars.iter().filter(|(k,_)| !BUILTIN_CONSTS.contains(&k.as_str())).count()
-                  + env.fns.len();
+            let n = env.vars.iter().filter(|(k,_)| {
+                !BUILTIN_CONSTS.contains(&k.as_str()) && !BUILTIN_FNS.contains(&k.as_str())
+            }).count();
             *env = Env::new();
             println!("cleared {n} definition(s)");
         }
@@ -286,7 +306,7 @@ pub fn run_repl() {
                 let line = line.trim().to_string();
                 if line.is_empty() { continue; }
                 let _ = rl.add_history_entry(&line);
-                if matches!(line.as_str(), "q" | "quit" | "exit") { break; }
+                if matches!(line.as_str(), "quit" | "exit") { break; }
                 if let Some(rest) = line.strip_prefix('!') {
                     bang_command(rest.trim_start(), &mut env);
                 } else {

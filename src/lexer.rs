@@ -59,9 +59,18 @@ impl<'a> Lexer<'a> {
                             self.bump();
                         }
                         if self.peek().map_or(false, |b| b == b'e' || b == b'E') {
-                            self.bump();
-                            if self.peek().map_or(false, |b| b == b'+' || b == b'-') { self.bump(); }
-                            while self.peek().map_or(false, |b| b.is_ascii_digit()) { self.bump(); }
+                            let next1 = self.src.get(self.pos + 1).copied();
+                            let next2 = self.src.get(self.pos + 2).copied();
+                            let valid_exp = match next1 {
+                                Some(b'+') | Some(b'-') => next2.map_or(false, |b| b.is_ascii_digit()),
+                                Some(b) => b.is_ascii_digit(),
+                                None => false,
+                            };
+                            if valid_exp {
+                                self.bump();
+                                if self.peek().map_or(false, |b| b == b'+' || b == b'-') { self.bump(); }
+                                while self.peek().map_or(false, |b| b.is_ascii_digit()) { self.bump(); }
+                            }
                         }
                         let s = std::str::from_utf8(&self.src[start..self.pos]).unwrap();
                         let n: f64 = s.parse().unwrap();

@@ -111,6 +111,9 @@ impl Parser {
             if *self.peek() == Token::Semicolon { self.bump(); } else { break; }
         }
         let exprs = if *self.peek() == Token::Eof { vec![] } else { self.parse_expr_list()? };
+        if *self.peek() != Token::Eof {
+            return Err(format!("unexpected token: {:?}", self.peek()));
+        }
         Ok((defs, exprs))
     }
 
@@ -351,7 +354,7 @@ impl Parser {
                         }
                     }
                     self.eat(&Token::RParen)?;
-                    Ok(Expr::Call(name, args))
+                    Ok(Expr::Apply(Box::new(Expr::Var(name)), args))
                 } else {
                     Ok(Expr::Var(name))
                 }

@@ -8,17 +8,19 @@ use crate::ast::{Expr, BlockStmt, Op, Def};
 pub enum Val {
     Num(f64),
     Complex(f64, f64),
-    Fn(Vec<String>, Expr),
+    Fn(Vec<String>, Expr, HashMap<String, Val>),
+    Builtin(String),
     Tuple(Vec<Val>),
 }
 
 impl Val {
     pub fn num(self, ctx: &str) -> Result<f64, String> {
         match self {
-            Val::Num(n)      => Ok(n),
-            Val::Complex(..) => Err(format!("{ctx}: expected a real number, got complex")),
-            Val::Fn(..)      => Err(format!("{ctx}: expected a number, got a function")),
-            Val::Tuple(..)   => Err(format!("{ctx}: expected a number, got a tuple")),
+            Val::Num(n)        => Ok(n),
+            Val::Complex(..)   => Err(format!("{ctx}: expected a real number, got complex")),
+            Val::Fn(..)        => Err(format!("{ctx}: expected a number, got a function")),
+            Val::Builtin(n)    => Err(format!("{ctx}: expected a number, got builtin '{n}'")),
+            Val::Tuple(..)     => Err(format!("{ctx}: expected a number, got a tuple")),
         }
     }
 }
@@ -28,21 +30,47 @@ impl Val {
 #[derive(Clone)]
 pub struct Env {
     pub vars: HashMap<String, Val>,
-    pub fns:  HashMap<String, (Vec<String>, Expr)>,
 }
 
 impl Env {
     pub fn new() -> Self {
         let mut vars = HashMap::new();
-        let num = |n: f64| Val::Num(n);
-        vars.insert("pi".into(),  num(std::f64::consts::PI));
-        vars.insert("e".into(),   num(std::f64::consts::E));
-        vars.insert("tau".into(), num(std::f64::consts::TAU));
-        vars.insert("phi".into(), num(1.618033988749895));
-        vars.insert("inf".into(), num(f64::INFINITY));
+        vars.insert("pi".into(),  Val::Num(std::f64::consts::PI));
+        vars.insert("e".into(),   Val::Num(std::f64::consts::E));
+        vars.insert("phi".into(), Val::Num(1.618033988749895));
+        vars.insert("inf".into(), Val::Num(f64::INFINITY));
         vars.insert("i".into(),   Val::Complex(0.0, 1.0));
-        Self { vars, fns: HashMap::new() }
+        for name in &[
+            "abs", "re", "im", "arg", "conj", "sqrt", "exp", "ln",
+            "sin", "cos", "tan", "asin", "acos", "atan",
+            "sinh", "cosh", "tanh", "cbrt",
+            "floor", "ceil", "round",
+            "log", "log10", "log2",
+            "sign", "signum", "id", "delta", "fact", "factorial", "not", "sinc",
+            "atan2", "min", "max", "pow", "hypot",
+            "gcd", "lcm",
+            "and", "or", "xor", "nand", "nor", "xnor", "shl", "shr",
+            "sum", "prod", "integral", "deriv", "map",
+        ] {
+            vars.insert(name.to_string(), Val::Builtin(name.to_string()));
+        }
+        Self { vars }
     }
+}
+
+pub fn is_protected(name: &str) -> bool {
+    matches!(name,
+        "pi" | "e" | "phi" | "inf" | "i"
+        | "abs" | "re" | "im" | "arg" | "conj" | "sqrt" | "exp" | "ln"
+        | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
+        | "sinh" | "cosh" | "tanh" | "cbrt"
+        | "floor" | "ceil" | "round"
+        | "log" | "log10" | "log2"
+        | "sign" | "signum" | "id" | "delta" | "fact" | "factorial" | "not" | "sinc"
+        | "min" | "max" | "pow" | "hypot" | "gcd" | "lcm"
+        | "and" | "or" | "xor" | "nand" | "nor" | "xnor" | "shl" | "shr"
+        | "sum" | "prod" | "integral" | "deriv" | "map"
+    )
 }
 
 // ── Output formatting ─────────────────────────────────────────────────────────
@@ -68,7 +96,8 @@ pub fn fmt_val(v: &Val) -> String {
                 format!("{re} + {im}i")
             }
         }
-        Val::Fn(params, _) => format!("<fn {} -> ...>", params.join(", ")),
+        Val::Fn(params, _, _) => format!("<fn({}) = …>", params.join(", ")),
+        Val::Builtin(name) => format!("<builtin {name}>"),
         Val::Tuple(items) => format!("({})", items.iter().map(fmt_val).collect::<Vec<_>>().join(", ")),
     }
 }
@@ -90,6 +119,7 @@ fn to_complex(v: Val) -> Result<(f64, f64), String> {
         Val::Num(n)        => Ok((n, 0.0)),
         Val::Complex(a, b) => Ok((a, b)),
         Val::Fn(..)        => Err("expected a number, got a function".into()),
+        Val::Builtin(n)    => Err(format!("expected a number, got builtin '{n}'")),
         Val::Tuple(..)     => Err("expected a number, got a tuple".into()),
     }
 }
@@ -121,6 +151,145 @@ fn lcm(a: u64, b: u64) -> u64 {
     if a == 0 || b == 0 { 0 } else { a / gcd(a, b) * b }
 }
 
+// ── Broadcasting ──────────────────────────────────────────────────────────────
+
+fn broadcast1(v: Val, f: impl Fn(Val) -> Result<Val, String>) -> Result<Val, String> {
+    match v {
+        Val::Tuple(items) => Ok(Val::Tuple(
+            items.into_iter().map(f).collect::<Result<_, _>>()?
+        )),
+        other => f(other),
+    }
+}
+
+// ── Builtin dispatch ──────────────────────────────────────────────────────────
+
+pub fn eval_builtin(name: &str, vals: Vec<Val>, _env: &Env) -> Result<Val, String> {
+    macro_rules! b1 {
+        ($closure:expr) => {{
+            arity(name, 1, vals.len())?;
+            broadcast1(vals.into_iter().next().unwrap(), $closure)
+        }};
+    }
+    macro_rules! f1 {
+        ($method:ident) => {{
+            arity(name, 1, vals.len())?;
+            broadcast1(vals.into_iter().next().unwrap(), |v| Ok(Val::Num(v.num(name)?.$method())))
+        }};
+    }
+
+    match name {
+        // ── Complex-capable 1-arg ─────────────────────────────────────────────
+        "abs"  => b1!(|v| match v {
+            Val::Num(n)        => Ok(Val::Num(n.abs())),
+            Val::Complex(a, b) => Ok(Val::Num((a*a + b*b).sqrt())),
+            _ => Err(format!("{name}: expected a number")),
+        }),
+        "re"   => b1!(|v| {
+            let (a, _) = to_complex(v)?; Ok(Val::Num(a))
+        }),
+        "im"   => b1!(|v| {
+            let (_, b) = to_complex(v)?; Ok(Val::Num(b))
+        }),
+        "arg"  => b1!(|v| {
+            let (a, b) = to_complex(v)?;
+            Ok(Val::Num(if b == 0.0 { if a >= 0.0 { 0.0 } else { std::f64::consts::PI } } else { b.atan2(a) }))
+        }),
+        "conj" => b1!(|v| {
+            let (a, b) = to_complex(v)?; Ok(make_complex(a, -b))
+        }),
+        "sqrt" => b1!(|v| match v {
+            Val::Num(n) if n >= 0.0 => Ok(Val::Num(n.sqrt())),
+            Val::Num(n)             => Ok(Val::Complex(0.0, (-n).sqrt())),
+            Val::Complex(a, b) => {
+                let r = (a*a + b*b).sqrt().sqrt();
+                let theta = b.atan2(a) / 2.0;
+                Ok(make_complex(r * theta.cos(), r * theta.sin()))
+            }
+            _ => Err(format!("{name}: expected a number")),
+        }),
+        "exp"  => b1!(|v| {
+            let (a, b) = to_complex(v)?;
+            let m = a.exp();
+            Ok(make_complex(m * b.cos(), m * b.sin()))
+        }),
+        "ln"   => b1!(|v| match v {
+            Val::Num(n) if n >= 0.0 => Ok(Val::Num(n.ln())),
+            Val::Num(n)             => Ok(make_complex((-n).ln(), std::f64::consts::PI)),
+            Val::Complex(a, b)      => Ok(make_complex((a*a+b*b).sqrt().ln(), b.atan2(a))),
+            _ => Err(format!("{name}: expected a number")),
+        }),
+
+        // ── Real 1-arg ────────────────────────────────────────────────────────
+        "sin" => b1!(|v| {
+            let (x, y) = to_complex(v)?;
+            Ok(make_complex(x.sin() * y.cosh(), x.cos() * y.sinh()))
+        }),
+        "cos" => b1!(|v| {
+            let (x, y) = to_complex(v)?;
+            Ok(make_complex(x.cos() * y.cosh(), -x.sin() * y.sinh()))
+        }),
+        "tan" => b1!(|v| {
+            let (x, y) = to_complex(v)?;
+            let (sr, si) = (x.sin() * y.cosh(), x.cos() * y.sinh());
+            let (cr, ci) = (x.cos() * y.cosh(), -x.sin() * y.sinh());
+            let d = cr * cr + ci * ci;
+            if d == 0.0 { return Err("tan: undefined (cosine is zero)".into()); }
+            Ok(make_complex((sr*cr + si*ci)/d, (si*cr - sr*ci)/d))
+        }),
+        "sinc" => b1!(|v| {
+            let (x, y) = to_complex(v)?;
+            if x == 0.0 && y == 0.0 { return Ok(Val::Num(1.0)); }
+            let (sr, si) = (x.sin() * y.cosh(), x.cos() * y.sinh());
+            let d = x * x + y * y;
+            Ok(make_complex((sr*x + si*y)/d, (si*x - sr*y)/d))
+        }),
+        "asin"   => f1!(asin),  "acos"   => f1!(acos),  "atan" => f1!(atan),
+        "sinh"   => f1!(sinh),  "cosh"   => f1!(cosh),  "tanh" => f1!(tanh),
+        "cbrt"   => f1!(cbrt),
+        "floor"  => f1!(floor), "ceil"   => f1!(ceil),  "round" => f1!(round),
+        "log" | "log10" => f1!(log10),
+        "log2"   => f1!(log2),
+        "sign" | "signum" => f1!(signum),
+        "id"     => b1!(|v| { v.num("id").map(Val::Num) }),
+        "delta"  => b1!(|v| Ok(Val::Num(if v.num("delta")? == 0.0 { 1.0 } else { 0.0 }))),
+        "not"    => b1!(|v| Ok(Val::Num(!int(v.num("not")?) as f64))),
+        "fact" | "factorial" => b1!(|v| {
+            let n = v.num("fact")? as u64;
+            Ok(Val::Num((1..=n).map(|k| k as f64).product()))
+        }),
+
+        // ── Real 2-arg ────────────────────────────────────────────────────────
+        "atan2" | "min" | "max" | "pow" | "hypot" |
+        "gcd" | "lcm" | "and" | "or" | "xor" | "nand" | "nor" | "xnor" | "shl" | "shr" => {
+            arity(name, 2, vals.len())?;
+            let mut it = vals.into_iter();
+            let a = it.next().unwrap().num(name)?;
+            let b = it.next().unwrap().num(name)?;
+            match name {
+                "atan2"  => Ok(Val::Num(a.atan2(b))),
+                "min"    => Ok(Val::Num(a.min(b))),
+                "max"    => Ok(Val::Num(a.max(b))),
+                "pow"    => Ok(Val::Num(a.powf(b))),
+                "hypot"  => Ok(Val::Num(a.hypot(b))),
+                "gcd"    => Ok(Val::Num(gcd(int(a).unsigned_abs(), int(b).unsigned_abs()) as f64)),
+                "lcm"    => Ok(Val::Num(lcm(int(a).unsigned_abs(), int(b).unsigned_abs()) as f64)),
+                "and"    => Ok(Val::Num((int(a) & int(b)) as f64)),
+                "or"     => Ok(Val::Num((int(a) | int(b)) as f64)),
+                "xor"    => Ok(Val::Num((int(a) ^ int(b)) as f64)),
+                "nand"   => Ok(Val::Num((!(int(a) & int(b))) as f64)),
+                "nor"    => Ok(Val::Num((!(int(a) | int(b))) as f64)),
+                "xnor"   => Ok(Val::Num((!(int(a) ^ int(b))) as f64)),
+                "shl"    => Ok(Val::Num(int(a).wrapping_shl(int(b) as u32) as f64)),
+                "shr"    => Ok(Val::Num(int(a).wrapping_shr(int(b) as u32) as f64)),
+                _        => unreachable!(),
+            }
+        }
+
+        _ => Err(format!("undefined function: {name}")),
+    }
+}
+
 // ── Free variable collection ──────────────────────────────────────────────────
 
 pub fn free_vars(expr: &Expr, env: &Env) -> Vec<String> {
@@ -133,25 +302,19 @@ pub fn free_vars(expr: &Expr, env: &Env) -> Vec<String> {
 fn collect_free(expr: &Expr, env: &Env, seen: &mut HashSet<String>, out: &mut Vec<String>) {
     match expr {
         Expr::Var(n) => {
-            if !env.vars.contains_key(n) && !env.fns.contains_key(n) && !seen.contains(n) {
+            if !env.vars.contains_key(n) && !seen.contains(n) {
                 seen.insert(n.clone());
                 out.push(n.clone());
             }
         }
         Expr::Num(_) | Expr::ImagLit(_) => {}
         Expr::Lambda(params, body) => {
-            // params are bound inside the lambda
             let mut inner_env = env.clone();
             for p in params { inner_env.vars.insert(p.clone(), Val::Num(0.0)); }
             collect_free(body, &inner_env, seen, out);
         }
         Expr::Neg(e) => collect_free(e, env, seen, out),
         Expr::BinOp(l, _, r) => { collect_free(l, env, seen, out); collect_free(r, env, seen, out); }
-        Expr::Call(name, args) => {
-            // name is a known fn or builtin — don't add it; recurse into args
-            let _ = name;
-            for a in args { collect_free(a, env, seen, out); }
-        }
         Expr::Apply(f, args) => {
             collect_free(f, env, seen, out);
             for a in args { collect_free(a, env, seen, out); }
@@ -170,7 +333,7 @@ fn collect_free(expr: &Expr, env: &Env, seen: &mut HashSet<String>, out: &mut Ve
                         let mut fe = inner.clone();
                         for p in ps { fe.vars.insert(p.clone(), Val::Num(0.0)); }
                         collect_free(b, &fe, seen, out);
-                        inner.fns.insert(n.clone(), (ps.clone(), b.clone()));
+                        inner.vars.insert(n.clone(), Val::Fn(ps.clone(), b.clone(), HashMap::new()));
                     }
                     BlockStmt::Expr(e) => collect_free(e, &inner, seen, out),
                 }
@@ -181,24 +344,22 @@ fn collect_free(expr: &Expr, env: &Env, seen: &mut HashSet<String>, out: &mut Ve
 
 // ── Value application ─────────────────────────────────────────────────────────
 
-// Apply a Val (fn, scalar, tuple) to a list of Val args with full type dispatch.
 pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
     match f {
-        Val::Fn(ref params, ref body) => {
+        Val::Builtin(ref name) => eval_builtin(name, args, env),
+        Val::Fn(ref params, ref body, ref captured) => {
             let n = params.len();
             let k = args.len();
             // All args are Fn → compose (only single arg supported)
             if k == 1 {
-                if let Val::Fn(_, _) = &args[0] {
+                if let Val::Fn(_, _, _) = &args[0] {
                     let g = args.into_iter().next().unwrap();
-                    // compose: new fn whose body calls f on the result of g
-                    // We create a synthetic Val::Fn that captures both
                     return Ok(compose_fns(f, g));
                 }
                 // Single n-tuple arg → destructure into n params
                 if let Val::Tuple(ref items) = args[0] {
                     if items.len() == n {
-                        let mut local = env.clone();
+                        let mut local = make_local(env, captured);
                         for (p, v) in params.iter().zip(items.iter()) {
                             local.vars.insert(p.clone(), v.clone());
                         }
@@ -207,7 +368,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                 }
                 // Single scalar arg with 1-param fn → direct apply
                 if n == 1 {
-                    let mut local = env.clone();
+                    let mut local = make_local(env, captured);
                     local.vars.insert(params[0].clone(), args.into_iter().next().unwrap());
                     return eval(body, &local);
                 }
@@ -218,7 +379,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
             if all_n_tuples {
                 let results: Result<Vec<Val>, _> = args.into_iter().map(|a| {
                     if let Val::Tuple(items) = a {
-                        let mut local = env.clone();
+                        let mut local = make_local(env, captured);
                         for (p, v) in params.iter().zip(items) { local.vars.insert(p.clone(), v); }
                         eval(body, &local)
                     } else { unreachable!() }
@@ -228,7 +389,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
             // k scalar args, 1-param fn → map → k-tuple
             if n == 1 {
                 let results: Result<Vec<Val>, _> = args.into_iter().map(|a| {
-                    let mut local = env.clone();
+                    let mut local = make_local(env, captured);
                     local.vars.insert(params[0].clone(), a);
                     eval(body, &local)
                 }).collect();
@@ -236,7 +397,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
             }
             // k == n scalar args → direct apply
             if k == n {
-                let mut local = env.clone();
+                let mut local = make_local(env, captured);
                 for (p, v) in params.iter().zip(args) { local.vars.insert(p.clone(), v); }
                 return eval(body, &local);
             }
@@ -245,13 +406,11 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
         Val::Num(s) => {
             if args.len() == 1 {
                 match &args[0] {
-                    Val::Fn(_, _) => {
-                        // scalar × fn → scale: new fn z -> s * g(z)
+                    Val::Fn(_, _, _) => {
                         return Ok(scale_fn(s, args.into_iter().next().unwrap()));
                     }
                     Val::Num(n) => return Ok(Val::Num(s * n)),
                     Val::Tuple(items) => {
-                        // scalar × tuple → element-wise scale
                         let scaled: Vec<Val> = items.iter().map(|v| match v {
                             Val::Num(n) => Val::Num(s * n),
                             _ => v.clone(),
@@ -259,9 +418,9 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                         return Ok(Val::Tuple(scaled));
                     }
                     Val::Complex(a, b) => return Ok(make_complex(s * a, s * b)),
+                    Val::Builtin(_) => return Err("cannot scale a builtin function".into()),
                 }
             }
-            // scalar × multiple scalars → multiply all
             let nums: Result<Vec<f64>, _> = args.into_iter().map(|v| v.num("scalar-apply")).collect();
             Ok(Val::Num(nums?.iter().fold(s, |acc, n| acc * n)))
         }
@@ -282,55 +441,40 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
     }
 }
 
+// Three-layer env merge: global scope → closure's captured env → param bindings.
+// Global scope provides forward-declared names; captured env provides lexical closure.
+fn make_local(global: &Env, captured: &HashMap<String, Val>) -> Env {
+    let mut vars = global.vars.clone();
+    vars.extend(captured.iter().map(|(k, v)| (k.clone(), v.clone())));
+    Env { vars }
+}
+
 fn compose_fns(f: Val, g: Val) -> Val {
-    // Returns a Val::Fn that is the composition f∘g.
-    // We represent it as a 1-param fn stored in env via a special approach:
-    // Since we can't close over Val::Fn in Expr, we use a trick:
-    // Store f and g as vars "__compose_f__" and "__compose_g__" in a synthetic env,
-    // but that would require env access. Instead we use Lambda with Apply in the body.
-    // Actually the cleanest representation: return a Rust closure... but Val::Fn only stores Expr.
-    // Best approach: store the composed fn as Val::Fn with a synthetic param and Apply body.
-    // But Apply is an Expr node that contains Expr::Var refs, not Val refs.
-    // Solution: wrap g in a lambda if it's a Val::Fn, store both under gensym names,
-    // but we have no way to inject Vals into the Expr tree.
-    //
-    // Practical solution: represent composition as a Val::Fn whose body is Expr::Apply,
-    // where we inject the closed-over vals via the env when evaluating.
-    // We use a special trick: store f as a lambda in the env under a gensym key.
-    // But we don't have mutable env access here.
-    //
-    // Simplest correct solution: use a captured-closure approach by creating an Expr::Apply
-    // of two Expr::Lambda nodes derived from f and g.
-    let f_expr = val_to_lambda_expr(f, "__z__");
-    let g_expr = val_to_lambda_expr(g, "__z__");
-    // compose: z -> f(g(z))
-    // f_expr is a lambda (or var), g_expr is a lambda (or var)
-    // Body: Apply(f_expr, [Apply(g_expr, [Var("__z__")])])
-    let inner = Expr::Apply(Box::new(g_expr), vec![Expr::Var("__z__".into())]);
-    let outer = Expr::Apply(Box::new(f_expr), vec![inner]);
-    Val::Fn(vec!["__z__".into()], outer)
+    let mut captured = HashMap::new();
+    captured.insert("__f__".into(), f);
+    captured.insert("__g__".into(), g);
+    let body = Expr::Apply(
+        Box::new(Expr::Var("__f__".into())),
+        vec![Expr::Apply(
+            Box::new(Expr::Var("__g__".into())),
+            vec![Expr::Var("__z__".into())],
+        )],
+    );
+    Val::Fn(vec!["__z__".into()], body, captured)
 }
 
 fn scale_fn(s: f64, g: Val) -> Val {
-    let g_expr = val_to_lambda_expr(g, "__z__");
-    let call = Expr::Apply(Box::new(g_expr), vec![Expr::Var("__z__".into())]);
-    let body = Expr::BinOp(Box::new(Expr::Num(s)), Op::Mul, Box::new(call));
-    Val::Fn(vec!["__z__".into()], body)
-}
-
-fn val_to_lambda_expr(v: Val, param: &str) -> Expr {
-    match v {
-        Val::Fn(params, body) => Expr::Lambda(params, Box::new(body)),
-        Val::Num(n) => Expr::Num(n),
-        Val::Complex(a, b) => {
-            // represent as a+b*i — but for composition purposes just use real part
-            // In practice composing with a complex constant is unusual; do best effort
-            let _ = b;
-            let _ = param;
-            Expr::Num(a)
-        }
-        Val::Tuple(_) => Expr::Num(0.0), // degenerate
-    }
+    let mut captured = HashMap::new();
+    captured.insert("__g__".into(), g);
+    let body = Expr::BinOp(
+        Box::new(Expr::Num(s)),
+        Op::Mul,
+        Box::new(Expr::Apply(
+            Box::new(Expr::Var("__g__".into())),
+            vec![Expr::Var("__z__".into())],
+        )),
+    );
+    Val::Fn(vec!["__z__".into()], body, captured)
 }
 
 fn binop_tuple(lv: Val, op: &Op, rv: Val, _env: &Env) -> Result<Val, String> {
@@ -394,7 +538,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
     match expr {
         Expr::Num(n)      => Ok(Val::Num(*n)),
         Expr::ImagLit(n)  => Ok(if *n == 0.0 { Val::Num(0.0) } else { Val::Complex(0.0, *n) }),
-        Expr::Lambda(p, b) => Ok(Val::Fn(p.clone(), *b.clone())),
+        Expr::Lambda(p, b) => Ok(Val::Fn(p.clone(), *b.clone(), env.vars.clone())),
         Expr::Tuple(exprs) => {
             let vals: Result<Vec<Val>, _> = exprs.iter().map(|e| eval(e, env)).collect();
             Ok(Val::Tuple(vals?))
@@ -415,11 +559,20 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                 match stmt {
                     BlockStmt::Def(def) => match def {
                         Def::Var(name, expr) => {
+                            if is_protected(name) {
+                                return Err(format!("cannot redefine built-in '{name}'"));
+                            }
                             let v = eval(expr, &child)?;
                             child.vars.insert(name.clone(), v);
                         }
                         Def::Func(name, params, body) => {
-                            child.fns.insert(name.clone(), (params.clone(), body.clone()));
+                            if is_protected(name) {
+                                return Err(format!("cannot redefine built-in '{name}'"));
+                            }
+                            let mut captured = child.vars.clone();
+                            let fn_val = Val::Fn(params.clone(), body.clone(), captured.clone());
+                            captured.insert(name.clone(), fn_val);
+                            child.vars.insert(name.clone(), Val::Fn(params.clone(), body.clone(), captured));
                         }
                     },
                     BlockStmt::Expr(e) => { last_val = eval(e, &child)?; }
@@ -428,11 +581,34 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
             Ok(last_val)
         }
         Expr::Apply(f_expr, arg_exprs) => {
+            // Special forms that need unevaluated Expr args (higher-order, still call_fn1-based)
+            if let Expr::Var(name) = f_expr.as_ref() {
+                match name.as_str() {
+                    "sum"      => return eval_agg(arg_exprs, env, false),
+                    "prod"     => return eval_agg(arg_exprs, env, true),
+                    "integral" => return eval_integral(arg_exprs, env),
+                    "deriv"    => return eval_deriv(arg_exprs, env),
+                    "map" => {
+                        if arg_exprs.len() != 2 {
+                            return Err("map(f, tuple) expects 2 args".into());
+                        }
+                        let items = match eval(&arg_exprs[1], env)? {
+                            Val::Tuple(items) => items,
+                            other => return Err(format!("map: second arg must be a tuple, got {}", fmt_val(&other))),
+                        };
+                        let results: Result<Vec<Val>, _> = items.into_iter()
+                            .map(|item| call_fn1(&arg_exprs[0], item, env))
+                            .collect();
+                        return Ok(Val::Tuple(results?));
+                    }
+                    _ => {}
+                }
+            }
             let f_val = eval(f_expr, env)?;
             let args: Result<Vec<Val>, _> = arg_exprs.iter().map(|a| eval(a, env)).collect();
             apply_val(f_val, args?, env)
         }
-        Expr::Var(n)      => env.vars.get(n).cloned()
+        Expr::Var(n) => env.vars.get(n).cloned()
             .ok_or_else(|| format!("undefined: {n}")),
         Expr::Neg(e) => match eval(e, env)? {
             Val::Num(n)        => Ok(Val::Num(-n)),
@@ -446,12 +622,11 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                     }).collect();
                 Ok(Val::Tuple(neg?))
             }
-            Val::Fn(..) => Err("unary minus: expected a number".into()),
+            Val::Fn(..) | Val::Builtin(_) => Err("unary minus: expected a number".into()),
         },
         Expr::BinOp(l, op, r) => {
             let lv = eval(l, env)?;
             let rv = eval(r, env)?;
-            // Tuple broadcasting: map op element-wise
             if matches!((&lv, &rv), (Val::Tuple(_), _) | (_, Val::Tuple(_))) {
                 return binop_tuple(lv, op, rv, env);
             }
@@ -479,160 +654,6 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                 }
                 Op::Pow      => Ok(complex_pow(la, lb, ra, rb)),
                 Op::FloorDiv | Op::Rem => Err("// and % not defined for complex numbers".into()),
-            }
-        }
-        Expr::Call(name, args) => {
-            // These receive raw Expr args so a fn arg isn't forced to f64
-            match name.as_str() {
-                "sum"      => return eval_agg(args, env, false),
-                "prod"     => return eval_agg(args, env, true),
-                "integral" => return eval_integral(args, env),
-                "deriv"    => return eval_deriv(args, env),
-                "map" => {
-                    if args.len() != 2 {
-                        return Err("map(f, tuple) expects 2 args".into());
-                    }
-                    let items = match eval(&args[1], env)? {
-                        Val::Tuple(items) => items,
-                        other => return Err(format!("map: second arg must be a tuple, got {}", fmt_val(&other))),
-                    };
-                    let results: Result<Vec<Val>, _> = items.into_iter()
-                        .map(|item| call_fn1(&args[0], item, env))
-                        .collect();
-                    return Ok(Val::Tuple(results?));
-                }
-                _ => {}
-            }
-
-            let vals: Result<Vec<Val>, _> = args.iter().map(|a| eval(a, env)).collect();
-            let vals = vals?;
-
-            if let Some((params, body)) = env.fns.get(name).cloned() {
-                return apply_val(Val::Fn(params, body), vals, env);
-            }
-
-            if let Some(Val::Fn(params, body)) = env.vars.get(name).cloned() {
-                return apply_val(Val::Fn(params, body), vals, env);
-            }
-
-            // Complex-capable builtins
-            macro_rules! cx1 {
-                ($vname:ident, $real_arm:expr, $cx_arm:expr) => {{
-                    arity(name, 1, vals.len())?;
-                    return Ok(match vals.into_iter().next().unwrap() {
-                        Val::Num($vname)        => $real_arm,
-                        Val::Complex($vname, _) => $cx_arm,
-                        Val::Fn(..) | Val::Tuple(..) => return Err(format!("{name}: expected a number")),
-                    });
-                }};
-            }
-            match name.as_str() {
-                "abs" => {
-                    arity(name, 1, vals.len())?;
-                    return Ok(match vals.into_iter().next().unwrap() {
-                        Val::Num(n)        => Val::Num(n.abs()),
-                        Val::Complex(a, b) => Val::Num((a*a + b*b).sqrt()),
-                        Val::Fn(..) | Val::Tuple(..) => return Err("abs: expected a number".into()),
-                    });
-                }
-                "re"  => cx1!(n, Val::Num(n), Val::Num(n)),
-                "im"  => {
-                    arity(name, 1, vals.len())?;
-                    return Ok(match vals.into_iter().next().unwrap() {
-                        Val::Num(_)        => Val::Num(0.0),
-                        Val::Complex(_, b) => Val::Num(b),
-                        Val::Fn(..) | Val::Tuple(..) => return Err("im: expected a number".into()),
-                    });
-                }
-                "arg" => {
-                    arity(name, 1, vals.len())?;
-                    return Ok(match vals.into_iter().next().unwrap() {
-                        Val::Num(n)        => Val::Num(if n >= 0.0 { 0.0 } else { std::f64::consts::PI }),
-                        Val::Complex(a, b) => Val::Num(b.atan2(a)),
-                        Val::Fn(..) | Val::Tuple(..) => return Err("arg: expected a number".into()),
-                    });
-                }
-                "conj" => {
-                    arity(name, 1, vals.len())?;
-                    return Ok(match vals.into_iter().next().unwrap() {
-                        Val::Num(n)        => Val::Num(n),
-                        Val::Complex(a, b) => make_complex(a, -b),
-                        Val::Fn(..) | Val::Tuple(..) => return Err("conj: expected a number".into()),
-                    });
-                }
-                "sqrt" => {
-                    arity(name, 1, vals.len())?;
-                    return Ok(match vals.into_iter().next().unwrap() {
-                        Val::Num(n) if n >= 0.0 => Val::Num(n.sqrt()),
-                        Val::Num(n)             => Val::Complex(0.0, (-n).sqrt()),
-                        Val::Complex(a, b) => {
-                            let r     = (a*a + b*b).sqrt().sqrt();
-                            let theta = b.atan2(a) / 2.0;
-                            make_complex(r * theta.cos(), r * theta.sin())
-                        }
-                        Val::Fn(..) | Val::Tuple(..) => return Err("sqrt: expected a number".into()),
-                    });
-                }
-                "exp" => {
-                    arity(name, 1, vals.len())?;
-                    return Ok(match vals.into_iter().next().unwrap() {
-                        Val::Num(n)        => Val::Num(n.exp()),
-                        Val::Complex(a, b) => { let m = a.exp(); make_complex(m*b.cos(), m*b.sin()) }
-                        Val::Fn(..) | Val::Tuple(..) => return Err("exp: expected a number".into()),
-                    });
-                }
-                "ln" => {
-                    arity(name, 1, vals.len())?;
-                    return Ok(match vals.into_iter().next().unwrap() {
-                        Val::Num(n) if n >= 0.0 => Val::Num(n.ln()),
-                        Val::Num(n)             => make_complex((-n).ln(), std::f64::consts::PI),
-                        Val::Complex(a, b)      => make_complex((a*a + b*b).sqrt().ln(), b.atan2(a)),
-                        Val::Fn(..) | Val::Tuple(..) => return Err("ln: expected a number".into()),
-                    });
-                }
-                _ => {}
-            }
-
-            // Real-only builtins
-            let v: Result<Vec<f64>, _> = vals.into_iter().map(|v| v.num(name)).collect();
-            let v = v?;
-            macro_rules! f1 { ($f:ident) => {{ arity(name,1,v.len())?; return Ok(Val::Num(v[0].$f())) }} }
-            macro_rules! f2 { ($e:expr)  => {{ arity(name,2,v.len())?; return Ok(Val::Num($e)) }} }
-            macro_rules! i2 { ($e:expr)  => {{ arity(name,2,v.len())?; return Ok(Val::Num(($e) as f64)) }} }
-            macro_rules! i1 { ($e:expr)  => {{ arity(name,1,v.len())?; return Ok(Val::Num(($e) as f64)) }} }
-            match name.as_str() {
-                "id"     => { arity(name,1,v.len())?; return Ok(Val::Num(v[0])); }
-                "delta"  => { arity(name,1,v.len())?; return Ok(Val::Num(if v[0] == 0.0 { 1.0 } else { 0.0 })); }
-                "fact" | "factorial" => {
-                    arity(name,1,v.len())?;
-                    let n = v[0] as u64;
-                    return Ok(Val::Num((1..=n).map(|k| k as f64).product()));
-                }
-                "sin"    => f1!(sin),   "cos"   => f1!(cos),   "tan"  => f1!(tan),
-                "asin"   => f1!(asin),  "acos"  => f1!(acos),  "atan" => f1!(atan),
-                "atan2"  => f2!(v[0].atan2(v[1])),
-                "sinh"   => f1!(sinh),  "cosh"  => f1!(cosh),  "tanh" => f1!(tanh),
-                "cbrt"   => f1!(cbrt),
-                "sign" | "signum" => f1!(signum),
-                "floor"  => f1!(floor), "ceil"  => f1!(ceil),  "round" => f1!(round),
-                "log" | "log10" => f1!(log10),
-                "log2"   => f1!(log2),
-                "min"    => f2!(v[0].min(v[1])),
-                "max"    => f2!(v[0].max(v[1])),
-                "pow"    => f2!(v[0].powf(v[1])),
-                "hypot"  => f2!(v[0].hypot(v[1])),
-                "gcd"    => i2!(gcd(int(v[0]).unsigned_abs(), int(v[1]).unsigned_abs())),
-                "lcm"    => i2!(lcm(int(v[0]).unsigned_abs(), int(v[1]).unsigned_abs())),
-                "and"    => i2!(int(v[0]) & int(v[1])),
-                "or"     => i2!(int(v[0]) | int(v[1])),
-                "xor"    => i2!(int(v[0]) ^ int(v[1])),
-                "nand"   => i2!(!(int(v[0]) & int(v[1]))),
-                "nor"    => i2!(!(int(v[0]) | int(v[1]))),
-                "xnor"   => i2!(!(int(v[0]) ^ int(v[1]))),
-                "not"    => i1!(!int(v[0])),
-                "shl"    => i2!(int(v[0]).wrapping_shl(int(v[1]) as u32)),
-                "shr"    => i2!(int(v[0]).wrapping_shr(int(v[1]) as u32)),
-                _ => return Err(format!("undefined function: {name}")),
             }
         }
     }
@@ -699,25 +720,28 @@ pub fn call_fn1(f_expr: &Expr, x: Val, env: &Env) -> Result<Val, String> {
             eval(body, &local)
         }
         Expr::Var(name) => {
-            if let Some(Val::Fn(params, body)) = env.vars.get(name).cloned() {
+            if let Some(Val::Fn(params, body, captured)) = env.vars.get(name).cloned() {
                 if params.len() != 1 {
                     return Err(format!("{name} must be a 1-arg function"));
                 }
-                let mut local = env.clone();
+                let mut local = make_local(env, &captured);
                 local.vars.insert(params[0].clone(), x);
                 return eval(&body, &local);
             }
-            if let Some((params, body)) = env.fns.get(name).cloned() {
-                if params.len() != 1 {
-                    return Err(format!("{name} must be a 1-arg function"));
-                }
-                let mut local = env.clone();
-                local.vars.insert(params[0].clone(), x);
-                return eval(&body, &local);
+            if let Some(Val::Builtin(bname)) = env.vars.get(name).cloned() {
+                return eval_builtin(&bname, vec![x], env);
             }
-            let xn = x.num(name)?;
-            eval(&Expr::Call(name.clone(), vec![Expr::Num(xn)]), env)
+            Err(format!("undefined function: {name}"))
         }
-        _ => Err("expected a function (e.g. x -> x^2 or a named fn)".into()),
+        _ => {
+            let fvars = free_vars(f_expr, env);
+            if fvars.len() == 1 {
+                let mut local = env.clone();
+                local.vars.insert(fvars[0].clone(), x);
+                eval(f_expr, &local)
+            } else {
+                Err("expected a function (e.g. x -> x^2 or a named fn)".into())
+            }
+        }
     }
 }

@@ -223,22 +223,22 @@ result = 10
 |---------|--------|
 | `!help` | show syntax reference |
 | `!defs` | list all user-defined names |
-| `!import <file>` | load a `.m` file into the current session |
+| `!import <file>` | load a `.math` file into the current session |
 | `!clear` | clear all user definitions |
 | `q` / `exit` | quit |
 
 ---
 
-## Init file and `.m` files
+## Init file and `.math` files
 
 Definitions in `~/.mathlangrc` are loaded automatically when the REPL starts.
-Set `MATHLANG_INIT=/path/to/file.m` to use a different file.
+Set `MATHLANG_INIT=/path/to/file.math` to use a different file.
 
-`.m` files are plain text, one definition per line. Lines starting with `#` are comments.
+`.math` files are plain text, one definition per line. Lines starting with `#` are comments.
 
-### `advanced.m`
+### `advanced.math`
 
-An included library (`advanced.m`) provides combinatorics, polynomial solvers, and more:
+An included library (`advanced.math`) provides combinatorics, polynomial solvers, and more:
 
 ```
 ncr(n,r)              — binomial coefficient
@@ -250,4 +250,4 @@ cubicRoot(a,b,c,d)    — 1 real root  of ax³+… (Cardano, disc < 0)
 solveQuartic(a,b,c,d,e) — 4 real roots of ax⁴+… (Ferrari's method)
 ```
 
-Load it with `!import advanced.m` in the REPL (or set it as your init file).
+Load it with `!import advanced.math` in the REPL (or set it as your init file).

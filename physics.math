@@ -32,4 +32,6 @@ alpha = 7.2973525693e-3  # fine-structure constant
 
 
 # harmonic oscillator solutions
-dampedOscillator(gamma, omega_0, x_0, v_0, t) = {disc = sqrt(gamma^2-omega_0^2); r_1 = -gamma + disc; r_2 = -gamma - disc; C_1 = (v_0-r_2*x_0)/(r_1-r_2); C_2 = (r_1*x_0 - v_0)/(r_1-r_2) : re(C_1 * exp(r_1 * t) + C_2 * exp(r_2 * t))}
+oscillator(gamma, omega_0, x_0, v_0, t) = {omega_d = sqrt(gamma^2-omega_0^2) : exp(-gamma*t) * (x_0 * cos(omega_d * t) + (v_0 + gamma * x_0) * t * sinc(omega_d * t))}
+
+oscillatorMBK(m, b, k, x_0, v_0, t) = oscillator(b/(2*m), sqrt(k/m), x_0, v_0, t)

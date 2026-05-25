@@ -5,7 +5,6 @@ pub enum Expr {
     Var(String),
     BinOp(Box<Expr>, Op, Box<Expr>),
     Neg(Box<Expr>),
-    Call(String, Vec<Expr>),
     Lambda(Vec<String>, Box<Expr>),
     Tuple(Vec<Expr>),
     Index(Box<Expr>, Box<Expr>),
