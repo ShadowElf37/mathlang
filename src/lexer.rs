@@ -3,7 +3,7 @@ pub enum Token {
     Num(f64), Imag(f64), Ident(String),
     Plus, Minus, Star, Slash, SlashSlash, Percent, Caret, StarStar,
     LParen, RParen, LBrace, RBrace, LBracket, RBracket,
-    Comma, Colon, Semicolon, Eq, Arrow,
+    Comma, Colon, Semicolon, Eq, Arrow, DotDot,
     Eof,
 }
 
@@ -53,10 +53,17 @@ impl<'a> Lexer<'a> {
                     b':' => { self.bump(); out.push(Token::Colon); }
                     b';' => { self.bump(); out.push(Token::Semicolon); }
                     b'=' => { self.bump(); out.push(Token::Eq); }
-                    b if b.is_ascii_digit() || b == b'.' => {
+                    b'.' => {
+                        self.bump();
+                        if self.peek() == Some(b'.') { self.bump(); out.push(Token::DotDot); }
+                        else { eprintln!("unexpected '.'"); }
+                    }
+                    b if b.is_ascii_digit() || (b == b'.' && self.src.get(self.pos + 1).map_or(false, |&n| n.is_ascii_digit())) => {
                         let start = self.pos;
-                        while self.peek().map_or(false, |b| b.is_ascii_digit() || b == b'.') {
+                        while self.peek().map_or(false, |b| b.is_ascii_digit()) { self.bump(); }
+                        if self.peek() == Some(b'.') && self.src.get(self.pos + 1).map_or(false, |&n| n.is_ascii_digit()) {
                             self.bump();
+                            while self.peek().map_or(false, |b| b.is_ascii_digit()) { self.bump(); }
                         }
                         if self.peek().map_or(false, |b| b == b'e' || b == b'E') {
                             let next1 = self.src.get(self.pos + 1).copied();

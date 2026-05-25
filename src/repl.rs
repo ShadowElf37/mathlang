@@ -73,7 +73,7 @@ fn highlight_line(line: &str, user: &[String]) -> String {
         }
         if i + 1 < b.len() {
             match (b[i], b[i+1]) {
-                (b'-', b'>') | (b'*', b'*') | (b'/', b'/') => {
+                (b'-', b'>') | (b'*', b'*') | (b'/', b'/') | (b'.', b'.') => {
                     out.push_str(&format!("\x1b[33m{}\x1b[0m", &line[i..i+2]));
                     i += 2; continue;
                 }
@@ -243,6 +243,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "           {{disc=b^2-4*a*c : (-b+sqrt(disc))/(2*a), (-b-sqrt(disc))/(2*a)}}\n",
             "                              block with local defs, returns tuple\n\n",
             "Tuples:    (1,2,3)   (a,b)[0]   map(f, tuple)\n",
+            "Ranges:    (0..10)   (10..0)    (a..b)\n",
             "Operators: + - * / // % ^ **   -> (lambda)\n",
             "Aggregates: sum(f,a,b)  prod(f,a,b)  integral(f,a,b[,n])  deriv(f,x[,dx])\n",
             "Builtins:  sin cos tan asin acos atan atan2  sinh cosh tanh\n",

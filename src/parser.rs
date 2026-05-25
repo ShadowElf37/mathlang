@@ -323,6 +323,12 @@ impl Parser {
                     Ok(Expr::Lambda(params, self.expr()?.into()))
                 } else {
                     let first = self.expr()?;
+                    if *self.peek() == Token::DotDot {
+                        self.bump();
+                        let last = self.expr()?;
+                        self.eat(&Token::RParen)?;
+                        return Ok(Expr::Range(Box::new(first), Box::new(last)));
+                    }
                     if *self.peek() == Token::Comma {
                         let mut items = vec![first];
                         while *self.peek() == Token::Comma {

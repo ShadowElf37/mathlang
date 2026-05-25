@@ -10,6 +10,7 @@ pub enum Expr {
     Index(Box<Expr>, Box<Expr>),
     Block(Vec<BlockStmt>),
     Apply(Box<Expr>, Vec<Expr>),
+    Range(Box<Expr>, Box<Expr>),
 }
 
 #[derive(Debug, Clone)]

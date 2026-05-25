@@ -555,6 +555,16 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
             let args: Result<Vec<Val>, _> = arg_exprs.iter().map(|a| eval(a, env)).collect();
             apply_val(f_val, args?, env)
         }
+        Expr::Range(start, end) => {
+            let a = eval(start, env)?.num("range")? as i64;
+            let b = eval(end, env)?.num("range")? as i64;
+            let items: Vec<Val> = if a <= b {
+                (a..=b).map(|n| Val::Num(n as f64)).collect()
+            } else {
+                (b..=a).rev().map(|n| Val::Num(n as f64)).collect()
+            };
+            Ok(Val::Tuple(items))
+        }
         Expr::Var(n) => env.vars.get(n).cloned()
             .ok_or_else(|| format!("undefined: {n}")),
         Expr::Neg(e) => match eval(e, env)? {
