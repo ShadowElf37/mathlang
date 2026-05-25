@@ -23,7 +23,7 @@ impl<'a> Lexer<'a> {
         loop {
             while self.peek().map_or(false, |b| b.is_ascii_whitespace()) { self.bump(); }
             match self.peek() {
-                None => { out.push(Token::Eof); break; }
+                None | Some(b'#') => { out.push(Token::Eof); break; }
                 Some(b) => match b {
                     b'+' => { self.bump(); out.push(Token::Plus); }
                     b'-' => {

@@ -1,0 +1,35 @@
+# physics.m — physical constants (SI units)
+
+# mechanics
+c   = 299792458          # speed of light, m/s
+g   = 9.80665            # standard gravity, m/s²
+G   = 6.67430e-11        # gravitational constant, N·m²/kg²
+
+# thermodynamics
+k_B = 1.380649e-23       # Boltzmann constant, J/K
+N_A = 6.02214076e23      # Avogadro's number, mol⁻¹
+R   = 8.314462618        # ideal gas constant, J/(mol·K)
+sigma = 5.670374419e-8   # Stefan-Boltzmann constant, W/(m²·K⁴)
+q    = 1.602176634e-19   # elementary charge, C
+
+# quantum
+h    = 6.62607015e-34    # Planck's constant, J·s
+hbar = 1.054571817e-34   # reduced Planck's constant, J·s
+
+# particle masses (kg)
+m_e = 9.1093837015e-31   # electron mass
+m_p = 1.67262192369e-27  # proton mass
+m_n = 1.67492749804e-27  # neutron mass
+
+# electromagnetism
+eps0 = 8.8541878128e-12  # permittivity of free space, F/m
+mu0  = 1.25663706212e-6  # permeability of free space, H/m
+k_e  = 8.9875517923e9    # Coulomb's constant, N·m²/C²
+
+# dimensionless
+alpha = 7.2973525693e-3  # fine-structure constant
+
+
+
+# harmonic oscillator solutions
+dampedOscillator(gamma, omega_0, x_0, v_0, t) = {disc = sqrt(gamma^2-omega_0^2); r_1 = -gamma + disc; r_2 = -gamma - disc; C_1 = (v_0-r_2*x_0)/(r_1-r_2); C_2 = (r_1*x_0 - v_0)/(r_1-r_2) : re(C_1 * exp(r_1 * t) + C_2 * exp(r_2 * t))}
