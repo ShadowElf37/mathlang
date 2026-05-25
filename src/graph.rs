@@ -1,6 +1,9 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use plotters::prelude::*;
 use crate::ast::Expr;
 use crate::eval::{Val, Env, eval, call_fn1};
+
+static GRAPH_N: AtomicUsize = AtomicUsize::new(1);
 
 pub fn eval_graph(args: &[Expr], env: &Env) -> Result<Val, String> {
     if args.is_empty() || args.len() > 3 {
@@ -44,11 +47,8 @@ pub fn eval_graph(args: &[Expr], env: &Env) -> Result<Val, String> {
     let y_lo = lo - pad;
     let y_hi = hi + pad;
 
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let filename = format!("graph_{ts}.png");
+    let n = GRAPH_N.fetch_add(1, Ordering::Relaxed);
+    let filename = format!("graph_{n}.png");
 
     let root = BitMapBackend::new(&filename, (w, h)).into_drawing_area();
     root.fill(&WHITE).map_err(|e| format!("graph: {e}"))?;
