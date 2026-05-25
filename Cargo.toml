@@ -12,3 +12,4 @@ rustyline = "14"
 plotters = { version = "0.3", default-features = false, features = [
     "bitmap_backend", "bitmap_encoder", "line_series", "ttf",
 ] }
+libm = "0.2"

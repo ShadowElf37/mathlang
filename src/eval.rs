@@ -46,6 +46,8 @@ impl Env {
             "floor", "ceil", "round",
             "log", "log10", "log2",
             "sign", "signum", "id", "delta", "fact", "factorial", "not", "sinc",
+            "sech", "csch",
+            "erf", "erfc", "j0", "j1", "jinc",
             "atan2", "min", "max", "pow", "hypot",
             "gcd", "lcm",
             "and", "or", "xor", "nand", "nor", "xnor", "shl", "shr",
@@ -66,6 +68,8 @@ pub fn is_protected(name: &str) -> bool {
         | "floor" | "ceil" | "round"
         | "log" | "log10" | "log2"
         | "sign" | "signum" | "id" | "delta" | "fact" | "factorial" | "not" | "sinc"
+        | "sech" | "csch"
+        | "erf" | "erfc" | "j0" | "j1" | "jinc"
         | "min" | "max" | "pow" | "hypot" | "gcd" | "lcm"
         | "and" | "or" | "xor" | "nand" | "nor" | "xnor" | "shl" | "shr"
         | "sum" | "prod" | "integral" | "deriv" | "map" | "graph"
@@ -245,6 +249,29 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, _env: &Env) -> Result<Val, Strin
         }),
         "asin"   => f1!(asin),  "acos"   => f1!(acos),  "atan" => f1!(atan),
         "sinh"   => f1!(sinh),  "cosh"   => f1!(cosh),  "tanh" => f1!(tanh),
+        "sech" => b1!(|v| {
+            let (a, b) = to_complex(v)?;
+            let (cr, ci) = (a.cosh() * b.cos(), a.sinh() * b.sin());
+            let d = cr*cr + ci*ci;
+            if d == 0.0 { return Err("sech: undefined".into()); }
+            Ok(make_complex(cr/d, -ci/d))
+        }),
+        "csch" => b1!(|v| {
+            let (a, b) = to_complex(v)?;
+            let (cr, ci) = (a.sinh() * b.cos(), a.cosh() * b.sin());
+            let d = cr*cr + ci*ci;
+            if d == 0.0 { return Err("csch: undefined at zero".into()); }
+            Ok(make_complex(cr/d, -ci/d))
+        }),
+        "erf"  => b1!(|v| Ok(Val::Num(libm::erf(v.num("erf")?)))),
+        "erfc" => b1!(|v| Ok(Val::Num(libm::erfc(v.num("erfc")?)))),
+        "j0"   => b1!(|v| Ok(Val::Num(libm::j0(v.num("j0")?)))),
+        "j1"   => b1!(|v| Ok(Val::Num(libm::j1(v.num("j1")?)))),
+        "jinc" => b1!(|v| {
+            let x = v.num("jinc")?;
+            if x == 0.0 { return Ok(Val::Num(0.5)); }
+            Ok(Val::Num(libm::j1(x) / x))
+        }),
         "cbrt"   => f1!(cbrt),
         "floor"  => f1!(floor), "ceil"   => f1!(ceil),  "round" => f1!(round),
         "log" | "log10" => f1!(log10),
