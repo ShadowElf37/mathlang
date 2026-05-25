@@ -3,6 +3,29 @@ ncr(n,r) = fact(n)/(fact(r) * fact(n-r))
 # stirling approx
 gamma(z) = exp(z * ln(z) - z + 0.5 * ln(2 * pi / z))
 
+# complex trig
 sin(x) = (exp(i*x) - exp(-i*x)) * 0.5
 cos(x) = (exp(i*x) + exp(-i*x)) * 0.5
-tan(x) = sin(x) / cos(x)
+tan(x) = (exp(2*i*x) - 1) / (exp(2*i*x) + 1)
+
+# polynomials
+pm(a, b) = (a+b, a-b)
+quadratic(a, b, c) = pm(-b, sqrt(b^2-4*a*c))/(2*a)
+
+# cubic ax^3+bx^2+cx+d=0  →  depress to t^3+pt+q=0 via x=t-b/(3a)
+#cubicP(a,b,c) = (3*a*c - b^2) / (3*a^2)
+#cubicQ(a,b,c,d) = (2*b^3 - 9*a*b*c + 27*a^2*d) / (27*a^3)
+
+# 3 real roots — trig method; valid when discriminant -4p^3-27q^2 > 0
+#solveCubic(a,b,c,d) = {p = cubicP(a,b,c); q = cubicQ(a,b,c,d); m = 2*sqrt(-p/3); theta = acos(3*q/(p*m))/3; sh = -b/(3*a) : m*cos(theta)+sh, m*cos(theta+2*pi/3)+sh, m*cos(theta-2*pi/3)+sh}
+
+# single real root — Cardano; valid when discriminant -4p^3-27q^2 < 0
+#cubicRoot(a,b,c,d) = {p = cubicP(a,b,c); q = cubicQ(a,b,c,d); D = q^2/4 + p^3/27 : cbrt(-q/2+sqrt(D)) + cbrt(-q/2-sqrt(D)) - b/(3*a)}
+
+# quartic ax^4+bx^3+cx^2+dx+e=0  →  depress to t^4+pt^2+qt+r=0 via x=t-b/(4a)
+#quarticP(a,b,c) = (8*a*c - 3*b^2) / (8*a^2)
+#quarticQ(a,b,c,d) = (b^3 - 4*a*b*c + 8*a^2*d) / (8*a^3)
+#quarticR(a,b,c,d,e) = (-3*b^4 + 256*a^3*e - 64*a^2*b*d + 16*a*b^2*c) / (256*a^4)
+
+# 4 roots — Ferrari + solveCubic resolvent; valid when all 4 roots are real; fails for biquadratics (q=0)
+#solveQuartic(a,b,c,d,e) = {p = quarticP(a,b,c); q = quarticQ(a,b,c,d); r = quarticR(a,b,c,d,e); u = solveCubic(1,2*p,p^2-4*r,-q^2)[0]; alpha = sqrt(u); b1 = (p+u-q/alpha)/2; c1 = (p+u+q/alpha)/2; d1 = sqrt(alpha^2-4*b1); d2 = sqrt(alpha^2-4*c1); sh = -b/(4*a) : (-alpha+d1)/2+sh, (-alpha-d1)/2+sh, (alpha+d2)/2+sh, (alpha-d2)/2+sh}
