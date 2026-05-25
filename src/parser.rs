@@ -33,17 +33,21 @@ impl Parser {
     }
 
     // Ident (Comma Ident)* RParen Arrow — paren-wrapped lambda: (n, r) -> expr
+    // Also accepts (n, r -> expr) — arrow inside the parens after the last param.
     fn looks_like_paren_lambda(&self) -> bool {
         let mut p = self.pos;
         if !matches!(self.toks.get(p), Some(Token::Ident(_))) { return false; }
         p += 1;
+        let mut count = 0;
         loop {
             match self.toks.get(p) {
                 Some(Token::RParen) => return matches!(self.toks.get(p + 1), Some(Token::Arrow)),
+                Some(Token::Arrow) if count > 0 => return true,
                 Some(Token::Comma) => {
                     p += 1;
                     if !matches!(self.toks.get(p), Some(Token::Ident(_))) { return false; }
                     p += 1;
+                    count += 1;
                 }
                 _ => return false,
             }
@@ -308,6 +312,7 @@ impl Parser {
                 self.bump();
                 if self.looks_like_paren_lambda() {
                     let mut params = vec![];
+                    let mut had_rparen = false;
                     loop {
                         match self.bump() {
                             Token::Ident(s) => params.push(s),
@@ -315,12 +320,15 @@ impl Parser {
                         }
                         match self.peek().clone() {
                             Token::Comma  => { self.bump(); }
-                            Token::RParen => { self.bump(); break; }
+                            Token::RParen => { self.bump(); had_rparen = true; break; }
+                            Token::Arrow  => { break; }
                             ref t => return Err(format!("expected ',' or ')', got {:?}", t)),
                         }
                     }
                     self.eat(&Token::Arrow)?;
-                    Ok(Expr::Lambda(params, self.expr()?.into()))
+                    let body = self.expr()?;
+                    if !had_rparen { self.eat(&Token::RParen)?; }
+                    Ok(Expr::Lambda(params, body.into()))
                 } else {
                     let first = self.expr()?;
                     if *self.peek() == Token::DotDot {
