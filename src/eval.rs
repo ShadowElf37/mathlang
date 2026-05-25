@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::collections::HashSet;
 use crate::ast::{Expr, BlockStmt, Op, Def};
 
 // ── Values ────────────────────────────────────────────────────────────────────
@@ -287,58 +286,6 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, _env: &Env) -> Result<Val, Strin
         }
 
         _ => Err(format!("undefined function: {name}")),
-    }
-}
-
-// ── Free variable collection ──────────────────────────────────────────────────
-
-pub fn free_vars(expr: &Expr, env: &Env) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut order = vec![];
-    collect_free(expr, env, &mut seen, &mut order);
-    order
-}
-
-fn collect_free(expr: &Expr, env: &Env, seen: &mut HashSet<String>, out: &mut Vec<String>) {
-    match expr {
-        Expr::Var(n) => {
-            if !env.vars.contains_key(n) && !seen.contains(n) {
-                seen.insert(n.clone());
-                out.push(n.clone());
-            }
-        }
-        Expr::Num(_) | Expr::ImagLit(_) => {}
-        Expr::Lambda(params, body) => {
-            let mut inner_env = env.clone();
-            for p in params { inner_env.vars.insert(p.clone(), Val::Num(0.0)); }
-            collect_free(body, &inner_env, seen, out);
-        }
-        Expr::Neg(e) => collect_free(e, env, seen, out),
-        Expr::BinOp(l, _, r) => { collect_free(l, env, seen, out); collect_free(r, env, seen, out); }
-        Expr::Apply(f, args) => {
-            collect_free(f, env, seen, out);
-            for a in args { collect_free(a, env, seen, out); }
-        }
-        Expr::Tuple(es) => { for e in es { collect_free(e, env, seen, out); } }
-        Expr::Index(e, i) => { collect_free(e, env, seen, out); collect_free(i, env, seen, out); }
-        Expr::Block(stmts) => {
-            let mut inner = env.clone();
-            for s in stmts {
-                match s {
-                    BlockStmt::Def(Def::Var(n, e)) => {
-                        collect_free(e, &inner, seen, out);
-                        inner.vars.insert(n.clone(), Val::Num(0.0));
-                    }
-                    BlockStmt::Def(Def::Func(n, ps, b)) => {
-                        let mut fe = inner.clone();
-                        for p in ps { fe.vars.insert(p.clone(), Val::Num(0.0)); }
-                        collect_free(b, &fe, seen, out);
-                        inner.vars.insert(n.clone(), Val::Fn(ps.clone(), b.clone(), HashMap::new()));
-                    }
-                    BlockStmt::Expr(e) => collect_free(e, &inner, seen, out),
-                }
-            }
-        }
     }
 }
 
@@ -733,15 +680,6 @@ pub fn call_fn1(f_expr: &Expr, x: Val, env: &Env) -> Result<Val, String> {
             }
             Err(format!("undefined function: {name}"))
         }
-        _ => {
-            let fvars = free_vars(f_expr, env);
-            if fvars.len() == 1 {
-                let mut local = env.clone();
-                local.vars.insert(fvars[0].clone(), x);
-                eval(f_expr, &local)
-            } else {
-                Err("expected a function (e.g. x -> x^2 or a named fn)".into())
-            }
-        }
+        _ => Err("expected a function (e.g. x -> x^2 or a named fn)".into()),
     }
 }

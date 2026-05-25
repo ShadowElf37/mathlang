@@ -156,15 +156,9 @@ pub fn eval_line(line: &str, env: &mut Env, repl: bool) -> bool {
                     eprintln!("error: cannot redefine built-in '{name}'");
                     return false;
                 }
-                let fvars = crate::eval::free_vars(expr, env);
-                if !fvars.is_empty() {
-                    // Implicit function: f = x^2 stored as Val::Fn(["x"], x^2)
-                    env.vars.insert(name.clone(), crate::eval::Val::Fn(fvars, expr.clone(), env.vars.clone()));
-                } else {
-                    match eval(expr, env) {
-                        Ok(v) => { env.vars.insert(name.clone(), v); }
-                        Err(e) => { eprintln!("error: {e}"); return false; }
-                    }
+                match eval(expr, env) {
+                    Ok(v) => { env.vars.insert(name.clone(), v); }
+                    Err(e) => { eprintln!("error: {e}"); return false; }
                 }
             }
             Def::Func(name, params, body) => {
