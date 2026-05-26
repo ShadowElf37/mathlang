@@ -20,7 +20,7 @@ pub enum BlockStmt {
 }
 
 #[derive(Debug, Clone)]
-pub enum Op { Add, Sub, Mul, Div, FloorDiv, Rem, Pow }
+pub enum Op { Add, Sub, Mul, Div, FloorDiv, Rem, Pow, Lt, Gt, LtEq, GtEq, Eq, Ne, And, Or }
 
 #[derive(Debug, Clone)]
 pub enum Def {

@@ -856,6 +856,23 @@ The recursive `self.primary()` call handles `2sin(x)` correctly because the Iden
 
 ---
 
+### T25. FFT / IFFT for spectral PDE solving — `eval.rs`, `Cargo.toml`
+
+Add `fft(tuple)` and `ifft(tuple)` builtins using the `rustfft` crate. Combined with `linspace` (already implemented), this enables O(N log N) spectral PDE methods as an alternative to the current finite-difference `heatSolution`.
+
+**Use cases:**
+- Replace `heatSolutionBounded` with a spectral method
+- Wave equation and Schrödinger equation solvers
+- Spectral differentiation (multiply by `i*ξ` in frequency domain)
+
+**Sketch:**
+- Add `rustfft` to `Cargo.toml`
+- `fft(tuple)` → accepts a tuple of real or complex values, returns a tuple of complex values (the DFT)
+- `ifft(tuple)` → inverse DFT, returns complex tuple
+- Both broadcast over the full tuple; output length equals input length
+
+---
+
 ## Files touched — summary
 
 | File | Changes |

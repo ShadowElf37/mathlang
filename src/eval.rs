@@ -57,12 +57,15 @@ impl Env {
             "sort", "zip", "dot", "append", "concat", "flatten", "argmin", "argmax",
             "mean", "median", "mode", "std", "var",
             "compose", "partial",
-            "gaussian",
+            "gaussian", "gaussian_cdf",
             "filter", "reduce",
-            "rand",
+            "rand", "eps",
             "atan2", "min", "max", "pow", "hypot",
             "gcd", "lcm",
             "and", "or", "xor", "nand", "nor", "xnor", "shl", "shr",
+            "lt", "leq", "gt", "geq", "eq", "neq",
+            "if",
+            "fft", "ifft",
             "sum", "prod", "integral", "deriv", "map", "graph",
         ] {
             vars.insert(name.to_string(), Val::Builtin(name.to_string()));
@@ -90,11 +93,14 @@ pub fn is_protected(name: &str) -> bool {
         | "sort" | "zip" | "dot" | "append" | "concat" | "flatten" | "argmin" | "argmax"
         | "mean" | "median" | "mode" | "std" | "var"
         | "compose" | "partial"
-        | "gaussian"
+        | "gaussian" | "gaussian_cdf"
         | "filter" | "reduce"
-        | "rand"
+        | "rand" | "eps"
         | "min" | "max" | "pow" | "hypot" | "gcd" | "lcm"
         | "and" | "or" | "xor" | "nand" | "nor" | "xnor" | "shl" | "shr"
+        | "lt" | "leq" | "gt" | "geq" | "eq" | "neq"
+        | "if"
+        | "fft" | "ifft"
         | "sum" | "prod" | "integral" | "deriv" | "map" | "graph"
     )
 }
@@ -354,7 +360,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, _env: &Env) -> Result<Val, Strin
         "sign" | "signum" => f1!(signum),
         "id"     => b1!(|v| { v.num("id").map(Val::Num) }),
         "delta"  => b1!(|v| Ok(Val::Num(if v.num("delta")? == 0.0 { 1.0 } else { 0.0 }))),
-        "not"    => b1!(|v| Ok(Val::Num(!int(v.num("not")?) as f64))),
+        "not"    => b1!(|v| Ok(Val::Num((int(v.num("not")?) == 0) as i64 as f64))),
         "deg"    => b1!(|v| Ok(Val::Num(v.num("deg")? * (180.0 / std::f64::consts::PI)))),
         "rad"    => b1!(|v| Ok(Val::Num(v.num("rad")? * (std::f64::consts::PI / 180.0)))),
         "len" | "length" => {
@@ -410,9 +416,9 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, _env: &Env) -> Result<Val, Strin
                 "and"    => Ok(Val::Num((int(a) & int(b)) as f64)),
                 "or"     => Ok(Val::Num((int(a) | int(b)) as f64)),
                 "xor"    => Ok(Val::Num((int(a) ^ int(b)) as f64)),
-                "nand"   => Ok(Val::Num((!(int(a) & int(b))) as f64)),
-                "nor"    => Ok(Val::Num((!(int(a) | int(b))) as f64)),
-                "xnor"   => Ok(Val::Num((!(int(a) ^ int(b))) as f64)),
+                "nand"   => Ok(Val::Num(((int(a) & int(b)) == 0) as i64 as f64)),
+                "nor"    => Ok(Val::Num(((int(a) | int(b)) == 0) as i64 as f64)),
+                "xnor"   => Ok(Val::Num(((int(a) ^ int(b)) == 0) as i64 as f64)),
                 "shl"    => Ok(Val::Num(int(a).wrapping_shl(int(b) as u32) as f64)),
                 "shr"    => Ok(Val::Num(int(a).wrapping_shr(int(b) as u32) as f64)),
                 _        => unreachable!(),
@@ -603,17 +609,96 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, _env: &Env) -> Result<Val, Strin
             let z = (x - mu) / sigma;
             Ok(Val::Num((1.0 / (sigma * (2.0 * std::f64::consts::PI).sqrt())) * (-0.5 * z * z).exp()))
         }
+        "gaussian_cdf" => {
+            arity("gaussian_cdf", 3, vals.len())?;
+            let mut it = vals.into_iter();
+            let x     = it.next().unwrap().num("gaussian_cdf")?;
+            let mu    = it.next().unwrap().num("gaussian_cdf")?;
+            let sigma = it.next().unwrap().num("gaussian_cdf")?;
+            if sigma == 0.0 { return Err("gaussian_cdf: sigma must be nonzero".into()); }
+            Ok(Val::Num(0.5 * (1.0 + libm::erf((x - mu) / (sigma * std::f64::consts::SQRT_2)))))
+        }
         "rand" => {
             match vals.len() {
                 0 => Ok(Val::Num(rand::random::<f64>())),
+                1 => {
+                    let n = vals.into_iter().next().unwrap().num("rand")? as usize;
+                    Ok(Val::Tuple((0..n).map(|_| Val::Num(rand::random::<f64>())).collect()))
+                }
                 2 => {
                     let mut it = vals.into_iter();
                     let a = it.next().unwrap().num("rand")?;
                     let b = it.next().unwrap().num("rand")?;
                     Ok(Val::Num(a + (b - a) * rand::random::<f64>()))
                 }
-                n => Err(format!("rand expects 0 or 2 args, got {n}")),
+                n => Err(format!("rand expects 0, 1, or 2 args, got {n}")),
             }
+        }
+
+        "eps" => {
+            if vals.is_empty() { return Err("eps: requires at least 1 argument".into()); }
+            let idxs: Vec<i64> = vals.into_iter()
+                .map(|v| v.num("eps").map(|x| x as i64))
+                .collect::<Result<_, _>>()?;
+            let mut sorted = idxs.clone();
+            sorted.sort();
+            for w in sorted.windows(2) {
+                if w[0] == w[1] { return Ok(Val::Num(0.0)); }
+            }
+            let n = idxs.len();
+            let rank_of = |v: i64| sorted.iter().position(|&x| x == v).unwrap();
+            let perm: Vec<usize> = idxs.iter().map(|&v| rank_of(v)).collect();
+            let mut visited = vec![false; n];
+            let mut cycles = 0usize;
+            for i in 0..n {
+                if !visited[i] {
+                    cycles += 1;
+                    let mut j = i;
+                    while !visited[j] { visited[j] = true; j = perm[j]; }
+                }
+            }
+            Ok(Val::Num(if (n - cycles) % 2 == 0 { 1.0 } else { -1.0 }))
+        }
+
+        "fft" | "ifft" => {
+            arity(name, 1, vals.len())?;
+            let items = match vals.into_iter().next().unwrap() {
+                Val::Tuple(v) => v,
+                _ => return Err(format!("{name}: argument must be a tuple")),
+            };
+            let n = items.len();
+            if n == 0 { return Err(format!("{name}: empty tuple")); }
+            use rustfft::num_complex::Complex64;
+            let mut buf: Vec<Complex64> = items.into_iter().map(|v| match v {
+                Val::Num(r)        => Ok(Complex64::new(r, 0.0)),
+                Val::Complex(r, i) => Ok(Complex64::new(r, i)),
+                _ => Err(format!("{name}: tuple elements must be numbers")),
+            }).collect::<Result<_, _>>()?;
+            let mut planner = rustfft::FftPlanner::new();
+            if name == "fft" {
+                planner.plan_fft_forward(n).process(&mut buf);
+            } else {
+                planner.plan_fft_inverse(n).process(&mut buf);
+                let scale = 1.0 / n as f64;
+                for c in &mut buf { *c *= scale; }
+            }
+            Ok(Val::Tuple(buf.into_iter().map(|c| make_complex(c.re, c.im)).collect()))
+        }
+
+        "lt" | "leq" | "gt" | "geq" | "eq" | "neq" => {
+            arity(name, 2, vals.len())?;
+            let mut it = vals.into_iter();
+            let a = it.next().unwrap().num(name)?;
+            let b = it.next().unwrap().num(name)?;
+            Ok(Val::Num(match name {
+                "lt"  => if a < b  { 1.0 } else { 0.0 },
+                "leq" => if a <= b { 1.0 } else { 0.0 },
+                "gt"  => if a > b  { 1.0 } else { 0.0 },
+                "geq" => if a >= b { 1.0 } else { 0.0 },
+                "eq"  => if a == b { 1.0 } else { 0.0 },
+                "neq" => if a != b { 1.0 } else { 0.0 },
+                _     => unreachable!(),
+            }))
         }
 
         _ => Err(format!("undefined function: {name}")),
@@ -792,6 +877,14 @@ fn scalar_binop(lv: Val, op: &Op, rv: Val) -> Result<Val, String> {
             Op::FloorDiv => (int(*la) / int(*ra)) as f64,
             Op::Rem      => la % ra,
             Op::Pow      => la.powf(*ra),
+            Op::Lt       => if la < ra  { 1.0 } else { 0.0 },
+            Op::Gt       => if la > ra  { 1.0 } else { 0.0 },
+            Op::LtEq     => if la <= ra { 1.0 } else { 0.0 },
+            Op::GtEq     => if la >= ra { 1.0 } else { 0.0 },
+            Op::Eq       => if la == ra { 1.0 } else { 0.0 },
+            Op::Ne       => if la != ra { 1.0 } else { 0.0 },
+            Op::And      => (int(*la) & int(*ra)) as f64,
+            Op::Or       => (int(*la) | int(*ra)) as f64,
         }));
     }
     let (la, lb) = to_complex(lv)?;
@@ -807,6 +900,10 @@ fn scalar_binop(lv: Val, op: &Op, rv: Val) -> Result<Val, String> {
         }
         Op::Pow      => Ok(complex_pow(la, lb, ra, rb)),
         Op::FloorDiv | Op::Rem => Err("// and % not defined for complex numbers".into()),
+        Op::Eq       => Ok(Val::Num(if la == ra && lb == rb { 1.0 } else { 0.0 })),
+        Op::Ne       => Ok(Val::Num(if la != ra || lb != rb { 1.0 } else { 0.0 })),
+        Op::Lt | Op::Gt | Op::LtEq | Op::GtEq => Err("comparison not defined for complex numbers".into()),
+        Op::And | Op::Or => Err("& and | not defined for complex numbers".into()),
     }
 }
 
@@ -822,13 +919,23 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
             Ok(Val::Tuple(vals?))
         }
         Expr::Index(expr, idx) => {
-            let v   = eval(expr, env)?;
-            let raw = eval(idx, env)?.num("index")? as i64;
-            match v {
-                Val::Tuple(items) => {
+            let v       = eval(expr, env)?;
+            let idx_val = eval(idx, env)?;
+            match (v, idx_val) {
+                (Val::Tuple(items), Val::Num(n)) => {
+                    let raw = n as i64;
                     let len = items.len() as i64;
                     let i   = if raw < 0 { (len + raw).max(0) as usize } else { raw as usize };
                     items.into_iter().nth(i).ok_or_else(|| format!("index {raw} out of range"))
+                }
+                (Val::Tuple(items), Val::Tuple(indices)) => {
+                    let len = items.len() as i64;
+                    let result: Result<Vec<Val>, _> = indices.into_iter().map(|iv| {
+                        let n = iv.num("index")? as i64;
+                        let i = if n < 0 { (len + n).max(0) as usize } else { n as usize };
+                        items.iter().nth(i).cloned().ok_or_else(|| format!("index {n} out of range"))
+                    }).collect();
+                    Ok(Val::Tuple(result?))
                 }
                 _ => Err("indexing requires a tuple".into()),
             }
@@ -865,6 +972,14 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
             // Special forms that need unevaluated Expr args (higher-order, still call_fn1-based)
             if let Expr::Var(name) = f_expr.as_ref() {
                 match name.as_str() {
+                    "if" => {
+                        if arg_exprs.len() != 3 {
+                            return Err("if(cond, a, b) expects 3 args".into());
+                        }
+                        let cond = eval(&arg_exprs[0], env)?.num("if")?;
+                        return if cond != 0.0 { eval(&arg_exprs[1], env) }
+                               else           { eval(&arg_exprs[2], env) };
+                    }
                     "sum"      => return eval_agg(arg_exprs, env, false),
                     "prod"     => return eval_agg(arg_exprs, env, true),
                     "integral" => return eval_integral(arg_exprs, env),
@@ -950,6 +1065,16 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
         Expr::BinOp(l, op, r) => {
             let lv = eval(l, env)?;
             let rv = eval(r, env)?;
+            // Whole-tuple equality/inequality before element-wise broadcast
+            if matches!(op, Op::Eq | Op::Ne) {
+                if let (Val::Tuple(ls), Val::Tuple(rs)) = (&lv, &rv) {
+                    let equal = ls.len() == rs.len() &&
+                        ls.iter().zip(rs.iter()).all(|(a, b)| {
+                            matches!((a, b), (Val::Num(x), Val::Num(y)) if x == y)
+                        });
+                    return Ok(Val::Num(if matches!(op, Op::Eq) == equal { 1.0 } else { 0.0 }));
+                }
+            }
             if matches!((&lv, &rv), (Val::Tuple(_), _) | (_, Val::Tuple(_))) {
                 return binop_tuple(lv, op, rv, env);
             }
@@ -962,6 +1087,14 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                     Op::FloorDiv => (int(*la) / int(*ra)) as f64,
                     Op::Rem      => la % ra,
                     Op::Pow      => la.powf(*ra),
+                    Op::Lt       => if la < ra  { 1.0 } else { 0.0 },
+                    Op::Gt       => if la > ra  { 1.0 } else { 0.0 },
+                    Op::LtEq     => if la <= ra { 1.0 } else { 0.0 },
+                    Op::GtEq     => if la >= ra { 1.0 } else { 0.0 },
+                    Op::Eq       => if la == ra { 1.0 } else { 0.0 },
+                    Op::Ne       => if la != ra { 1.0 } else { 0.0 },
+                    Op::And      => (int(*la) & int(*ra)) as f64,
+                    Op::Or       => (int(*la) | int(*ra)) as f64,
                 }));
             }
             let (la, lb) = to_complex(lv)?;
@@ -977,6 +1110,10 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                 }
                 Op::Pow      => Ok(complex_pow(la, lb, ra, rb)),
                 Op::FloorDiv | Op::Rem => Err("// and % not defined for complex numbers".into()),
+                Op::Eq       => Ok(Val::Num(if la == ra && lb == rb { 1.0 } else { 0.0 })),
+                Op::Ne       => Ok(Val::Num(if la != ra || lb != rb { 1.0 } else { 0.0 })),
+                Op::Lt | Op::Gt | Op::LtEq | Op::GtEq => Err("comparison not defined for complex numbers".into()),
+                Op::And | Op::Or => Err("& and | not defined for complex numbers".into()),
             }
         }
     }
@@ -1065,10 +1202,16 @@ pub fn call_fn1(f_expr: &Expr, x: Val, env: &Env) -> Result<Val, String> {
                 return eval(&body, &local);
             }
             if let Some(Val::Builtin(bname)) = env.vars.get(name).cloned() {
-                return eval_builtin(&bname, vec![x], env);
+                match eval_builtin(&bname, vec![x], env) {
+                    Err(e) if e.contains("expects 0") => return eval_builtin(&bname, vec![], env),
+                    other => return other,
+                }
             }
             Err(format!("undefined function: {name}"))
         }
-        _ => Err("expected a function (e.g. x -> x^2 or a named fn)".into()),
+        _ => {
+            let f_val = eval(f_expr, env)?;
+            apply_val(f_val, vec![x], env)
+        }
     }
 }

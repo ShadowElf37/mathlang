@@ -1,6 +1,6 @@
 [package]
 name = "mathlang"
-version = "0.1.0"
+version = "0.7.0"
 edition = "2024"
 
 [[bin]]
@@ -14,3 +14,4 @@ plotters = { version = "0.3", default-features = false, features = [
     "bitmap_backend", "bitmap_encoder", "line_series", "ttf",
 ] }
 libm = "0.2"
+rustfft = "6"

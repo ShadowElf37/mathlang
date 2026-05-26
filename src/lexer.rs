@@ -4,6 +4,8 @@ pub enum Token {
     Plus, Minus, Star, Slash, SlashSlash, Percent, Caret, StarStar,
     LParen, RParen, LBrace, RBrace, LBracket, RBracket,
     Comma, Colon, Semicolon, Eq, Arrow, DotDot,
+    Lt, Gt, LtEq, GtEq, EqEq, Bang, BangEq,
+    Amp, Pipe,
     Eof,
 }
 
@@ -52,7 +54,36 @@ impl<'a> Lexer<'a> {
                     b',' => { self.bump(); out.push(Token::Comma); }
                     b':' => { self.bump(); out.push(Token::Colon); }
                     b';' => { self.bump(); out.push(Token::Semicolon); }
-                    b'=' => { self.bump(); out.push(Token::Eq); }
+                    b'=' => {
+                        self.bump();
+                        if self.peek() == Some(b'=') { self.bump(); out.push(Token::EqEq); }
+                        else { out.push(Token::Eq); }
+                    }
+                    b'!' => {
+                        self.bump();
+                        if self.peek() == Some(b'=') { self.bump(); out.push(Token::BangEq); }
+                        else { out.push(Token::Bang); }
+                    }
+                    b'<' => {
+                        self.bump();
+                        if self.peek() == Some(b'=') { self.bump(); out.push(Token::LtEq); }
+                        else { out.push(Token::Lt); }
+                    }
+                    b'>' => {
+                        self.bump();
+                        if self.peek() == Some(b'=') { self.bump(); out.push(Token::GtEq); }
+                        else { out.push(Token::Gt); }
+                    }
+                    b'&' => {
+                        self.bump();
+                        if self.peek() == Some(b'&') { self.bump(); }
+                        out.push(Token::Amp);
+                    }
+                    b'|' => {
+                        self.bump();
+                        if self.peek() == Some(b'|') { self.bump(); }
+                        out.push(Token::Pipe);
+                    }
                     b'.' => {
                         self.bump();
                         if self.peek() == Some(b'.') { self.bump(); out.push(Token::DotDot); }

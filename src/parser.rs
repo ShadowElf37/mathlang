@@ -228,7 +228,27 @@ impl Parser {
         Ok(exprs)
     }
 
-    fn expr(&mut self) -> Result<Expr, String> { self.add() }
+    fn expr(&mut self) -> Result<Expr, String> { self.cmp() }
+
+    fn cmp(&mut self) -> Result<Expr, String> {
+        let mut l = self.add()?;
+        loop {
+            let op = match self.peek() {
+                Token::Lt     => Op::Lt,
+                Token::Gt     => Op::Gt,
+                Token::LtEq   => Op::LtEq,
+                Token::GtEq   => Op::GtEq,
+                Token::EqEq   => Op::Eq,
+                Token::BangEq => Op::Ne,
+                Token::Amp    => Op::And,
+                Token::Pipe   => Op::Or,
+                _ => break,
+            };
+            self.bump();
+            l = Expr::BinOp(l.into(), op, self.add()?.into());
+        }
+        Ok(l)
+    }
 
     fn add(&mut self) -> Result<Expr, String> {
         let mut l = self.mul()?;
@@ -274,11 +294,30 @@ impl Parser {
     fn postfix(&mut self) -> Result<Expr, String> {
         let mut e = self.primary()?;
         loop {
-            if *self.peek() == Token::LBracket {
+            if *self.peek() == Token::Bang {
                 self.bump();
-                let idx = self.expr()?;
-                self.eat(&Token::RBracket)?;
-                e = Expr::Index(Box::new(e), Box::new(idx));
+                e = Expr::Apply(Box::new(Expr::Var("fact".into())), vec![e]);
+            } else if *self.peek() == Token::LBracket {
+                self.bump();
+                let first = self.expr()?;
+                if *self.peek() == Token::DotDot {
+                    self.bump();
+                    let last = self.expr()?;
+                    self.eat(&Token::RBracket)?;
+                    e = Expr::Index(Box::new(e), Box::new(Expr::Range(Box::new(first), Box::new(last))));
+                } else if *self.peek() == Token::Comma {
+                    let mut indices = vec![first];
+                    while *self.peek() == Token::Comma {
+                        self.bump();
+                        if *self.peek() == Token::RBracket { break; }
+                        indices.push(self.expr()?);
+                    }
+                    self.eat(&Token::RBracket)?;
+                    e = Expr::Index(Box::new(e), Box::new(Expr::Tuple(indices)));
+                } else {
+                    self.eat(&Token::RBracket)?;
+                    e = Expr::Index(Box::new(e), Box::new(first));
+                }
             } else if *self.peek() == Token::LParen {
                 // Only treat as Apply if this is NOT an Ident (those are parsed as Call in primary)
                 // For all other expressions (lambdas, tuples, blocks, etc.) postfix () = Apply
@@ -302,7 +341,15 @@ impl Parser {
 
     fn primary(&mut self) -> Result<Expr, String> {
         match self.peek().clone() {
-            Token::Num(n)  => { self.bump(); Ok(Expr::Num(n)) }
+            Token::Num(n)  => {
+                self.bump();
+                if matches!(self.peek(), Token::Ident(_) | Token::LParen) {
+                    let rhs = self.primary()?;
+                    Ok(Expr::BinOp(Box::new(Expr::Num(n)), Op::Mul, Box::new(rhs)))
+                } else {
+                    Ok(Expr::Num(n))
+                }
+            }
             Token::Imag(n) => { self.bump(); Ok(Expr::ImagLit(n)) }
             Token::LBrace => {
                 self.bump();

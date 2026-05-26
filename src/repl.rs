@@ -18,13 +18,16 @@ pub const BUILTIN_FNS: &[&str] = &[
     "sort", "zip", "dot", "append", "concat", "flatten", "argmin", "argmax",
     "mean", "median", "mode", "std", "var",
     "compose", "partial",
-    "gaussian",
+    "gaussian", "gaussian_cdf", "eps",
     "filter", "reduce",
     "rand",
     "ln", "log", "log10", "log2", "exp",
     "re", "im", "arg", "conj",
     "min", "max", "pow", "hypot", "gcd", "lcm",
     "and", "or", "xor", "nand", "nor", "xnor", "not", "shl", "shr",
+    "lt", "leq", "gt", "geq", "eq", "neq",
+    "if",
+    "fft", "ifft",
     "sum", "prod", "integral", "deriv", "map",
     "sinc", "sech", "csch", "erf", "erfc", "j0", "j1", "jinc",
     "graph",
@@ -35,24 +38,27 @@ pub const BUILTIN_CONSTS: &[&str] = &["pi", "e", "phi", "inf", "i"];
 // ── REPL helper ───────────────────────────────────────────────────────────────
 
 struct MathHelper {
-    user_names: RefCell<Vec<String>>,
-    hinter:     rustyline::hint::HistoryHinter,
+    user_fns:  RefCell<Vec<String>>,
+    user_vars: RefCell<Vec<String>>,
+    hinter:    rustyline::hint::HistoryHinter,
 }
 
 impl MathHelper {
     fn new() -> Self {
-        Self { user_names: RefCell::new(vec![]), hinter: rustyline::hint::HistoryHinter {} }
+        Self { user_fns: RefCell::new(vec![]), user_vars: RefCell::new(vec![]), hinter: rustyline::hint::HistoryHinter {} }
     }
     fn update(&self, env: &Env) {
-        let mut n = self.user_names.borrow_mut();
-        n.clear();
-        n.extend(env.vars.keys().filter(|k| {
-            !BUILTIN_CONSTS.contains(&k.as_str()) && !BUILTIN_FNS.contains(&k.as_str())
-        }).cloned());
+        let mut fns  = self.user_fns.borrow_mut();
+        let mut vars = self.user_vars.borrow_mut();
+        fns.clear(); vars.clear();
+        for (k, v) in &env.vars {
+            if BUILTIN_CONSTS.contains(&k.as_str()) || BUILTIN_FNS.contains(&k.as_str()) { continue; }
+            if matches!(v, Val::Fn(..)) { fns.push(k.clone()); } else { vars.push(k.clone()); }
+        }
     }
 }
 
-fn highlight_line(line: &str, user: &[String]) -> String {
+fn highlight_line(line: &str, user_fns: &[String], user_vars: &[String]) -> String {
     if line.starts_with('!') { return format!("\x1b[33m{line}\x1b[0m"); }
     let b = line.as_bytes();
     let mut out = String::with_capacity(line.len() + 64);
@@ -76,8 +82,10 @@ fn highlight_line(line: &str, user: &[String]) -> String {
             let name = &line[s..i];
             if BUILTIN_CONSTS.contains(&name) {
                 out.push_str(&format!("\x1b[36m{name}\x1b[0m"));
-            } else if BUILTIN_FNS.contains(&name) || user.iter().any(|u| u == name) {
+            } else if BUILTIN_FNS.contains(&name) || user_fns.iter().any(|u| u == name) {
                 out.push_str(&format!("\x1b[95m{name}\x1b[0m"));
+            } else if user_vars.iter().any(|u| u == name) {
+                out.push_str(name);
             } else {
                 out.push_str(name);
             }
@@ -104,7 +112,7 @@ fn highlight_line(line: &str, user: &[String]) -> String {
 
 impl rustyline::highlight::Highlighter for MathHelper {
     fn highlight<'l>(&self, line: &'l str, _pos: usize) -> std::borrow::Cow<'l, str> {
-        std::borrow::Cow::Owned(highlight_line(line, &self.user_names.borrow()))
+        std::borrow::Cow::Owned(highlight_line(line, &self.user_fns.borrow(), &self.user_vars.borrow()))
     }
     fn highlight_char(&self, _line: &str, _pos: usize, _forced: bool) -> bool { true }
 }
@@ -115,16 +123,18 @@ impl rustyline::completion::Completer for MathHelper {
         -> rustyline::Result<(usize, Vec<String>)>
     {
         if line.starts_with('!') {
-            let cmds = ["!clear", "!defs", "!help", "!import "];
+            let cmds = ["!clear", "!defs", "!help", "!import ", "!version"];
             return Ok((0, cmds.iter().filter(|&&c| c.starts_with(line)).map(|s| s.to_string()).collect()));
         }
         let start = line[..pos].rfind(|c: char| !c.is_alphanumeric() && c != '_').map_or(0, |i| i+1);
         let word = &line[start..pos];
         if word.is_empty() { return Ok((pos, vec![])); }
-        let user = self.user_names.borrow();
+        let user_fns  = self.user_fns.borrow();
+        let user_vars = self.user_vars.borrow();
         let mut cs: Vec<String> = BUILTIN_FNS.iter().copied()
             .chain(BUILTIN_CONSTS.iter().copied())
-            .chain(user.iter().map(String::as_str))
+            .chain(user_fns.iter().map(String::as_str))
+            .chain(user_vars.iter().map(String::as_str))
             .filter(|s| s.starts_with(word) && *s != word)
             .map(str::to_string)
             .collect();
@@ -198,17 +208,23 @@ pub fn eval_line(line: &str, env: &mut Env, repl: bool) -> bool {
             }
         }
     }
-    for expr in &exprs {
-        match eval(expr, env) {
-            Ok(v) => {
-                if repl {
-                    println!("\x1b[2mresult = \x1b[0m{}", fmt_repl(&v));
-                    env.vars.insert("result".into(), v);
-                } else {
-                    println!("{}", fmt_val(&v));
-                }
+    let vals: Vec<Val> = {
+        let mut acc = vec![];
+        for expr in &exprs {
+            match eval(expr, env) {
+                Ok(v) => acc.push(v),
+                Err(e) => { eprintln!("error: {e}"); return false; }
             }
-            Err(e) => { eprintln!("error: {e}"); return false; }
+        }
+        acc
+    };
+    if !vals.is_empty() {
+        let v = if vals.len() == 1 { vals.into_iter().next().unwrap() } else { Val::Tuple(vals) };
+        if repl {
+            println!("\x1b[2mresult = \x1b[0m{}", fmt_repl(&v));
+            env.vars.insert("result".into(), v);
+        } else {
+            println!("{}", fmt_val(&v));
         }
     }
     true
@@ -257,7 +273,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
     let (name, arg) = cmd.split_once(' ').map_or((cmd, ""), |(a, b)| (a, b.trim()));
     match name.trim() {
         "help" => print!(concat!(
-            "Commands:  !help  !import <file>  !defs  !clear\n",
+            "Commands:  !help  !import <file>  !defs  !clear  !version\n",
             "Init file: ~/.mathlangrc (auto-imported on start; override with $MATHLANG_INIT)\n",
             "Exit:      quit / exit / Ctrl-D\n\n",
             "Syntax:    x = 3              variable\n",
@@ -268,7 +284,10 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "           {{x=3; y=4 : x^2+y^2}}  block with local scope\n\n",
             "Tuples:    (1,2,3)   t[0]   t[-1]   t[1..3]   t[0,2,4]\n",
             "Ranges:    (0..10)  — inclusive; range(a,b) — exclusive\n",
-            "Operators: + - * / // % ^ **   -> (lambda)\n",
+            "Operators: + - * / // % ^ **   -> (lambda)   n! (postfix factorial)\n",
+            "           2pi  3sin(x)  2(x+1)  — implicit multiplication\n",
+            "Compare:   < > <= >= == !=  (return 0 or 1)  & | (bitwise and/or)\n",
+            "           lt leq gt geq eq neq  — comparison fns for use with map/filter\n",
             "Aggregates: sum(f,a,b)  prod(f,a,b)  sum(tuple)  prod(tuple)\n",
             "           integral(f,a,b[,n])  deriv(f,x[,dx])\n",
             "Grapher:   graph(f[,a,b])  saves graph_N.png to cwd\n\n",
@@ -276,7 +295,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "           sinh cosh tanh  sec csc cot\n",
             "Algebra:   sqrt cbrt abs sign step  floor ceil round(x[,n]) trunc frac\n",
             "           ln log(x[,base]) log2 log10 exp expm1  pow hypot\n",
-            "           min max  gcd lcm  fact\n",
+            "           min max  gcd lcm  fact  n!\n",
             "Angle:     deg rad\n",
             "Special:   sinc  sech csch  erf erfc  j0 j1 jinc  gaussian(x,mu,sigma)\n",
             "Tuple ops: len sort zip dot  append concat flatten  argmin argmax\n",
@@ -284,6 +303,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "Stats:     mean median mode  std var\n",
             "HOF:       map(f,t)  filter(f,t)  reduce(f,t)  compose(f,g)  partial(f,a)\n",
             "Control:   if(cond,a,b)\n",
+            "Spectral:  fft(t)  ifft(t)  — DFT / inverse DFT on a tuple of numbers\n",
             "Random:    rand()  rand(a,b)\n",
             "Bitwise:   and or xor nand nor xnor not shl shr\n",
             "Complex:   i  re im abs arg conj  (all operators work on complex numbers)\n",
@@ -303,6 +323,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
                 }
             }
         }
+        "version" => println!("mathlang v0.7"),
         "defs" | "vars" | "fns" => show_defs(env),
         "clear" => {
             let n = env.vars.iter().filter(|(k,_)| {
@@ -330,6 +351,7 @@ pub fn run_repl() {
 
     let mut rl = Editor::<MathHelper, DefaultHistory>::new().expect("failed to init editor");
     rl.set_helper(Some(MathHelper::new()));
+    rl.bind_sequence(rustyline::KeyEvent::ctrl('D'), rustyline::EventHandler::Simple(rustyline::Cmd::EndOfFile));
     loop {
         match rl.readline("> ") {
             Ok(line) => {

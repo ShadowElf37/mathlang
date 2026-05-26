@@ -36,6 +36,21 @@ m 'x=3; y=4 : sqrt(x^2 + y^2)'    # 5
 | `^` or `**` | exponentiation (right-associative) |
 | `//` | floor division |
 | `%` | remainder |
+| `<` `>` `<=` `>=` `==` `!=` | comparison (returns `1` or `0`) |
+| `&` `\|` | bitwise AND / OR (also written `&&` / `\|\|`) |
+| `n!` | postfix factorial (`5! = 120`) |
+
+### Implicit multiplication
+
+A number immediately followed by a name or `(` multiplies implicitly:
+
+```zsh
+m '2pi'          # 6.283185307179586
+m '3sin(pi/2)'   # 3
+m '2(x+1)'       # expands to 2*(x+1)
+```
+
+Precedence is the same as `*`, so `2x^2` parses as `(2x)^2`. Use explicit `*` when that matters.
 
 ---
 
@@ -236,7 +251,7 @@ m 're(3 + 4i), im(3 + 4i)'   # 3  4
 
 **Complex:** `re(z)`, `im(z)`, `abs(z)`, `arg(z)`, `conj(z)`
 
-**Number theory:** `gcd(a,b)`, `lcm(a,b)`, `fact(n)`, `delta(x)`
+**Number theory:** `gcd(a,b)`, `lcm(a,b)`, `fact(n)` / `n!`, `delta(x)`
 
 **Special:** `sinc`, `sech`, `csch`, `erf`, `erfc`, `j0`, `j1`, `jinc`, `gaussian(x,mu,sigma)`
 
@@ -244,7 +259,11 @@ m 're(3 + 4i), im(3 + 4i)'   # 3  4
 
 **Tuple ops:** `len`, `sort`, `zip(a,b)`, `dot(a,b)`, `append(t,x)`, `concat(a,b)`, `flatten(t)`, `argmin(t)`, `argmax(t)`, `linspace(a,b,n)`, `range(a,b)`
 
+**Comparisons (function form):** `lt`, `leq`, `gt`, `geq`, `eq`, `neq` — 2-arg comparison functions returning `0`/`1`; useful with `map`/`filter`/`partial`
+
 **Higher-order:** `map(f,t)`, `filter(f,t)`, `reduce(f,t)`, `compose(f,g)`, `partial(f,a)`
+
+**Spectral:** `fft(tuple)`, `ifft(tuple)` — forward/inverse DFT; output is a tuple of complex values
 
 **Random:** `rand()`, `rand(a,b)`
 
