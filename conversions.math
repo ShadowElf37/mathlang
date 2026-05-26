@@ -1,0 +1,156 @@
+# conversions.math — unit conversion factors and functions
+# Usage: !import conversions.math
+#
+# Multiplicative factors: x * unit_to_unit converts x from the source unit.
+# Non-linear conversions (temperature) are defined as functions.
+# SI prefix ratios (km_to_m, ms_to_s, etc.) are intentionally excluded.
+
+# ── Energy ────────────────────────────────────────────────────────────────────
+eV_to_J         = 1.602176634e-19
+J_to_eV         = 6.241509074e18
+cal_to_J        = 4.184
+kcal_to_J       = 4184
+BTU_to_J        = 1055.05585262
+kWh_to_J        = 3.6e6
+erg_to_J        = 1e-7
+hartree_to_eV   = 27.211386245988
+hartree_to_J    = 4.3597447222071e-18
+wavenumber_to_eV = 1.23984193e-4   # cm⁻¹ to eV
+
+# ── Pressure ──────────────────────────────────────────────────────────────────
+atm_to_Pa       = 101325
+bar_to_Pa       = 1e5
+mbar_to_Pa      = 100
+mmHg_to_Pa      = 133.322387415
+torr_to_Pa      = 133.322387415
+psi_to_Pa       = 6894.757293168
+kPa_to_Pa       = 1000
+MPa_to_Pa       = 1e6
+
+# ── Length ────────────────────────────────────────────────────────────────────
+in_to_m         = 0.0254
+ft_to_m         = 0.3048
+yd_to_m         = 0.9144
+mi_to_m         = 1609.344
+nmi_to_m        = 1852              # nautical mile
+AU_to_m         = 1.495978707e11
+ly_to_m         = 9.4607304725808e15
+pc_to_m         = 3.085677581491e16
+kpc_to_m        = 3.085677581491e19
+Mpc_to_m        = 3.085677581491e22
+angstrom_to_m   = 1e-10
+bohr_to_m       = 5.29177210903e-11
+fm_to_m         = 1e-15             # femtometre (nuclear physics)
+
+# ── Mass ──────────────────────────────────────────────────────────────────────
+lb_to_kg        = 0.45359237
+oz_to_kg        = 0.028349523125
+stone_to_kg     = 6.35029318
+amu_to_kg       = 1.66053906660e-27
+ton_to_kg       = 907.18474         # short ton (US)
+tonne_to_kg     = 1000              # metric tonne
+grain_to_kg     = 6.479891e-5
+
+# ── Time ──────────────────────────────────────────────────────────────────────
+min_to_s        = 60
+hr_to_s         = 3600
+day_to_s        = 86400
+wk_to_s         = 604800
+yr_to_s         = 31557600          # Julian year (365.25 days)
+yr_to_days      = 365.25
+
+# ── Speed ─────────────────────────────────────────────────────────────────────
+mph_to_mps      = 0.44704
+kph_to_mps      = 0.27777777778
+knot_to_mps     = 0.51444444444
+mps_to_mph      = 2.2369362921
+
+# ── Temperature (functions — non-linear) ──────────────────────────────────────
+C_to_K(t)       = t + 273.15
+K_to_C(t)       = t - 273.15
+F_to_C(t)       = (t - 32) * 5/9
+C_to_F(t)       = t * 9/5 + 32
+F_to_K(t)       = C_to_K(F_to_C(t))
+K_to_F(t)       = C_to_F(K_to_C(t))
+R_to_K(t)       = t * 5/9           # Rankine to Kelvin
+
+# ── Angle ─────────────────────────────────────────────────────────────────────
+# deg/rad builtins handle the standard case; these cover finer subdivisions
+arcmin_to_rad   = pi / 10800        # arcminute
+arcsec_to_rad   = pi / 648000       # arcsecond
+mas_to_rad      = pi / 648000000    # milliarcsecond
+grad_to_rad     = pi / 200          # gradian (400 grad = full circle)
+arcmin_to_deg   = 1/60
+arcsec_to_deg   = 1/3600
+
+# ── Area ──────────────────────────────────────────────────────────────────────
+acre_to_m2      = 4046.8564224
+ha_to_m2        = 10000
+in2_to_m2       = 6.4516e-4
+ft2_to_m2       = 0.09290304
+mi2_to_m2       = 2589988.110336
+barn_to_m2      = 1e-28             # nuclear cross-section unit
+
+# ── Volume ────────────────────────────────────────────────────────────────────
+L_to_m3         = 1e-3
+mL_to_m3        = 1e-6
+gal_to_m3       = 3.785411784e-3    # US gallon
+qt_to_m3        = 9.46352946e-4     # US quart
+floz_to_m3      = 2.95735295625e-5  # US fluid ounce
+in3_to_m3       = 1.6387064e-5
+ft3_to_m3       = 0.028316846592
+
+# ── Force ─────────────────────────────────────────────────────────────────────
+lbf_to_N        = 4.4482216152605
+kgf_to_N        = 9.80665
+dyn_to_N        = 1e-5
+ozf_to_N        = 0.27801385
+
+# ── Torque / moment ───────────────────────────────────────────────────────────
+lbft_to_Nm      = 1.3558179483      # pound-foot to newton-metre
+lbin_to_Nm      = 0.1129848290
+
+# ── Power ─────────────────────────────────────────────────────────────────────
+hp_to_W         = 745.69987158227   # mechanical horsepower
+hpM_to_W        = 735.49875         # metric horsepower
+BTUhr_to_W      = 0.29307107        # BTU/hour to watts
+calps_to_W      = 4.184             # cal/s to watts
+kcalhr_to_W     = 1.163             # kcal/hour to watts
+
+# ── Magnetic field ────────────────────────────────────────────────────────────
+T_to_G          = 1e4               # tesla to gauss
+G_to_T          = 1e-4
+T_to_Oe         = 10000/(4*pi*1e-7) # tesla to oersted (in vacuum: B=mu0*H)
+
+# ── Electric / charge ─────────────────────────────────────────────────────────
+Ah_to_C         = 3600              # ampere-hour to coulomb
+mAh_to_C        = 3.6
+eV_to_V         = 1                 # 1 eV / elementary charge = 1 V (by definition)
+statC_to_C      = 3.33564095e-10    # statcoulomb (CGS) to coulomb
+Debye_to_Cm     = 3.33564095e-30    # electric dipole moment
+
+# ── Radioactivity / dose ──────────────────────────────────────────────────────
+Ci_to_Bq        = 3.7e10            # curie to becquerel
+Rad_to_Gy       = 0.01              # radiation absorbed dose (old) to gray
+rem_to_Sv       = 0.01              # röntgen equivalent man to sievert
+
+# ── Data / information ────────────────────────────────────────────────────────
+byte_to_bit     = 8
+bit_to_byte     = 0.125
+KiB_to_byte     = 1024
+MiB_to_byte     = 1048576
+GiB_to_byte     = 1073741824
+
+# ── Concentration / amount ────────────────────────────────────────────────────
+molL_to_molm3   = 1000              # mol/L (molar) to mol/m³
+ppm_to_frac     = 1e-6              # parts-per-million to dimensionless fraction
+ppb_to_frac     = 1e-9
+
+# ── Viscosity ─────────────────────────────────────────────────────────────────
+P_to_Pas        = 0.1               # poise to pascal-second
+cP_to_Pas       = 1e-3              # centipoise to pascal-second
+St_to_m2s       = 1e-4             # stokes to m²/s (kinematic viscosity)
+
+# ── Luminance / photometry ────────────────────────────────────────────────────
+fc_to_lux       = 10.7639104        # foot-candle to lux
+ftL_to_cdm2     = 3.42625909        # foot-lambert to cd/m²

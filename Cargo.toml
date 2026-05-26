@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 rustyline = "14"
+rand = "0.8"
 plotters = { version = "0.3", default-features = false, features = [
     "bitmap_backend", "bitmap_encoder", "line_series", "ttf",
 ] }

@@ -53,6 +53,13 @@ impl Env {
             "step",
             "deg", "rad",
             "len", "length",
+            "linspace", "range",
+            "sort", "zip", "dot", "append", "concat", "flatten", "argmin", "argmax",
+            "mean", "median", "mode", "std", "var",
+            "compose", "partial",
+            "gaussian",
+            "filter", "reduce",
+            "rand",
             "atan2", "min", "max", "pow", "hypot",
             "gcd", "lcm",
             "and", "or", "xor", "nand", "nor", "xnor", "shl", "shr",
@@ -79,6 +86,13 @@ pub fn is_protected(name: &str) -> bool {
         | "step"
         | "deg" | "rad"
         | "len" | "length"
+        | "linspace" | "range"
+        | "sort" | "zip" | "dot" | "append" | "concat" | "flatten" | "argmin" | "argmax"
+        | "mean" | "median" | "mode" | "std" | "var"
+        | "compose" | "partial"
+        | "gaussian"
+        | "filter" | "reduce"
+        | "rand"
         | "min" | "max" | "pow" | "hypot" | "gcd" | "lcm"
         | "and" | "or" | "xor" | "nand" | "nor" | "xnor" | "shl" | "shr"
         | "sum" | "prod" | "integral" | "deriv" | "map" | "graph"
@@ -305,10 +319,36 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, _env: &Env) -> Result<Val, Strin
             _             => 0.5,
         }))),
         "cbrt"   => f1!(cbrt),
-        "floor"  => f1!(floor), "ceil"   => f1!(ceil),  "round" => f1!(round),
+        "floor"  => f1!(floor), "ceil" => f1!(ceil),
+        "round" => match vals.len() {
+            1 => broadcast1(vals.into_iter().next().unwrap(),
+                    |v| Ok(Val::Num(v.num("round")?.round()))),
+            2 => {
+                let mut it = vals.into_iter();
+                let x = it.next().unwrap().num("round")?;
+                let n = it.next().unwrap().num("round")? as i32;
+                let f = 10f64.powi(n);
+                Ok(Val::Num((x * f).round() / f))
+            }
+            n => Err(format!("round expects 1 or 2 args, got {n}")),
+        },
         "trunc"  => f1!(trunc),
         "frac"   => b1!(|v| { let x = v.num("frac")?; Ok(Val::Num(x - x.trunc())) }),
-        "log" | "log10" => f1!(log10),
+        "log10"  => f1!(log10),
+        "log" => match vals.len() {
+            1 => broadcast1(vals.into_iter().next().unwrap(),
+                    |v| Ok(Val::Num(v.num("log")?.log10()))),
+            2 => {
+                let mut it = vals.into_iter();
+                let x    = it.next().unwrap().num("log")?;
+                let base = it.next().unwrap().num("log")?;
+                if base <= 0.0 || base == 1.0 {
+                    return Err("log: base must be positive and ≠ 1".into());
+                }
+                Ok(Val::Num(x.ln() / base.ln()))
+            }
+            n => Err(format!("log expects 1 or 2 args, got {n}")),
+        },
         "log2"   => f1!(log2),
         "sign" | "signum" => f1!(signum),
         "id"     => b1!(|v| { v.num("id").map(Val::Num) }),
@@ -328,8 +368,33 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, _env: &Env) -> Result<Val, Strin
             Ok(Val::Num((1..=n).map(|k| k as f64).product()))
         }),
 
+        // ── Polymorphic min / max (scalar pair or tuple) ──────────────────────
+        "min" | "max" => match (vals.len(), &vals[..]) {
+            (1, _) => {
+                let items = match vals.into_iter().next().unwrap() {
+                    Val::Tuple(v) => v,
+                    _ => return Err(format!("{name}: 1-arg form requires a tuple")),
+                };
+                if items.is_empty() { return Err(format!("{name}: empty tuple")); }
+                let mut best = items[0].clone().num(name)?;
+                for v in items.into_iter().skip(1) {
+                    let n = v.num(name)?;
+                    if name == "min" { if n < best { best = n; } }
+                    else             { if n > best { best = n; } }
+                }
+                Ok(Val::Num(best))
+            }
+            (2, _) => {
+                let mut it = vals.into_iter();
+                let a = it.next().unwrap().num(name)?;
+                let b = it.next().unwrap().num(name)?;
+                if name == "min" { Ok(Val::Num(a.min(b))) } else { Ok(Val::Num(a.max(b))) }
+            }
+            (n, _) => Err(format!("{name} expects 1 or 2 args, got {n}")),
+        },
+
         // ── Real 2-arg ────────────────────────────────────────────────────────
-        "atan2" | "min" | "max" | "pow" | "hypot" |
+        "atan2" | "pow" | "hypot" |
         "gcd" | "lcm" | "and" | "or" | "xor" | "nand" | "nor" | "xnor" | "shl" | "shr" => {
             arity(name, 2, vals.len())?;
             let mut it = vals.into_iter();
@@ -337,8 +402,6 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, _env: &Env) -> Result<Val, Strin
             let b = it.next().unwrap().num(name)?;
             match name {
                 "atan2"  => Ok(Val::Num(a.atan2(b))),
-                "min"    => Ok(Val::Num(a.min(b))),
-                "max"    => Ok(Val::Num(a.max(b))),
                 "pow"    => Ok(Val::Num(a.powf(b))),
                 "hypot"  => Ok(Val::Num(a.hypot(b))),
                 "gcd"    => Ok(Val::Num(gcd(int(a).unsigned_abs(), int(b).unsigned_abs()) as f64)),
@@ -352,6 +415,203 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, _env: &Env) -> Result<Val, Strin
                 "shl"    => Ok(Val::Num(int(a).wrapping_shl(int(b) as u32) as f64)),
                 "shr"    => Ok(Val::Num(int(a).wrapping_shr(int(b) as u32) as f64)),
                 _        => unreachable!(),
+            }
+        }
+
+        // ── Tuple combinators ─────────────────────────────────────────────────
+        "sort" => {
+            arity("sort", 1, vals.len())?;
+            let items = match vals.into_iter().next().unwrap() {
+                Val::Tuple(v) => v,
+                _ => return Err("sort: argument must be a tuple".into()),
+            };
+            let mut nums: Vec<f64> = items.into_iter()
+                .map(|v| v.num("sort")).collect::<Result<_, _>>()?;
+            nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            Ok(Val::Tuple(nums.into_iter().map(Val::Num).collect()))
+        }
+        "zip" => {
+            arity("zip", 2, vals.len())?;
+            let mut it = vals.into_iter();
+            let a = match it.next().unwrap() { Val::Tuple(v) => v, _ => return Err("zip: args must be tuples".into()) };
+            let b = match it.next().unwrap() { Val::Tuple(v) => v, _ => return Err("zip: args must be tuples".into()) };
+            Ok(Val::Tuple(a.into_iter().zip(b).map(|(x, y)| Val::Tuple(vec![x, y])).collect()))
+        }
+        "dot" => {
+            arity("dot", 2, vals.len())?;
+            let mut it = vals.into_iter();
+            let a = match it.next().unwrap() { Val::Tuple(v) => v, _ => return Err("dot: args must be tuples".into()) };
+            let b = match it.next().unwrap() { Val::Tuple(v) => v, _ => return Err("dot: args must be tuples".into()) };
+            if a.len() != b.len() { return Err(format!("dot: length mismatch ({} vs {})", a.len(), b.len())); }
+            let mut s = 0.0f64;
+            for (x, y) in a.into_iter().zip(b) {
+                s += x.num("dot")? * y.num("dot")?;
+            }
+            Ok(Val::Num(s))
+        }
+        "append" => {
+            arity("append", 2, vals.len())?;
+            let mut it = vals.into_iter();
+            let mut items = match it.next().unwrap() { Val::Tuple(v) => v, _ => return Err("append: first arg must be a tuple".into()) };
+            items.push(it.next().unwrap());
+            Ok(Val::Tuple(items))
+        }
+        "concat" => {
+            arity("concat", 2, vals.len())?;
+            let mut it = vals.into_iter();
+            let mut a = match it.next().unwrap() { Val::Tuple(v) => v, _ => return Err("concat: args must be tuples".into()) };
+            let     b = match it.next().unwrap() { Val::Tuple(v) => v, _ => return Err("concat: args must be tuples".into()) };
+            a.extend(b);
+            Ok(Val::Tuple(a))
+        }
+        "flatten" => {
+            arity("flatten", 1, vals.len())?;
+            let items = match vals.into_iter().next().unwrap() { Val::Tuple(v) => v, _ => return Err("flatten: argument must be a tuple".into()) };
+            Ok(Val::Tuple(items.into_iter().flat_map(|v| match v {
+                Val::Tuple(inner) => inner,
+                other             => vec![other],
+            }).collect()))
+        }
+        "argmin" | "argmax" => {
+            arity(name, 1, vals.len())?;
+            let items = match vals.into_iter().next().unwrap() { Val::Tuple(v) => v, _ => return Err(format!("{name}: argument must be a tuple")) };
+            if items.is_empty() { return Err(format!("{name}: empty tuple")); }
+            let mut best_i = 0usize;
+            let mut best_v = items[0].clone().num(name)?;
+            for (i, v) in items.iter().enumerate().skip(1) {
+                let n = v.clone().num(name)?;
+                if name == "argmin" { if n < best_v { best_v = n; best_i = i; } }
+                else                { if n > best_v { best_v = n; best_i = i; } }
+            }
+            Ok(Val::Num(best_i as f64))
+        }
+
+        // ── Statistics ────────────────────────────────────────────────────────
+        "mean" => {
+            arity("mean", 1, vals.len())?;
+            let items = match vals.into_iter().next().unwrap() { Val::Tuple(v) => v, _ => return Err("mean: argument must be a tuple".into()) };
+            if items.is_empty() { return Err("mean: empty tuple".into()); }
+            let n = items.len() as f64;
+            let s: f64 = items.into_iter().map(|v| v.num("mean")).collect::<Result<Vec<_>, _>>()?.into_iter().sum();
+            Ok(Val::Num(s / n))
+        }
+        "median" => {
+            arity("median", 1, vals.len())?;
+            let items = match vals.into_iter().next().unwrap() { Val::Tuple(v) => v, _ => return Err("median: argument must be a tuple".into()) };
+            if items.is_empty() { return Err("median: empty tuple".into()); }
+            let mut nums: Vec<f64> = items.into_iter().map(|v| v.num("median")).collect::<Result<_, _>>()?;
+            nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let mid = nums.len() / 2;
+            Ok(Val::Num(if nums.len() % 2 == 1 { nums[mid] } else { (nums[mid - 1] + nums[mid]) / 2.0 }))
+        }
+        "mode" => {
+            arity("mode", 1, vals.len())?;
+            let items = match vals.into_iter().next().unwrap() { Val::Tuple(v) => v, _ => return Err("mode: argument must be a tuple".into()) };
+            if items.is_empty() { return Err("mode: empty tuple".into()); }
+            let nums: Vec<f64> = items.into_iter().map(|v| v.num("mode")).collect::<Result<_, _>>()?;
+            let mut best_val = nums[0];
+            let mut best_cnt = 0usize;
+            for &candidate in &nums {
+                let cnt = nums.iter().filter(|&&x| x == candidate).count();
+                if cnt > best_cnt { best_cnt = cnt; best_val = candidate; }
+            }
+            Ok(Val::Num(best_val))
+        }
+        "var" => {
+            arity("var", 1, vals.len())?;
+            let items = match vals.into_iter().next().unwrap() { Val::Tuple(v) => v, _ => return Err("var: argument must be a tuple".into()) };
+            if items.is_empty() { return Err("var: empty tuple".into()); }
+            let nums: Vec<f64> = items.into_iter().map(|v| v.num("var")).collect::<Result<_, _>>()?;
+            let n = nums.len() as f64;
+            let mean = nums.iter().sum::<f64>() / n;
+            Ok(Val::Num(nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n))
+        }
+        "std" => {
+            arity("std", 1, vals.len())?;
+            let items = match vals.into_iter().next().unwrap() { Val::Tuple(v) => v, _ => return Err("std: argument must be a tuple".into()) };
+            if items.is_empty() { return Err("std: empty tuple".into()); }
+            let nums: Vec<f64> = items.into_iter().map(|v| v.num("std")).collect::<Result<_, _>>()?;
+            let n = nums.len() as f64;
+            let mean = nums.iter().sum::<f64>() / n;
+            Ok(Val::Num((nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n).sqrt()))
+        }
+
+        // ── Function combinators ──────────────────────────────────────────────
+        "compose" => {
+            arity("compose", 2, vals.len())?;
+            let mut it = vals.into_iter();
+            let f = it.next().unwrap();
+            let g = it.next().unwrap();
+            match (&f, &g) {
+                (Val::Fn(..) | Val::Builtin(_), Val::Fn(..) | Val::Builtin(_)) => Ok(compose_fns(f, g)),
+                _ => Err("compose: both arguments must be functions".into()),
+            }
+        }
+        "partial" => {
+            arity("partial", 2, vals.len())?;
+            let mut it = vals.into_iter();
+            let f = it.next().unwrap();
+            let a = it.next().unwrap();
+            match f {
+                Val::Fn(params, body, mut captured) => {
+                    if params.is_empty() { return Err("partial: function has no parameters".into()); }
+                    let first = params[0].clone();
+                    let rest  = params[1..].to_vec();
+                    captured.insert(first, a);
+                    Ok(Val::Fn(rest, body, captured))
+                }
+                Val::Builtin(bname) => {
+                    let mut cap = HashMap::new();
+                    cap.insert("__b__".into(), Val::Builtin(bname));
+                    cap.insert("__a__".into(), a);
+                    let body = Expr::Apply(
+                        Box::new(Expr::Var("__b__".into())),
+                        vec![Expr::Var("__a__".into()), Expr::Var("__z__".into())],
+                    );
+                    Ok(Val::Fn(vec!["__z__".into()], body, cap))
+                }
+                _ => Err("partial: first argument must be a function".into()),
+            }
+        }
+
+        // ── Misc ──────────────────────────────────────────────────────────────
+        "linspace" => {
+            arity("linspace", 3, vals.len())?;
+            let mut it = vals.into_iter();
+            let a = it.next().unwrap().num("linspace")?;
+            let b = it.next().unwrap().num("linspace")?;
+            let n = it.next().unwrap().num("linspace")? as usize;
+            if n == 0 { return Err("linspace: n must be ≥ 1".into()); }
+            if n == 1 { return Ok(Val::Tuple(vec![Val::Num(a)])); }
+            Ok(Val::Tuple((0..n).map(|i| Val::Num(a + (b - a) * i as f64 / (n - 1) as f64)).collect()))
+        }
+        "range" => {
+            arity("range", 2, vals.len())?;
+            let mut it = vals.into_iter();
+            let a = it.next().unwrap().num("range")? as i64;
+            let b = it.next().unwrap().num("range")? as i64;
+            Ok(Val::Tuple((a..b).map(|n| Val::Num(n as f64)).collect()))
+        }
+        "gaussian" => {
+            arity("gaussian", 3, vals.len())?;
+            let mut it = vals.into_iter();
+            let x     = it.next().unwrap().num("gaussian")?;
+            let mu    = it.next().unwrap().num("gaussian")?;
+            let sigma = it.next().unwrap().num("gaussian")?;
+            if sigma == 0.0 { return Err("gaussian: sigma must be nonzero".into()); }
+            let z = (x - mu) / sigma;
+            Ok(Val::Num((1.0 / (sigma * (2.0 * std::f64::consts::PI).sqrt())) * (-0.5 * z * z).exp()))
+        }
+        "rand" => {
+            match vals.len() {
+                0 => Ok(Val::Num(rand::random::<f64>())),
+                2 => {
+                    let mut it = vals.into_iter();
+                    let a = it.next().unwrap().num("rand")?;
+                    let b = it.next().unwrap().num("rand")?;
+                    Ok(Val::Num(a + (b - a) * rand::random::<f64>()))
+                }
+                n => Err(format!("rand expects 0 or 2 args, got {n}")),
             }
         }
 
@@ -622,6 +882,37 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                             .collect();
                         return Ok(Val::Tuple(results?));
                     }
+                    "filter" => {
+                        if arg_exprs.len() != 2 {
+                            return Err("filter(f, tuple) expects 2 args".into());
+                        }
+                        let items = match eval(&arg_exprs[1], env)? {
+                            Val::Tuple(v) => v,
+                            other => return Err(format!("filter: second arg must be a tuple, got {}", fmt_val(&other))),
+                        };
+                        let mut out = vec![];
+                        for item in items {
+                            let keep = call_fn1(&arg_exprs[0], item.clone(), env)?.num("filter")?;
+                            if keep != 0.0 { out.push(item); }
+                        }
+                        return Ok(Val::Tuple(out));
+                    }
+                    "reduce" => {
+                        if arg_exprs.len() != 2 {
+                            return Err("reduce(f, tuple) expects 2 args".into());
+                        }
+                        let items = match eval(&arg_exprs[1], env)? {
+                            Val::Tuple(v) => v,
+                            other => return Err(format!("reduce: second arg must be a tuple, got {}", fmt_val(&other))),
+                        };
+                        if items.is_empty() { return Err("reduce: empty tuple".into()); }
+                        let f_val = eval(&arg_exprs[0], env)?;
+                        let mut acc = items[0].clone();
+                        for item in items.into_iter().skip(1) {
+                            acc = apply_val(f_val.clone(), vec![acc, item], env)?;
+                        }
+                        return Ok(acc);
+                    }
                     _ => {}
                 }
             }
@@ -692,8 +983,21 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
 
 pub fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> {
     let label = if product { "prod" } else { "sum" };
+    // 1-arg form: sum(tuple) or prod(tuple)
+    if args.len() == 1 {
+        let items = match eval(&args[0], env)? {
+            Val::Tuple(v) => v,
+            _ => return Err(format!("{label}: 1-arg form requires a tuple")),
+        };
+        let mut acc = if product { 1.0 } else { 0.0 };
+        for v in items {
+            let n = v.num(label)?;
+            if product { acc *= n; } else { acc += n; }
+        }
+        return Ok(Val::Num(acc));
+    }
     if args.len() != 3 {
-        return Err(format!("{label} expects 3 args: (fn, start, stop)"));
+        return Err(format!("{label} expects sum(tuple) or {label}(fn, start, stop)"));
     }
     let start = eval(&args[1], env)?.num("start")? as i64;
     let stop  = eval(&args[2], env)?.num("stop")?  as i64;

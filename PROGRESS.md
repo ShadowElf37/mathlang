@@ -20,24 +20,27 @@ Note: `qol.cot` still fails — `cot(pi/4)` has a 2-ULP floating-point rounding 
 
 ---
 
-## Tier 2 — Easy
+## Tier 2 — Easy ✓ complete
 
 | # | Change | Status |
 |---|--------|--------|
-| T7 | README updates | pending |
-| T7.5 | `conversions.math` | pending |
-| T8 | 2-arg `log(x, base)` | pending |
-| T9 | 2-arg `round(x, n)` | pending |
-| T10 | `linspace(a, b, n)` | pending |
-| T11 | `range(a, b)` builtin | pending |
-| T12 | `sort`, `zip`, `dot`, `append`, `concat`, `flatten`, `argmin`, `argmax` | pending |
-| T13 | Polymorphic `sum(tuple)` / `prod(tuple)` | pending |
-| T14 | `mean`, `median`, `mode` | pending |
-| T15 | `std`, `var` | pending |
-| T16 | `compose`, `partial` | pending |
-| T17 | `gaussian(x, mu, sigma)` | pending |
-| T18 | `filter`, `reduce` | pending |
-| T19 | `rand` / `rand(a, b)` | pending |
+| T7 | README updates | done |
+| T7.5 | `conversions.math` | done |
+| T8 | 2-arg `log(x, base)` | done |
+| T9 | 2-arg `round(x, n)` | done |
+| T10 | `linspace(a, b, n)` | done |
+| T11 | `range(a, b)` builtin | done |
+| T12 | `sort`, `zip`, `dot`, `append`, `concat`, `flatten`, `argmin`, `argmax` | done |
+| T13 | Polymorphic `sum(tuple)` / `prod(tuple)` | done |
+| T14 | `mean`, `median`, `mode` | done |
+| T15 | `std`, `var` | done |
+| T16 | `compose`, `partial` | done |
+| T17 | `gaussian(x, mu, sigma)` | done |
+| T18 | `filter`, `reduce` | done |
+| T19 | `rand` / `rand(a, b)` | done |
+
+**Tests after Tier 2:** 88 passed, 26 failed (+8).
+Remaining failures: tau (intentional), implicit functions (removed feature), tuple printing format (README updated to match), block forward-refs (not doing), `&&`/`||`/ternary (not doing), comparisons/if/slicing/`!`/implicit-mul (Tier 3/4).
 
 ## Tier 3 — Medium
 
