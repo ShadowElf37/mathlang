@@ -36,7 +36,15 @@ oscillator(gamma, omega_0, x_0, v_0, t) = {omega_d_t = t*sqrt(gamma^2-omega_0^2)
 
 oscillatorMBK(m, b, k, x_0, v_0, t) = oscillator(b/(2*m), sqrt(k/m), x_0, v_0, t)
 
-# heat solutions
+# heat equation
+# free-space Green's function G(x,t) = (4πkt)^{-1/2} exp(-x²/4kt)
 heatKernel(x, t, k) = 1/sqrt(4*pi*k*t) * exp(-x**2 / (4*k*t))
 
-heatSolutionBounded(x, t, k, initial_heat_func, box_size) = integral(y -> heatKernel(x-y, t, k)*initial_heat_func(y), -box_size/2, box_size/2)
+# FFT spectral solver — periodic BC on [0, L), O(N log N), exact to machine precision
+# heatSpectral(f, t, k, L, n) — evolve initial condition f for time t
+#   k: diffusivity  L: domain period  n: number of grid points
+#   Returns n-tuple u(x_j, t) at x_j = j*L/n  (use heatGrid to recover x values)
+heatSpectral(f, t, k, L, n) = {u0=map(f,range(0,n)*(L/n)); decay=map(m->exp(-k*(2*pi*min(m,n-m)/L)^2*t),range(0,n)) : map(re,ifft(decay*fft(u0)))}
+
+# companion: the x-coordinates heatSpectral samples at
+heatGrid(L, n) = range(0, n) * (L/n)

@@ -1,0 +1,10 @@
+1. rename !import to !include
+2. gaussian_cdf not in !help but its a builtin
+3. [BUG] import_file processes one line at a time — multi-line block definitions
+   (e.g. heatSpectral) must be written on a single line to be importable.
+   Fix: accumulate lines into a buffer and flush on blank/comment lines or when
+   brace depth returns to 0.
+4. [FEATURE] CLI mode (!import, !defs, etc.) silently ignores !commands and
+   gives "unexpected token: Bang" errors instead of a useful message. Consider
+   supporting a subset of ! commands in CLI mode, or at least printing a hint.
+
