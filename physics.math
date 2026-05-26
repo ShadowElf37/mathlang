@@ -35,3 +35,8 @@ alpha = 7.2973525693e-3  # fine-structure constant
 oscillator(gamma, omega_0, x_0, v_0, t) = {omega_d = sqrt(gamma^2-omega_0^2) : exp(-gamma*t) * (x_0 * cos(omega_d * t) + (v_0 + gamma * x_0) * t * sinc(omega_d * t))}
 
 oscillatorMBK(m, b, k, x_0, v_0, t) = oscillator(b/(2*m), sqrt(k/m), x_0, v_0, t)
+
+
+
+heatKernel(x, t, k) = 1/sqrt(4*pi*k*t) * exp(-x**2 / (4*k*t))
+heatSolution(x, t, k, initial_heat_f) = integral(y -> heatKernel(x-y, t, k)*initial_heat_f(y), -100, 100)
