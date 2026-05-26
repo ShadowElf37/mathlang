@@ -42,7 +42,7 @@ impl Env {
         for name in &[
             "abs", "re", "im", "arg", "conj", "sqrt", "exp", "ln",
             "sin", "cos", "tan", "asin", "acos", "atan",
-            "sinh", "cosh", "tanh", "cbrt",
+            "sinh", "cosh", "tanh", "cbrt", "expm1",
             "sec", "csc", "cot",
             "floor", "ceil", "round",
             "trunc", "frac",
@@ -76,7 +76,7 @@ pub fn is_protected(name: &str) -> bool {
         "pi" | "e" | "phi" | "inf" | "i"
         | "abs" | "re" | "im" | "arg" | "conj" | "sqrt" | "exp" | "ln"
         | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
-        | "sinh" | "cosh" | "tanh" | "cbrt"
+        | "sinh" | "cosh" | "tanh" | "cbrt" | "expm1"
         | "sec" | "csc" | "cot"
         | "floor" | "ceil" | "round" | "trunc" | "frac"
         | "log" | "log10" | "log2"
@@ -318,6 +318,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, _env: &Env) -> Result<Val, Strin
             x if x > 0.0 => 1.0,
             _             => 0.5,
         }))),
+        "expm1"  => f1!(exp_m1),
         "cbrt"   => f1!(cbrt),
         "floor"  => f1!(floor), "ceil" => f1!(ceil),
         "round" => match vals.len() {

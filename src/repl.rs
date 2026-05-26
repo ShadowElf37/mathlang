@@ -7,7 +7,7 @@ use crate::eval::{Val, Env, eval, fmt_val, is_protected};
 pub const BUILTIN_FNS: &[&str] = &[
     "id", "fact", "factorial", "delta",
     "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
-    "sinh", "cosh", "tanh",
+    "sinh", "cosh", "tanh", "expm1",
     "sec", "csc", "cot",
     "sqrt", "cbrt", "abs", "sign", "signum",
     "floor", "ceil", "round", "trunc", "frac",
@@ -275,7 +275,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "Trig:      sin cos tan  asin acos atan atan2\n",
             "           sinh cosh tanh  sec csc cot\n",
             "Algebra:   sqrt cbrt abs sign step  floor ceil round(x[,n]) trunc frac\n",
-            "           ln log(x[,base]) log2 log10 exp  pow hypot\n",
+            "           ln log(x[,base]) log2 log10 exp expm1  pow hypot\n",
             "           min max  gcd lcm  fact\n",
             "Angle:     deg rad\n",
             "Special:   sinc  sech csch  erf erfc  j0 j1 jinc  gaussian(x,mu,sigma)\n",
