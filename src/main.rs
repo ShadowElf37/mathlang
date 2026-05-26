@@ -11,7 +11,12 @@ fn main() {
         repl::run_repl();
         return;
     }
+    let expr = args.join(" ");
+    if expr.starts_with('!') {
+        eprintln!("! commands are REPL-only. Run 'm' with no arguments to enter the REPL.");
+        std::process::exit(1);
+    }
     let mut env = eval::Env::new();
-    let ok = repl::eval_line(&args.join(" "), &mut env, false);
+    let ok = repl::eval_line(&expr, &mut env, false);
     if !ok { std::process::exit(1); }
 }

@@ -123,7 +123,7 @@ impl rustyline::completion::Completer for MathHelper {
         -> rustyline::Result<(usize, Vec<String>)>
     {
         if line.starts_with('!') {
-            let cmds = ["!clear", "!defs", "!help", "!import ", "!version"];
+            let cmds = ["!clear", "!defs", "!help", "!include ", "!version"];
             return Ok((0, cmds.iter().filter(|&&c| c.starts_with(line)).map(|s| s.to_string()).collect()));
         }
         let start = line[..pos].rfind(|c: char| !c.is_alphanumeric() && c != '_').map_or(0, |i| i+1);
@@ -257,15 +257,29 @@ fn import_file(path: &str, display: &str, env: &mut Env, verbose: bool) {
     match std::fs::read_to_string(path) {
         Ok(src) => {
             let mut n = 0;
+            let mut buf = String::new();
+            let mut depth = 0i32;
             for line in src.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') { continue; }
-                eval_line(line, env, false);
-                n += 1;
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
+                // Count braces only on the code portion (before any # comment)
+                let code = if let Some(i) = trimmed.find('#') { &trimmed[..i] } else { trimmed };
+                for ch in code.chars() {
+                    if ch == '{' { depth += 1; }
+                    else if ch == '}' { depth -= 1; }
+                }
+                if buf.is_empty() { buf.push_str(trimmed); } else { buf.push(' '); buf.push_str(trimmed); }
+                if depth <= 0 {
+                    eval_line(&buf, env, false);
+                    n += 1;
+                    buf.clear();
+                    depth = 0;
+                }
             }
-            if verbose { println!("imported {n} line(s) from {display}"); }
+            if !buf.is_empty() { eval_line(&buf, env, false); n += 1; }
+            if verbose { println!("included {n} definition(s) from {display}"); }
         }
-        Err(e) => eprintln!("import {display}: {e}"),
+        Err(e) => eprintln!("include {display}: {e}"),
     }
 }
 
@@ -273,7 +287,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
     let (name, arg) = cmd.split_once(' ').map_or((cmd, ""), |(a, b)| (a, b.trim()));
     match name.trim() {
         "help" => print!(concat!(
-            "Commands:  !help  !import <file>  !defs  !clear  !version\n",
+            "Commands:  !help  !include <file>  !defs  !clear  !version\n",
             "Init file: ~/.mathlangrc (auto-imported on start; override with $MATHLANG_INIT)\n",
             "Exit:      quit / exit / Ctrl-D\n\n",
             "Syntax:    x = 3              variable\n",
@@ -297,7 +311,8 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "           ln log(x[,base]) log2 log10 exp expm1  pow hypot\n",
             "           min max  gcd lcm  fact  n!\n",
             "Angle:     deg rad\n",
-            "Special:   sinc  sech csch  erf erfc  j0 j1 jinc  gaussian(x,mu,sigma)\n",
+            "Special:   sinc  sech csch  erf erfc  j0 j1 jinc\n",
+            "           gaussian(x,mu,sigma)  gaussian_cdf(x,mu,sigma)\n",
             "Tuple ops: len sort zip dot  append concat flatten  argmin argmax\n",
             "           linspace(a,b,n)  range(a,b)\n",
             "Stats:     mean median mode  std var\n",
@@ -309,8 +324,8 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "Complex:   i  re im abs arg conj  (all operators work on complex numbers)\n",
             "Constants: pi e phi inf i\n",
         )),
-        "import" => {
-            if arg.is_empty() { eprintln!("usage: !import <file>"); return; }
+        "include" | "import" => {
+            if arg.is_empty() { eprintln!("usage: !include <file>"); return; }
             let path = expand_path(arg);
             if std::path::Path::new(&path).exists() {
                 import_file(&path, arg, env, true);
@@ -323,7 +338,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
                 }
             }
         }
-        "version" => println!("mathlang v0.7"),
+        "version" => println!("mathlang v0.8"),
         "defs" | "vars" | "fns" => show_defs(env),
         "clear" => {
             let n = env.vars.iter().filter(|(k,_)| {

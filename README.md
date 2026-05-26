@@ -308,7 +308,7 @@ result = 10
 |---------|--------|
 | `!help` | show syntax reference |
 | `!defs` | list all user-defined names |
-| `!import <file>` | load a `.math` file into the current session |
+| `!include <file>` | load a `.math` file into the current session |
 | `!clear` | clear all user definitions |
 | `q` / `exit` | quit |
 
@@ -334,7 +334,7 @@ cubicRoot(a,b,c,d)    — 1 real root  of ax³+… (Cardano, disc < 0)
 solveQuartic(a,b,c,d,e) — 4 real roots of ax⁴+… (Ferrari's method)
 ```
 
-Load it with `!import advanced.math` in the REPL (or set it as your init file).
+Load it with `!include advanced.math` in the REPL (or set it as your init file).
 
 ### `physics.math`
 
@@ -342,10 +342,10 @@ Physical constants in SI units (`c`, `g`, `G`, `k_B`, `N_A`, `R`, `h`, `hbar`, e
 
 ### `conversions.math`
 
-Unit conversion factors and functions for physics, chemistry, and engineering. Load with `!import conversions.math`.
+Unit conversion factors and functions for physics, chemistry, and engineering. Load with `!include conversions.math`.
 
 ```zsh
-m '!import conversions.math'
+m '!include conversions.math'
 > 1 * eV_to_J          # 1.602176634e-19
 > C_to_K(100)          # 373.15
 > 1 * atm_to_Pa        # 101325
