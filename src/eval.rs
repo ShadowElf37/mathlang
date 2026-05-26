@@ -43,11 +43,16 @@ impl Env {
             "abs", "re", "im", "arg", "conj", "sqrt", "exp", "ln",
             "sin", "cos", "tan", "asin", "acos", "atan",
             "sinh", "cosh", "tanh", "cbrt",
+            "sec", "csc", "cot",
             "floor", "ceil", "round",
+            "trunc", "frac",
             "log", "log10", "log2",
             "sign", "signum", "id", "delta", "fact", "factorial", "not", "sinc",
             "sech", "csch",
             "erf", "erfc", "j0", "j1", "jinc",
+            "step",
+            "deg", "rad",
+            "len", "length",
             "atan2", "min", "max", "pow", "hypot",
             "gcd", "lcm",
             "and", "or", "xor", "nand", "nor", "xnor", "shl", "shr",
@@ -65,11 +70,15 @@ pub fn is_protected(name: &str) -> bool {
         | "abs" | "re" | "im" | "arg" | "conj" | "sqrt" | "exp" | "ln"
         | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
         | "sinh" | "cosh" | "tanh" | "cbrt"
-        | "floor" | "ceil" | "round"
+        | "sec" | "csc" | "cot"
+        | "floor" | "ceil" | "round" | "trunc" | "frac"
         | "log" | "log10" | "log2"
         | "sign" | "signum" | "id" | "delta" | "fact" | "factorial" | "not" | "sinc"
         | "sech" | "csch"
         | "erf" | "erfc" | "j0" | "j1" | "jinc"
+        | "step"
+        | "deg" | "rad"
+        | "len" | "length"
         | "min" | "max" | "pow" | "hypot" | "gcd" | "lcm"
         | "and" | "or" | "xor" | "nand" | "nor" | "xnor" | "shl" | "shr"
         | "sum" | "prod" | "integral" | "deriv" | "map" | "graph"
@@ -272,14 +281,48 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, _env: &Env) -> Result<Val, Strin
             if x == 0.0 { return Ok(Val::Num(0.5)); }
             Ok(Val::Num(libm::j1(x) / x))
         }),
+        "sec" => b1!(|v| {
+            let x = v.num("sec")?;
+            let c = x.cos();
+            if c == 0.0 { return Err("sec: undefined (cos is zero)".into()); }
+            Ok(Val::Num(1.0 / c))
+        }),
+        "csc" => b1!(|v| {
+            let x = v.num("csc")?;
+            let s = x.sin();
+            if s == 0.0 { return Err("csc: undefined (sin is zero)".into()); }
+            Ok(Val::Num(1.0 / s))
+        }),
+        "cot" => b1!(|v| {
+            let x = v.num("cot")?;
+            let s = x.sin();
+            if s == 0.0 { return Err("cot: undefined (sin is zero)".into()); }
+            Ok(Val::Num(x.cos() / s))
+        }),
+        "step" => b1!(|v| Ok(Val::Num(match v.num("step")? {
+            x if x < 0.0 => 0.0,
+            x if x > 0.0 => 1.0,
+            _             => 0.5,
+        }))),
         "cbrt"   => f1!(cbrt),
         "floor"  => f1!(floor), "ceil"   => f1!(ceil),  "round" => f1!(round),
+        "trunc"  => f1!(trunc),
+        "frac"   => b1!(|v| { let x = v.num("frac")?; Ok(Val::Num(x - x.trunc())) }),
         "log" | "log10" => f1!(log10),
         "log2"   => f1!(log2),
         "sign" | "signum" => f1!(signum),
         "id"     => b1!(|v| { v.num("id").map(Val::Num) }),
         "delta"  => b1!(|v| Ok(Val::Num(if v.num("delta")? == 0.0 { 1.0 } else { 0.0 }))),
         "not"    => b1!(|v| Ok(Val::Num(!int(v.num("not")?) as f64))),
+        "deg"    => b1!(|v| Ok(Val::Num(v.num("deg")? * (180.0 / std::f64::consts::PI)))),
+        "rad"    => b1!(|v| Ok(Val::Num(v.num("rad")? * (std::f64::consts::PI / 180.0)))),
+        "len" | "length" => {
+            arity(name, 1, vals.len())?;
+            match vals.into_iter().next().unwrap() {
+                Val::Tuple(items) => Ok(Val::Num(items.len() as f64)),
+                _ => Err(format!("{name}: argument must be a tuple")),
+            }
+        }
         "fact" | "factorial" => b1!(|v| {
             let n = v.num("fact")? as u64;
             Ok(Val::Num((1..=n).map(|k| k as f64).product()))
@@ -518,11 +561,14 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
             Ok(Val::Tuple(vals?))
         }
         Expr::Index(expr, idx) => {
-            let v = eval(expr, env)?;
-            let i = eval(idx, env)?.num("index")? as usize;
+            let v   = eval(expr, env)?;
+            let raw = eval(idx, env)?.num("index")? as i64;
             match v {
-                Val::Tuple(items) => items.into_iter().nth(i)
-                    .ok_or_else(|| format!("index {i} out of range")),
+                Val::Tuple(items) => {
+                    let len = items.len() as i64;
+                    let i   = if raw < 0 { (len + raw).max(0) as usize } else { raw as usize };
+                    items.into_iter().nth(i).ok_or_else(|| format!("index {raw} out of range"))
+                }
                 _ => Err("indexing requires a tuple".into()),
             }
         }
