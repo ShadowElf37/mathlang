@@ -152,6 +152,19 @@ impl rustyline::Helper for MathHelper {}
 
 // ── Evaluation and display ────────────────────────────────────────────────────
 
+const REPL_TUPLE_LIMIT: usize = 12;
+const REPL_TUPLE_PREVIEW: usize = 8;
+
+fn fmt_repl(v: &Val) -> String {
+    match v {
+        Val::Tuple(items) if items.len() > REPL_TUPLE_LIMIT => {
+            let preview: Vec<String> = items[..REPL_TUPLE_PREVIEW].iter().map(fmt_val).collect();
+            format!("({}, ... [{} items])", preview.join(", "), items.len())
+        }
+        other => fmt_val(other),
+    }
+}
+
 pub fn eval_line(line: &str, env: &mut Env, repl: bool) -> bool {
     let line = line.trim();
     if line.is_empty() { return true; }
@@ -189,7 +202,7 @@ pub fn eval_line(line: &str, env: &mut Env, repl: bool) -> bool {
         match eval(expr, env) {
             Ok(v) => {
                 if repl {
-                    println!("\x1b[2mresult = \x1b[0m{}", fmt_val(&v));
+                    println!("\x1b[2mresult = \x1b[0m{}", fmt_repl(&v));
                     env.vars.insert("result".into(), v);
                 } else {
                     println!("{}", fmt_val(&v));
