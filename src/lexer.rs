@@ -5,7 +5,7 @@ pub enum Token {
     LParen, RParen, LBrace, RBrace, LBracket, RBracket,
     Comma, Colon, Semicolon, Eq, Arrow, DotDot,
     Lt, Gt, LtEq, GtEq, EqEq, Bang, BangEq,
-    Amp, Pipe,
+    Amp, Pipe, At,
     Eof,
 }
 
@@ -84,6 +84,7 @@ impl<'a> Lexer<'a> {
                         if self.peek() == Some(b'|') { self.bump(); }
                         out.push(Token::Pipe);
                     }
+                    b'@' => { self.bump(); out.push(Token::At); }
                     b'.' => {
                         self.bump();
                         if self.peek() == Some(b'.') { self.bump(); out.push(Token::DotDot); }

@@ -7,6 +7,7 @@ pub enum Expr {
     Neg(Box<Expr>),
     Lambda(Vec<String>, Box<Expr>),
     Tuple(Vec<Expr>),
+    TensorLit(Vec<Vec<Expr>>),   // (1,2; 3,4) — rows separated by ;
     Index(Box<Expr>, Box<Expr>),
     Block(Vec<BlockStmt>),
     Apply(Box<Expr>, Vec<Expr>),

@@ -35,6 +35,9 @@ pub const BUILTIN_FNS: &[&str] = &[
     "matrix", "zeros", "ones", "eye", "diag",
     "shape", "rows", "cols", "transpose", "trace", "norm",
     "row", "col", "matmul",
+    "det", "inv", "solve",
+    "hstack", "vstack", "tomat",
+    "lingrid",
 ];
 
 pub const BUILTIN_CONSTS: &[&str] = &["pi", "e", "phi", "inf", "i"];
@@ -327,6 +330,12 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "Bitwise:   and or xor nand nor xnor not shl shr\n",
             "Complex:   i  re im abs arg conj  (all operators work on complex numbers)\n",
             "Constants: pi e phi inf i\n",
+            "Matrices:  (1,2; 3,4)  — literal;  A @ B  — matmul\n",
+            "           zeros(r,c)  ones(r,c)  eye(n)  diag(t)  matrix(r,c,f)\n",
+            "           shape rows cols transpose trace norm row col matmul\n",
+            "           det inv solve(A,b)  hstack vstack tomat(t,r,c)\n",
+            "           lingrid((x0,y0),(x1,y1),(nx,ny),f)\n",
+            "           T[i,j]  T[i,a..b]  T[a..b,j]  T[a..b,c..d]\n",
         )),
         "include" | "import" => {
             if arg.is_empty() { eprintln!("usage: !include <file>"); return; }
@@ -342,7 +351,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
                 }
             }
         }
-        "version" => println!("mathlang v0.8"),
+        "version" => println!("mathlang v0.9"),
         "defs" | "vars" | "fns" => show_defs(env),
         "clear" => {
             let n = env.vars.iter().filter(|(k,_)| {

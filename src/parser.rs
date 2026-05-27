@@ -270,10 +270,27 @@ impl Parser {
                 Token::Slash      => { self.bump(); Expr::BinOp(l.into(), Op::Div,      self.unary()?.into()) }
                 Token::SlashSlash => { self.bump(); Expr::BinOp(l.into(), Op::FloorDiv, self.unary()?.into()) }
                 Token::Percent    => { self.bump(); Expr::BinOp(l.into(), Op::Rem,      self.unary()?.into()) }
+                Token::At         => {
+                    self.bump();
+                    let r = self.unary()?;
+                    Expr::Apply(Box::new(Expr::Var("matmul".into())), vec![l, r])
+                }
                 _ => break,
             };
         }
         Ok(l)
+    }
+
+    // Parse one bracket index item: expr or expr..expr (range)
+    fn parse_index_item(&mut self) -> Result<Expr, String> {
+        let e = self.expr()?;
+        if *self.peek() == Token::DotDot {
+            self.bump();
+            let end = self.expr()?;
+            Ok(Expr::Range(Box::new(e), Box::new(end)))
+        } else {
+            Ok(e)
+        }
     }
 
     fn unary(&mut self) -> Result<Expr, String> {
@@ -299,18 +316,13 @@ impl Parser {
                 e = Expr::Apply(Box::new(Expr::Var("fact".into())), vec![e]);
             } else if *self.peek() == Token::LBracket {
                 self.bump();
-                let first = self.expr()?;
-                if *self.peek() == Token::DotDot {
-                    self.bump();
-                    let last = self.expr()?;
-                    self.eat(&Token::RBracket)?;
-                    e = Expr::Index(Box::new(e), Box::new(Expr::Range(Box::new(first), Box::new(last))));
-                } else if *self.peek() == Token::Comma {
+                let first = self.parse_index_item()?;
+                if *self.peek() == Token::Comma {
                     let mut indices = vec![first];
                     while *self.peek() == Token::Comma {
                         self.bump();
                         if *self.peek() == Token::RBracket { break; }
-                        indices.push(self.expr()?);
+                        indices.push(self.parse_index_item()?);
                     }
                     self.eat(&Token::RBracket)?;
                     e = Expr::Index(Box::new(e), Box::new(Expr::Tuple(indices)));
@@ -377,25 +389,48 @@ impl Parser {
                     if !had_rparen { self.eat(&Token::RParen)?; }
                     Ok(Expr::Lambda(params, body.into()))
                 } else {
+                    // Empty parens → empty tuple
+                    if *self.peek() == Token::RParen {
+                        self.bump();
+                        return Ok(Expr::Tuple(vec![]));
+                    }
                     let first = self.expr()?;
+                    // Range literal (a..b)
                     if *self.peek() == Token::DotDot {
                         self.bump();
                         let last = self.expr()?;
                         self.eat(&Token::RParen)?;
                         return Ok(Expr::Range(Box::new(first), Box::new(last)));
                     }
-                    if *self.peek() == Token::Comma {
-                        let mut items = vec![first];
-                        while *self.peek() == Token::Comma {
+                    // Collect first row (comma-separated items)
+                    let mut row0 = vec![first];
+                    while *self.peek() == Token::Comma {
+                        self.bump();
+                        if matches!(self.peek(), Token::RParen | Token::Semicolon) { break; }
+                        row0.push(self.expr()?);
+                    }
+                    // Matrix literal: rows separated by ;
+                    if *self.peek() == Token::Semicolon {
+                        let mut rows = vec![row0];
+                        while *self.peek() == Token::Semicolon {
                             self.bump();
                             if *self.peek() == Token::RParen { break; }
-                            items.push(self.expr()?);
+                            let mut row = vec![self.expr()?];
+                            while *self.peek() == Token::Comma {
+                                self.bump();
+                                if matches!(self.peek(), Token::RParen | Token::Semicolon) { break; }
+                                row.push(self.expr()?);
+                            }
+                            rows.push(row);
                         }
                         self.eat(&Token::RParen)?;
-                        Ok(Expr::Tuple(items))
+                        return Ok(Expr::TensorLit(rows));
+                    }
+                    self.eat(&Token::RParen)?;
+                    if row0.len() == 1 {
+                        Ok(row0.into_iter().next().unwrap())
                     } else {
-                        self.eat(&Token::RParen)?;
-                        Ok(first)
+                        Ok(Expr::Tuple(row0))
                     }
                 }
             }
