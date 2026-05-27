@@ -32,7 +32,7 @@ pub const BUILTIN_FNS: &[&str] = &[
     "sinc", "sech", "csch", "erf", "erfc", "j0", "j1", "jinc",
     "graph",
     // Tensor ops
-    "matrix", "zeros", "ones", "eye", "diag",
+    "tensor", "matrix", "zeros", "ones", "eye", "diag",
     "shape", "rows", "cols", "transpose", "trace", "norm",
     "row", "col", "matmul",
     "det", "inv", "solve",

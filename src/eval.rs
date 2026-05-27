@@ -70,7 +70,7 @@ impl Env {
             "fft", "ifft",
             "sum", "prod", "integral", "deriv", "map", "graph",
             // Tensor ops
-            "matrix", "zeros", "ones", "eye", "diag",
+            "tensor", "matrix", "zeros", "ones", "eye", "diag",
             "shape", "rows", "cols", "transpose", "trace", "norm",
             "row", "col", "matmul",
             "det", "inv", "solve",
@@ -111,7 +111,7 @@ pub fn is_protected(name: &str) -> bool {
         | "if"
         | "fft" | "ifft"
         | "sum" | "prod" | "integral" | "deriv" | "map" | "graph"
-        | "matrix" | "zeros" | "ones" | "eye" | "diag"
+        | "tensor" | "matrix" | "zeros" | "ones" | "eye" | "diag"
         | "shape" | "rows" | "cols" | "transpose" | "trace" | "norm"
         | "row" | "col" | "matmul"
         | "det" | "inv" | "solve"
@@ -122,13 +122,33 @@ pub fn is_protected(name: &str) -> bool {
 
 // ── Output formatting ─────────────────────────────────────────────────────────
 
+fn fmt_f(n: f64) -> String {
+    if n.is_nan() { return "NaN".into(); }
+    if n.is_infinite() { return if n > 0.0 { "inf".into() } else { "-inf".into() }; }
+    if n.fract() == 0.0 && n.abs() < 1e15 { return format!("{}", n as i64); }
+    format!("{n}")
+}
+
+/// Box-character display for a 2D slice of data with given rows × cols.
+fn fmt_mat(data: &[f64], r: usize, c: usize) -> String {
+    let cells: Vec<Vec<String>> = (0..r).map(|i| {
+        (0..c).map(|j| fmt_f(data[i * c + j])).collect()
+    }).collect();
+    let col_widths: Vec<usize> = (0..c).map(|j| {
+        cells.iter().map(|row| row[j].len()).max().unwrap_or(0)
+    }).collect();
+    cells.into_iter().enumerate().map(|(ri, row)| {
+        let padded: Vec<String> = row.into_iter().zip(&col_widths)
+            .map(|(s, &w)| format!("{:>w$}", s))
+            .collect();
+        let content = padded.join("  ");
+        if r == 1 || ri == 0   { format!("\u{23A1} {} \u{23A4}", content) }  // ⎡ ⎤
+        else if ri == r - 1    { format!("\u{23A3} {} \u{23A6}", content) }  // ⎣ ⎦
+        else                   { format!("\u{23A2} {} \u{23A5}", content) }  // ⎢ ⎥
+    }).collect::<Vec<_>>().join("\n")
+}
+
 pub fn fmt_val(v: &Val) -> String {
-    fn fmt_f(n: f64) -> String {
-        if n.is_nan() { return "NaN".into(); }
-        if n.is_infinite() { return if n > 0.0 { "inf".into() } else { "-inf".into() }; }
-        if n.fract() == 0.0 && n.abs() < 1e15 { return format!("{}", n as i64); }
-        format!("{n}")
-    }
     match v {
         Val::Num(n) => fmt_f(*n),
         Val::Complex(a, b) => {
@@ -153,24 +173,16 @@ pub fn fmt_val(v: &Val) -> String {
                 return format!("[{}]", items.join(", "));
             }
             if shape.len() == 2 {
-                let (r, c) = (shape[0], shape[1]);
-                let cells: Vec<Vec<String>> = (0..r).map(|i| {
-                    (0..c).map(|j| fmt_f(data[i * c + j])).collect()
-                }).collect();
-                let col_widths: Vec<usize> = (0..c).map(|j| {
-                    cells.iter().map(|row| row[j].len()).max().unwrap_or(0)
-                }).collect();
-                let rows: Vec<String> = cells.into_iter().enumerate().map(|(ri, row)| {
-                    let padded: Vec<String> = row.into_iter().zip(&col_widths)
-                        .map(|(s, &w)| format!("{:>w$}", s))
-                        .collect();
-                    let content = padded.join("  ");
-                    if r == 1      { format!("\u{23A1} {} \u{23A4}", content) }  // ⎡ ⎤
-                    else if ri == 0     { format!("\u{23A1} {} \u{23A4}", content) }
-                    else if ri == r-1  { format!("\u{23A3} {} \u{23A6}", content) }  // ⎣ ⎦
-                    else               { format!("\u{23A2} {} \u{23A5}", content) }  // ⎢ ⎥
-                }).collect();
-                return rows.join("\n");
+                return fmt_mat(data, shape[0], shape[1]);
+            }
+            // 3D+: display as stacked 2D slices along the first axis
+            if shape.len() == 3 {
+                let (d0, d1, d2) = (shape[0], shape[1], shape[2]);
+                let slice_size = d1 * d2;
+                return (0..d0).map(|k| {
+                    let slice = &data[k*slice_size..(k+1)*slice_size];
+                    format!("[{k}]\n{}", fmt_mat(slice, d1, d2))
+                }).collect::<Vec<_>>().join("\n");
             }
             format!("<tensor shape={:?}>", shape)
         }
@@ -882,12 +894,37 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
         }
 
         // ── Tensor constructors ───────────────────────────────────────────────
-        "matrix" => {
-            if vals.len() != 3 { return Err("matrix(r, c, f) expects 3 args".into()); }
+        "tensor" => {
+            // tensor(f, n1, n2, ...) — variadic; f called with (i0, i1, ...) for each cell
+            if vals.len() < 2 { return Err("tensor(f, n1, n2, …) expects at least 2 args".into()); }
             let mut it = vals.into_iter();
+            let f = it.next().unwrap();
+            let shape: Vec<usize> = it.map(|v| v.num("tensor").map(|x| x as usize))
+                .collect::<Result<_, _>>()?;
+            let ndim = shape.len();
+            let total: usize = shape.iter().product();
+            let mut data = Vec::with_capacity(total);
+            let mut indices = vec![0usize; ndim];
+            for _ in 0..total {
+                let args: Vec<Val> = indices.iter().map(|&i| Val::Num(i as f64)).collect();
+                let v = apply_val(f.clone(), args, env)?;
+                data.push(v.num("tensor")?);
+                // Advance row-major (rightmost index fastest)
+                for k in (0..ndim).rev() {
+                    indices[k] += 1;
+                    if indices[k] < shape[k] { break; }
+                    indices[k] = 0;
+                }
+            }
+            Ok(Val::Tensor { data, shape })
+        }
+        "matrix" => {
+            // matrix(f, r, c) — 2D convenience wrapper around tensor
+            if vals.len() != 3 { return Err("matrix(f, r, c) expects 3 args".into()); }
+            let mut it = vals.into_iter();
+            let f = it.next().unwrap();
             let r = it.next().unwrap().num("matrix")? as usize;
             let c = it.next().unwrap().num("matrix")? as usize;
-            let f = it.next().unwrap();
             let mut data = Vec::with_capacity(r * c);
             for i in 0..r {
                 for j in 0..c {
