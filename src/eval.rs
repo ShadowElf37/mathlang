@@ -72,10 +72,11 @@ impl Env {
             // Tensor ops
             "tensor", "matrix", "zeros", "ones", "eye", "diag",
             "shape", "rows", "cols", "transpose", "trace", "norm",
-            "row", "col", "matmul",
+            "row", "col", "matmul", "outer",
             "det", "inv", "solve",
             "hstack", "vstack", "tomat",
             "lingrid",
+            "reshape", "permute", "cat", "squeeze", "unsqueeze",
         ] {
             vars.insert(name.to_string(), Val::Builtin(name.to_string()));
         }
@@ -113,10 +114,11 @@ pub fn is_protected(name: &str) -> bool {
         | "sum" | "prod" | "integral" | "deriv" | "map" | "graph"
         | "tensor" | "matrix" | "zeros" | "ones" | "eye" | "diag"
         | "shape" | "rows" | "cols" | "transpose" | "trace" | "norm"
-        | "row" | "col" | "matmul"
+        | "row" | "col" | "matmul" | "outer"
         | "det" | "inv" | "solve"
         | "hstack" | "vstack" | "tomat"
         | "lingrid"
+        | "reshape" | "permute" | "cat" | "squeeze" | "unsqueeze"
     )
 }
 
@@ -374,6 +376,47 @@ fn solve_nxn(a: &[f64], b: &[f64], n: usize) -> Result<Vec<f64>, String> {
         }
     }
     Ok((0..n).map(|i| aug[i*w+n]).collect())
+}
+
+// ── Tensor axis utilities ─────────────────────────────────────────────────────
+
+/// Row-major strides for a given shape.
+fn strides(shape: &[usize]) -> Vec<usize> {
+    let n = shape.len();
+    let mut s = vec![1usize; n];
+    for k in (0..n.saturating_sub(1)).rev() { s[k] = s[k + 1] * shape[k + 1]; }
+    s
+}
+
+/// Decompose a flat index into a multi-index for the given shape (row-major).
+fn unravel(mut flat: usize, shape: &[usize]) -> Vec<usize> {
+    let n = shape.len();
+    let mut idx = vec![0usize; n];
+    for k in (0..n).rev() {
+        idx[k] = flat % shape[k];
+        flat /= shape[k];
+    }
+    idx
+}
+
+/// Apply an axis permutation to a tensor.
+/// `perm[k]` = which input axis feeds output axis k.
+fn apply_permutation(data: Vec<f64>, shape: &[usize], perm: &[usize]) -> Result<Val, String> {
+    let ndim = shape.len();
+    let new_shape: Vec<usize> = perm.iter().map(|&k| shape[k]).collect();
+    let old_strides = strides(shape);
+    let n = data.len();
+    let mut out = vec![0.0f64; n];
+    for out_flat in 0..n {
+        // Decompose out_flat in new_shape space
+        let out_multi = unravel(out_flat, &new_shape);
+        // Map to input multi-index: in_multi[perm[k]] = out_multi[k]
+        let mut in_multi = vec![0usize; ndim];
+        for k in 0..ndim { in_multi[perm[k]] = out_multi[k]; }
+        let in_flat: usize = in_multi.iter().zip(&old_strides).map(|(&i, &s)| i * s).sum();
+        out[out_flat] = data[in_flat];
+    }
+    Ok(Val::Tensor { data: out, shape: new_shape })
 }
 
 // ── Builtin dispatch ──────────────────────────────────────────────────────────
@@ -667,7 +710,10 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                     Val::Tuple(inner) => inner,
                     other             => vec![other],
                 }).collect())),
-                Val::Tensor { data, .. } => Ok(Val::Tuple(data.into_iter().map(Val::Num).collect())),
+                Val::Tensor { data, .. } => {
+                    let n = data.len();
+                    Ok(Val::Tensor { data, shape: vec![n] })
+                }
                 _ => Err("flatten: argument must be a tuple or tensor".into()),
             }
         }
@@ -688,26 +734,35 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
         // ── Statistics ────────────────────────────────────────────────────────
         "mean" => {
             arity("mean", 1, vals.len())?;
-            let items = match vals.into_iter().next().unwrap() { Val::Tuple(v) => v, _ => return Err("mean: argument must be a tuple".into()) };
-            if items.is_empty() { return Err("mean: empty tuple".into()); }
-            let n = items.len() as f64;
-            let s: f64 = items.into_iter().map(|v| v.num("mean")).collect::<Result<Vec<_>, _>>()?.into_iter().sum();
-            Ok(Val::Num(s / n))
+            let nums: Vec<f64> = match vals.into_iter().next().unwrap() {
+                Val::Tuple(v)       => v.into_iter().map(|x| x.num("mean")).collect::<Result<_, _>>()?,
+                Val::Tensor { data, .. } => data,
+                _ => return Err("mean: argument must be a tuple or tensor".into()),
+            };
+            if nums.is_empty() { return Err("mean: empty".into()); }
+            let n = nums.len() as f64;
+            Ok(Val::Num(nums.iter().sum::<f64>() / n))
         }
         "median" => {
             arity("median", 1, vals.len())?;
-            let items = match vals.into_iter().next().unwrap() { Val::Tuple(v) => v, _ => return Err("median: argument must be a tuple".into()) };
-            if items.is_empty() { return Err("median: empty tuple".into()); }
-            let mut nums: Vec<f64> = items.into_iter().map(|v| v.num("median")).collect::<Result<_, _>>()?;
+            let mut nums: Vec<f64> = match vals.into_iter().next().unwrap() {
+                Val::Tuple(v)       => v.into_iter().map(|x| x.num("median")).collect::<Result<_, _>>()?,
+                Val::Tensor { data, .. } => data,
+                _ => return Err("median: argument must be a tuple or tensor".into()),
+            };
+            if nums.is_empty() { return Err("median: empty".into()); }
             nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let mid = nums.len() / 2;
             Ok(Val::Num(if nums.len() % 2 == 1 { nums[mid] } else { (nums[mid - 1] + nums[mid]) / 2.0 }))
         }
         "mode" => {
             arity("mode", 1, vals.len())?;
-            let items = match vals.into_iter().next().unwrap() { Val::Tuple(v) => v, _ => return Err("mode: argument must be a tuple".into()) };
-            if items.is_empty() { return Err("mode: empty tuple".into()); }
-            let nums: Vec<f64> = items.into_iter().map(|v| v.num("mode")).collect::<Result<_, _>>()?;
+            let nums: Vec<f64> = match vals.into_iter().next().unwrap() {
+                Val::Tuple(v)       => v.into_iter().map(|x| x.num("mode")).collect::<Result<_, _>>()?,
+                Val::Tensor { data, .. } => data,
+                _ => return Err("mode: argument must be a tuple or tensor".into()),
+            };
+            if nums.is_empty() { return Err("mode: empty".into()); }
             let mut best_val = nums[0];
             let mut best_cnt = 0usize;
             for &candidate in &nums {
@@ -718,18 +773,24 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
         }
         "var" => {
             arity("var", 1, vals.len())?;
-            let items = match vals.into_iter().next().unwrap() { Val::Tuple(v) => v, _ => return Err("var: argument must be a tuple".into()) };
-            if items.is_empty() { return Err("var: empty tuple".into()); }
-            let nums: Vec<f64> = items.into_iter().map(|v| v.num("var")).collect::<Result<_, _>>()?;
+            let nums: Vec<f64> = match vals.into_iter().next().unwrap() {
+                Val::Tuple(v)       => v.into_iter().map(|x| x.num("var")).collect::<Result<_, _>>()?,
+                Val::Tensor { data, .. } => data,
+                _ => return Err("var: argument must be a tuple or tensor".into()),
+            };
+            if nums.is_empty() { return Err("var: empty".into()); }
             let n = nums.len() as f64;
             let mean = nums.iter().sum::<f64>() / n;
             Ok(Val::Num(nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n))
         }
         "std" => {
             arity("std", 1, vals.len())?;
-            let items = match vals.into_iter().next().unwrap() { Val::Tuple(v) => v, _ => return Err("std: argument must be a tuple".into()) };
-            if items.is_empty() { return Err("std: empty tuple".into()); }
-            let nums: Vec<f64> = items.into_iter().map(|v| v.num("std")).collect::<Result<_, _>>()?;
+            let nums: Vec<f64> = match vals.into_iter().next().unwrap() {
+                Val::Tuple(v)       => v.into_iter().map(|x| x.num("std")).collect::<Result<_, _>>()?,
+                Val::Tensor { data, .. } => data,
+                _ => return Err("std: argument must be a tuple or tensor".into()),
+            };
+            if nums.is_empty() { return Err("std: empty".into()); }
             let n = nums.len() as f64;
             let mean = nums.iter().sum::<f64>() / n;
             Ok(Val::Num((nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n).sqrt()))
@@ -959,12 +1020,13 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
         }
         "diag" => {
             arity("diag", 1, vals.len())?;
-            let items = match vals.into_iter().next().unwrap() {
-                Val::Tuple(v) => v,
-                _ => return Err("diag: argument must be a tuple".into()),
+            let nums: Vec<f64> = match vals.into_iter().next().unwrap() {
+                Val::Tuple(v) => v.into_iter().map(|x| x.num("diag")).collect::<Result<_, _>>()?,
+                Val::Tensor { data, shape } if shape.len() == 1 => data,
+                Val::Tensor { .. } => return Err("diag: tensor argument must be 1D".into()),
+                _ => return Err("diag: argument must be a tuple or 1D tensor".into()),
             };
-            let n = items.len();
-            let nums: Vec<f64> = items.into_iter().map(|v| v.num("diag")).collect::<Result<_, _>>()?;
+            let n = nums.len();
             let mut data = vec![0.0f64; n * n];
             for (i, &x) in nums.iter().enumerate() { data[i * n + i] = x; }
             Ok(Val::Tensor { data, shape: vec![n, n] })
@@ -997,21 +1059,36 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
         }
 
         // ── Tensor operations ─────────────────────────────────────────────────
+
+        // Helper available in this scope for permute-based transforms
+        // transpose(T)       – reverse all axes (= classic 2-D transpose for matrices)
+        // transpose(T, a, b) – swap axes a and b
         "transpose" => {
-            arity("transpose", 1, vals.len())?;
-            match vals.into_iter().next().unwrap() {
-                Val::Tensor { data, shape } if shape.len() == 2 => {
-                    let (r, c) = (shape[0], shape[1]);
-                    let mut out = vec![0.0f64; r * c];
-                    for i in 0..r {
-                        for j in 0..c {
-                            out[j * r + i] = data[i * c + j];
+            if vals.is_empty() || vals.len() == 2 || vals.len() > 3 {
+                return Err("transpose(T) or transpose(T, a, b): expects 1 or 3 args".into());
+            }
+            let mut it = vals.into_iter();
+            match it.next().unwrap() {
+                Val::Tensor { data, shape } => {
+                    let ndim = shape.len();
+                    let perm: Vec<usize> = if ndim == 0 {
+                        vec![]
+                    } else if it.len() == 0 {
+                        // Reverse axes
+                        (0..ndim).rev().collect()
+                    } else {
+                        let a = it.next().unwrap().num("transpose")? as usize;
+                        let b = it.next().unwrap().num("transpose")? as usize;
+                        if a >= ndim || b >= ndim {
+                            return Err(format!("transpose: axis out of range for {ndim}-D tensor"));
                         }
-                    }
-                    Ok(Val::Tensor { data: out, shape: vec![c, r] })
+                        let mut p: Vec<usize> = (0..ndim).collect();
+                        p.swap(a, b);
+                        p
+                    };
+                    apply_permutation(data, &shape, &perm)
                 }
-                Val::Tensor { .. } => Err("transpose: tensor must be 2D".into()),
-                _ => Err("transpose: argument must be a 2D tensor".into()),
+                _ => Err("transpose: argument must be a tensor".into()),
             }
         }
         "trace" => {
@@ -1071,9 +1148,11 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             }
         }
         "matmul" => {
+            // Supports 2D×2D, 2D×1D, 1D×2D, and 1D×1D (dot product)
             arity("matmul", 2, vals.len())?;
             let mut it = vals.into_iter();
             match (it.next().unwrap(), it.next().unwrap()) {
+                // 2D × 2D → 2D
                 (Val::Tensor { data: ad, shape: ash }, Val::Tensor { data: bd, shape: bsh })
                     if ash.len() == 2 && bsh.len() == 2 =>
                 {
@@ -1092,8 +1171,66 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                     }
                     Ok(Val::Tensor { data: out, shape: vec![ar, bc] })
                 }
-                _ => Err("matmul: both arguments must be 2D tensors".into()),
+                // 2D × 1D → 1D  (matrix-vector)
+                (Val::Tensor { data: ad, shape: ash }, Val::Tensor { data: bd, shape: bsh })
+                    if ash.len() == 2 && bsh.len() == 1 =>
+                {
+                    let (ar, ac) = (ash[0], ash[1]);
+                    if ac != bsh[0] {
+                        return Err(format!("matmul: shape mismatch ({ar}×{ac}) @ ({},)", bsh[0]));
+                    }
+                    let mut out = vec![0.0f64; ar];
+                    for i in 0..ar {
+                        for k in 0..ac { out[i] += ad[i * ac + k] * bd[k]; }
+                    }
+                    Ok(Val::Tensor { data: out, shape: vec![ar] })
+                }
+                // 1D × 2D → 1D  (vector-matrix)
+                (Val::Tensor { data: ad, shape: ash }, Val::Tensor { data: bd, shape: bsh })
+                    if ash.len() == 1 && bsh.len() == 2 =>
+                {
+                    let (br, bc) = (bsh[0], bsh[1]);
+                    if ash[0] != br {
+                        return Err(format!("matmul: shape mismatch ({},) @ ({br}×{bc})", ash[0]));
+                    }
+                    let mut out = vec![0.0f64; bc];
+                    for j in 0..bc {
+                        for k in 0..br { out[j] += ad[k] * bd[k * bc + j]; }
+                    }
+                    Ok(Val::Tensor { data: out, shape: vec![bc] })
+                }
+                // 1D × 1D → scalar  (dot product)
+                (Val::Tensor { data: ad, shape: ash }, Val::Tensor { data: bd, shape: bsh })
+                    if ash.len() == 1 && bsh.len() == 1 =>
+                {
+                    if ash[0] != bsh[0] {
+                        return Err(format!("matmul: length mismatch ({} vs {})", ash[0], bsh[0]));
+                    }
+                    Ok(Val::Num(ad.iter().zip(&bd).map(|(x, y)| x * y).sum()))
+                }
+                _ => Err("matmul: arguments must be 1D or 2D tensors".into()),
             }
+        }
+        "outer" => {
+            // outer(a, b): outer product of two tensors
+            // (d1,...,dm) × (e1,...,en) → (d1,...,dm,e1,...,en)
+            arity("outer", 2, vals.len())?;
+            let mut it = vals.into_iter();
+            match (it.next().unwrap(), it.next().unwrap()) {
+                (Val::Tensor { data: ad, shape: ash }, Val::Tensor { data: bd, shape: bsh }) => {
+                    let mut shape = ash.clone();
+                    shape.extend_from_slice(&bsh);
+                    let mut data = Vec::with_capacity(ad.len() * bd.len());
+                    for &x in &ad { for &y in &bd { data.push(x * y); } }
+                    Ok(Val::Tensor { data, shape })
+                }
+                _ => Err("outer: both arguments must be tensors".into()),
+            }
+        }
+        "einsum" => {
+            // Not yet implemented — requires string literal support.
+            let _ = vals;
+            return Err("einsum is not yet implemented".into());
         }
 
         // ── Linear algebra ────────────────────────────────────────────────────
@@ -1202,41 +1339,225 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             Ok(Val::Tensor { data: data?, shape: vec![r, c] })
         }
         "lingrid" => {
-            if vals.len() != 4 { return Err("lingrid((x0,y0),(x1,y1),(nx,ny),f) expects 4 args".into()); }
+            // lingrid(start, end, counts, f)
+            // start / end / counts can each be a scalar (1-D) or a k-tuple (k-D)
+            if vals.len() != 4 { return Err("lingrid(start, end, counts, f) expects 4 args".into()); }
             let mut it = vals.into_iter();
-            let (x0, y0) = match it.next().unwrap() {
-                Val::Tuple(v) if v.len() == 2 => {
-                    let mut vi = v.into_iter();
-                    (vi.next().unwrap().num("lingrid")?, vi.next().unwrap().num("lingrid")?)
-                }
-                _ => return Err("lingrid: first arg must be (x0,y0)".into()),
-            };
-            let (x1, y1) = match it.next().unwrap() {
-                Val::Tuple(v) if v.len() == 2 => {
-                    let mut vi = v.into_iter();
-                    (vi.next().unwrap().num("lingrid")?, vi.next().unwrap().num("lingrid")?)
-                }
-                _ => return Err("lingrid: second arg must be (x1,y1)".into()),
-            };
-            let (nx, ny) = match it.next().unwrap() {
-                Val::Tuple(v) if v.len() == 2 => {
-                    let mut vi = v.into_iter();
-                    (vi.next().unwrap().num("lingrid")? as usize, vi.next().unwrap().num("lingrid")? as usize)
-                }
-                _ => return Err("lingrid: third arg must be (nx,ny)".into()),
-            };
-            let f = it.next().unwrap();
-            if nx < 2 || ny < 2 { return Err("lingrid: nx and ny must be >= 2".into()); }
-            let mut data = Vec::with_capacity(nx * ny);
-            for i in 0..nx {
-                let xi = x0 + i as f64 * (x1 - x0) / (nx - 1) as f64;
-                for j in 0..ny {
-                    let yj = y0 + j as f64 * (y1 - y0) / (ny - 1) as f64;
-                    let v = apply_val(f.clone(), vec![Val::Num(xi), Val::Num(yj)], env)?;
-                    data.push(v.num("lingrid")?);
+
+            // Helper: extract a Vec<f64> from a scalar or tuple
+            fn as_vec(v: Val, label: &str) -> Result<Vec<f64>, String> {
+                match v {
+                    Val::Num(n)       => Ok(vec![n]),
+                    Val::Tuple(items) => items.into_iter()
+                        .map(|x| x.num(label))
+                        .collect::<Result<Vec<_>, _>>(),
+                    _ => Err(format!("lingrid: {label} must be a number or tuple")),
                 }
             }
-            Ok(Val::Tensor { data, shape: vec![nx, ny] })
+
+            let starts = as_vec(it.next().unwrap(), "start")?;
+            let ends   = as_vec(it.next().unwrap(), "end")?;
+            let ns_f   = as_vec(it.next().unwrap(), "counts")?;
+            let f      = it.next().unwrap();
+
+            let ndim = starts.len();
+            if ends.len() != ndim || ns_f.len() != ndim {
+                return Err(format!(
+                    "lingrid: start/end/counts must all have the same length \
+                     (got {}, {}, {})", ndim, ends.len(), ns_f.len()
+                ));
+            }
+            let ns: Vec<usize> = ns_f.iter().map(|&x| x as usize).collect();
+            for (k, &n) in ns.iter().enumerate() {
+                if n < 2 { return Err(format!("lingrid: counts[{k}] must be >= 2")); }
+            }
+
+            let total: usize = ns.iter().product();
+
+            // Helper: flatten a function return value to (flat_data, value_shape).
+            // Scalar  → (vec![n], [])
+            // Tuple   → (vec![n0,n1,…], [k])          — must be all numbers
+            // Tensor  → (data, shape)
+            fn flatten_val(v: Val) -> Result<(Vec<f64>, Vec<usize>), String> {
+                match v {
+                    Val::Num(n)              => Ok((vec![n], vec![])),
+                    Val::Tuple(items)        => {
+                        let nums: Result<Vec<f64>, _> = items.into_iter()
+                            .map(|x| x.num("lingrid value"))
+                            .collect();
+                        let d = nums?;
+                        let k = d.len();
+                        Ok((d, vec![k]))
+                    }
+                    Val::Tensor { data, shape } => Ok((data, shape)),
+                    other => Err(format!(
+                        "lingrid: function must return a number, tuple, or tensor (got {})",
+                        fmt_val(&other)
+                    )),
+                }
+            }
+
+            // Evaluate all grid points; determine value_shape from the first result.
+            let mut data: Vec<f64> = Vec::new();
+            let mut val_shape: Option<Vec<usize>> = None;
+            let mut idx = vec![0usize; ndim];
+
+            for _ in 0..total {
+                let coords: Vec<Val> = (0..ndim).map(|k| {
+                    let t = idx[k] as f64 / (ns[k] - 1) as f64;
+                    Val::Num(starts[k] + t * (ends[k] - starts[k]))
+                }).collect();
+                let v = apply_val(f.clone(), coords, env)?;
+                let (flat, vshape) = flatten_val(v)?;
+                // Validate consistency with first result
+                match &val_shape {
+                    None     => { val_shape = Some(vshape.clone()); }
+                    Some(vs) => {
+                        if *vs != vshape {
+                            return Err(format!(
+                                "lingrid: function returned inconsistent shapes \
+                                 ({:?} vs {:?})", vs, vshape
+                            ));
+                        }
+                    }
+                }
+                data.extend(flat);
+                // Advance row-major
+                for k in (0..ndim).rev() {
+                    idx[k] += 1;
+                    if idx[k] < ns[k] { break; }
+                    idx[k] = 0;
+                }
+            }
+
+            // Output shape = grid_shape ++ value_shape
+            let mut out_shape = ns.clone();
+            out_shape.extend(val_shape.unwrap_or_default());
+            Ok(Val::Tensor { data, shape: out_shape })
+        }
+
+        // ── Shape manipulation ────────────────────────────────────────────────
+
+        // reshape(T, n0, n1, …)  – reinterpret data with a new shape
+        "reshape" => {
+            if vals.len() < 2 { return Err("reshape(T, n0, n1, …) expects at least 2 args".into()); }
+            let mut it = vals.into_iter();
+            match it.next().unwrap() {
+                Val::Tensor { data, shape } => {
+                    let new_shape: Vec<usize> = it.map(|v| v.num("reshape").map(|x| x as usize))
+                        .collect::<Result<_, _>>()?;
+                    let old_n: usize = shape.iter().product();
+                    let new_n: usize = new_shape.iter().product();
+                    if old_n != new_n {
+                        return Err(format!("reshape: size mismatch ({old_n} vs {new_n})"));
+                    }
+                    Ok(Val::Tensor { data, shape: new_shape })
+                }
+                _ => Err("reshape: first argument must be a tensor".into()),
+            }
+        }
+
+        // permute(T, p0, p1, …)  – reorder axes; perm[k] = which input axis → output axis k
+        "permute" => {
+            if vals.len() < 2 { return Err("permute(T, p0, p1, …) expects at least 2 args".into()); }
+            let mut it = vals.into_iter();
+            match it.next().unwrap() {
+                Val::Tensor { data, shape } => {
+                    let ndim = shape.len();
+                    let perm: Vec<usize> = it.map(|v| v.num("permute").map(|x| x as usize))
+                        .collect::<Result<_, _>>()?;
+                    if perm.len() != ndim {
+                        return Err(format!("permute: need {ndim} axis indices, got {}", perm.len()));
+                    }
+                    let mut seen = vec![false; ndim];
+                    for &p in &perm {
+                        if p >= ndim { return Err(format!("permute: axis {p} out of range for {ndim}-D tensor")); }
+                        if seen[p]  { return Err(format!("permute: axis {p} appears more than once")); }
+                        seen[p] = true;
+                    }
+                    apply_permutation(data, &shape, &perm)
+                }
+                _ => Err("permute: first argument must be a tensor".into()),
+            }
+        }
+
+        // cat(axis, T1, T2, …)  – concatenate tensors along an existing axis
+        "cat" => {
+            if vals.len() < 3 { return Err("cat(axis, T1, T2, …) expects at least 3 args".into()); }
+            let mut it = vals.into_iter();
+            let axis = it.next().unwrap().num("cat")? as usize;
+            let tensors: Vec<(Vec<f64>, Vec<usize>)> = it.map(|v| match v {
+                Val::Tensor { data, shape } => Ok((data, shape)),
+                _ => Err(String::from("cat: all arguments after axis must be tensors")),
+            }).collect::<Result<Vec<(Vec<f64>, Vec<usize>)>, String>>()?;
+            let ndim = tensors[0].1.len();
+            for (_, sh) in &tensors {
+                if sh.len() != ndim {
+                    return Err("cat: all tensors must have the same number of dimensions".into());
+                }
+            }
+            if axis >= ndim { return Err(format!("cat: axis {axis} out of range for {ndim}-D tensors")); }
+            for dim in 0..ndim {
+                if dim == axis { continue; }
+                let d0 = tensors[0].1[dim];
+                for (_, sh) in &tensors {
+                    if sh[dim] != d0 {
+                        return Err(format!("cat: dimension {dim} mismatch ({d0} vs {})", sh[dim]));
+                    }
+                }
+            }
+            // Build output shape
+            let mut out_shape = tensors[0].1.clone();
+            out_shape[axis] = tensors.iter().map(|(_, s)| s[axis]).sum();
+            let out_strides = strides(&out_shape);
+            let out_size: usize = out_shape.iter().product();
+            let mut out_data = vec![0.0f64; out_size];
+            // Copy each tensor's data at the right offset
+            let mut axis_offset = 0usize;
+            for (data, shape) in tensors {
+                let t_size: usize = shape.iter().product();
+                for in_flat in 0..t_size {
+                    let mut multi = unravel(in_flat, &shape);
+                    multi[axis] += axis_offset;
+                    let out_flat: usize = multi.iter().zip(&out_strides).map(|(&i, &s)| i * s).sum();
+                    out_data[out_flat] = data[in_flat];
+                }
+                axis_offset += shape[axis];
+            }
+            Ok(Val::Tensor { data: out_data, shape: out_shape })
+        }
+
+        // squeeze(T)        – remove all size-1 dimensions
+        "squeeze" => {
+            arity("squeeze", 1, vals.len())?;
+            match vals.into_iter().next().unwrap() {
+                Val::Tensor { data, shape } => {
+                    let new_shape: Vec<usize> = shape.into_iter().filter(|&d| d != 1).collect();
+                    if new_shape.is_empty() {
+                        Ok(Val::Num(*data.first().unwrap_or(&0.0)))
+                    } else {
+                        Ok(Val::Tensor { data, shape: new_shape })
+                    }
+                }
+                _ => Err("squeeze: argument must be a tensor".into()),
+            }
+        }
+
+        // unsqueeze(T, dim) – insert a size-1 dimension at position dim
+        "unsqueeze" => {
+            arity("unsqueeze", 2, vals.len())?;
+            let mut it = vals.into_iter();
+            match it.next().unwrap() {
+                Val::Tensor { data, mut shape } => {
+                    let dim = it.next().unwrap().num("unsqueeze")? as usize;
+                    if dim > shape.len() {
+                        return Err(format!("unsqueeze: dim {dim} out of range (ndim={})", shape.len()));
+                    }
+                    shape.insert(dim, 1);
+                    Ok(Val::Tensor { data, shape })
+                }
+                _ => Err("unsqueeze: first argument must be a tensor".into()),
+            }
         }
 
         _ => Err(format!("undefined function: {name}")),
@@ -1478,124 +1799,15 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
             }
             Ok(Val::Tensor { data, shape: vec![r, c] })
         }
+        Expr::Slice(..) => Err("slice expression can only appear inside T[…]".into()),
+
         Expr::Index(expr, idx) => {
-            let v       = eval(expr, env)?;
-            let idx_val = eval(idx, env)?;
-            match (v, idx_val) {
-                // ── Tuple indexing ────────────────────────────────────────────
-                (Val::Tuple(items), Val::Num(n)) => {
-                    let raw = n as i64;
-                    let len = items.len() as i64;
-                    let i   = if raw < 0 { (len + raw).max(0) as usize } else { raw as usize };
-                    items.into_iter().nth(i).ok_or_else(|| format!("index {raw} out of range"))
-                }
-                (Val::Tuple(items), Val::Tuple(indices)) => {
-                    let len = items.len() as i64;
-                    let result: Result<Vec<Val>, _> = indices.into_iter().map(|iv| {
-                        let n = iv.num("index")? as i64;
-                        let i = if n < 0 { (len + n).max(0) as usize } else { n as usize };
-                        items.iter().nth(i).cloned().ok_or_else(|| format!("index {n} out of range"))
-                    }).collect();
-                    Ok(Val::Tuple(result?))
-                }
-                // ── Tensor indexing ───────────────────────────────────────────
-                (Val::Tensor { data, shape }, Val::Num(n)) => {
-                    let raw = n as i64;
-                    let dim0 = shape[0] as i64;
-                    let i = if raw < 0 { (dim0 + raw).max(0) as usize } else { raw as usize };
-                    if i >= shape[0] {
-                        return Err(format!("tensor index {raw} out of range (size={})", shape[0]));
-                    }
-                    if shape.len() == 1 {
-                        Ok(Val::Num(data[i]))
-                    } else {
-                        let sub_size: usize = shape[1..].iter().product();
-                        let start = i * sub_size;
-                        Ok(Val::Tensor {
-                            data: data[start..start + sub_size].to_vec(),
-                            shape: shape[1..].to_vec(),
-                        })
-                    }
-                }
-                (Val::Tensor { data, shape }, Val::Tuple(indices)) => {
-                    if indices.len() != shape.len() {
-                        return Err(format!(
-                            "tensor: expected {} indices, got {}",
-                            shape.len(), indices.len()
-                        ));
-                    }
-                    // Check if any index is a Tuple (range/slice)
-                    let has_slice = indices.iter().any(|v| matches!(v, Val::Tuple(_)));
-                    if !has_slice {
-                        // All scalar — compute flat index (row-major, right-to-left strides)
-                        let mut flat = 0usize;
-                        let mut stride = 1usize;
-                        let idx_nums: Vec<i64> = indices.into_iter()
-                            .map(|v| v.num("tensor index").map(|x| x as i64))
-                            .collect::<Result<_, _>>()?;
-                        for k in (0..shape.len()).rev() {
-                            let dim = shape[k] as i64;
-                            let raw = idx_nums[k];
-                            let i = if raw < 0 { (dim + raw).max(0) as usize } else { raw as usize };
-                            if i >= shape[k] {
-                                return Err(format!(
-                                    "tensor index {raw} out of range for dim {k} (size={})", shape[k]
-                                ));
-                            }
-                            flat += i * stride;
-                            stride *= shape[k];
-                        }
-                        Ok(Val::Num(data[flat]))
-                    } else if shape.len() == 2 {
-                        // 2D slice indexing
-                        let (nr, nc) = (shape[0], shape[1]);
-                        // Helper: resolve index spec for a dim of given size
-                        fn resolve_dim(val: Val, dim: usize, label: &str) -> Result<Vec<usize>, String> {
-                            match val {
-                                Val::Num(n) => {
-                                    let raw = n as i64;
-                                    let i = if raw < 0 { (dim as i64 + raw).max(0) as usize } else { raw as usize };
-                                    if i >= dim { return Err(format!("{label} index {raw} out of range (size={dim})")); }
-                                    Ok(vec![i])
-                                }
-                                Val::Tuple(ns) => {
-                                    ns.into_iter().map(|v| {
-                                        let raw = v.num(label)? as i64;
-                                        let i = if raw < 0 { (dim as i64 + raw).max(0) as usize } else { raw as usize };
-                                        if i >= dim { return Err(format!("{label} index {raw} out of range (size={dim})")); }
-                                        Ok(i)
-                                    }).collect()
-                                }
-                                _ => Err(format!("{label}: index must be a number or range")),
-                            }
-                        }
-                        let mut it = indices.into_iter();
-                        let row_is_scalar = matches!(it.as_slice().first(), Some(Val::Num(_)));
-                        let ri = it.next().unwrap();
-                        let ci = it.next().unwrap();
-                        let col_is_scalar = matches!(ci, Val::Num(_));
-                        let rows = resolve_dim(ri, nr, "row")?;
-                        let cols = resolve_dim(ci, nc, "col")?;
-                        match (row_is_scalar, col_is_scalar) {
-                            (true, true) => Ok(Val::Num(data[rows[0] * nc + cols[0]])),
-                            (true, false) => {
-                                let d: Vec<f64> = cols.iter().map(|&c| data[rows[0]*nc+c]).collect();
-                                Ok(Val::Tensor { data: d, shape: vec![cols.len()] })
-                            }
-                            (false, true) => {
-                                let d: Vec<f64> = rows.iter().map(|&r| data[r*nc+cols[0]]).collect();
-                                Ok(Val::Tensor { data: d, shape: vec![rows.len()] })
-                            }
-                            (false, false) => {
-                                let mut d = Vec::with_capacity(rows.len() * cols.len());
-                                for &r in &rows { for &c in &cols { d.push(data[r*nc+c]); } }
-                                Ok(Val::Tensor { data: d, shape: vec![rows.len(), cols.len()] })
-                            }
-                        }
-                    } else {
-                        Err("slice indexing is only supported for 2D tensors".into())
-                    }
-                }
+            let v = eval(expr, env)?;
+            match v {
+                // ── Tensor: shape-aware indexing, handles Expr::Slice ────────
+                Val::Tensor { data, shape } => eval_tensor_index_ast(&data, &shape, idx, env),
+                // ── Tuple: also supports slice expressions ────────────────────
+                Val::Tuple(items) => eval_tuple_index_ast(items, idx, env),
                 _ => Err("indexing requires a tuple or tensor".into()),
             }
         }
@@ -1684,14 +1896,25 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                         if arg_exprs.len() != 2 {
                             return Err("reduce(f, tuple) expects 2 args".into());
                         }
-                        let items = match eval(&arg_exprs[1], env)? {
-                            Val::Tuple(v) => v,
-                            other => return Err(format!("reduce: second arg must be a tuple, got {}", fmt_val(&other))),
+                        let second = eval(&arg_exprs[1], env)?;
+                        let (first_item, rest): (Val, Box<dyn Iterator<Item=Val>>) = match second {
+                            Val::Tuple(v) => {
+                                if v.is_empty() { return Err("reduce: empty tuple".into()); }
+                                let mut it = v.into_iter();
+                                let first = it.next().unwrap();
+                                (first, Box::new(it))
+                            }
+                            Val::Tensor { data, .. } => {
+                                if data.is_empty() { return Err("reduce: empty tensor".into()); }
+                                let mut it = data.into_iter().map(Val::Num);
+                                let first = it.next().unwrap();
+                                (first, Box::new(it))
+                            }
+                            other => return Err(format!("reduce: second arg must be a tuple or tensor, got {}", fmt_val(&other))),
                         };
-                        if items.is_empty() { return Err("reduce: empty tuple".into()); }
                         let f_val = eval(&arg_exprs[0], env)?;
-                        let mut acc = items[0].clone();
-                        for item in items.into_iter().skip(1) {
+                        let mut acc = first_item;
+                        for item in rest {
                             acc = apply_val(f_val.clone(), vec![acc, item], env)?;
                         }
                         return Ok(acc);
@@ -1793,6 +2016,175 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
     }
 }
 
+// ── Index resolution ──────────────────────────────────────────────────────────
+
+/// Tuple indexing: supports slices, multi-index selects, and plain scalar.
+fn eval_tuple_index_ast(items: Vec<Val>, idx: &Expr, env: &Env) -> Result<Val, String> {
+    let dim = items.len();
+    // Determine whether any slice form is involved.
+    let is_slice = matches!(idx, Expr::Slice(..))
+        || matches!(idx, Expr::Tuple(es) if es.iter().any(|e| matches!(e, Expr::Slice(..))));
+
+    if is_slice {
+        // Route through slice resolver (treat tuple as 1-D array)
+        let idx_items: Vec<&Expr> = match idx {
+            Expr::Tuple(es) => {
+                if es.len() != 1 {
+                    return Err(format!("tuple is 1-D: expected 1 index, got {}", es.len()));
+                }
+                vec![&es[0]]
+            }
+            single => vec![single],
+        };
+        let (is_range, selected) = resolve_index_item(idx_items[0], dim, 0, env)?;
+        if !is_range {
+            // Single element (scalar result from a degenerate slice)
+            items.into_iter().nth(selected[0])
+                .ok_or_else(|| "index out of range".into())
+        } else if selected.len() == 1 {
+            items.into_iter().nth(selected[0])
+                .ok_or_else(|| "index out of range".into())
+        } else {
+            Ok(Val::Tuple(
+                selected.iter()
+                    .filter_map(|&i| items.get(i).cloned())
+                    .collect()
+            ))
+        }
+    } else {
+        // Original behaviour: evaluate index, match Num or Tuple(of scalars)
+        let idx_val = eval(idx, env)?;
+        match idx_val {
+            Val::Num(n) => {
+                let raw = n as i64;
+                let i = if raw < 0 { (dim as i64 + raw).max(0) as usize } else { raw as usize };
+                items.into_iter().nth(i).ok_or_else(|| format!("index {raw} out of range"))
+            }
+            Val::Tuple(indices) => {
+                let len = dim as i64;
+                let result: Result<Vec<Val>, _> = indices.into_iter().map(|iv| {
+                    let n = iv.num("index")? as i64;
+                    let i = if n < 0 { (len + n).max(0) as usize } else { n as usize };
+                    items.iter().nth(i).cloned().ok_or_else(|| format!("index {n} out of range"))
+                }).collect();
+                Ok(Val::Tuple(result?))
+            }
+            other => Err(format!("tuple index must be a number, got {}", fmt_val(&other))),
+        }
+    }
+}
+
+/// Shape-aware tensor indexing that handles Expr::Slice.
+/// `idx` is the raw index expression: either a single item or Expr::Tuple of items.
+fn eval_tensor_index_ast(data: &[f64], shape: &[usize], idx: &Expr, env: &Env) -> Result<Val, String> {
+    // Flatten index expressions into a list of items per dimension.
+    let items: Vec<&Expr> = match idx {
+        Expr::Tuple(es) => es.iter().collect(),
+        single          => vec![single],
+    };
+
+    // Single scalar index `T[n]` — return row/sub-tensor (no slice check needed).
+    if items.len() == 1 && !matches!(items[0], Expr::Slice(..)) {
+        let idx_val = eval(items[0], env)?;
+        let raw = idx_val.num("tensor index")? as i64;
+        let dim0 = shape[0] as i64;
+        let i = if raw < 0 { (dim0 + raw).max(0) as usize } else { raw as usize };
+        if i >= shape[0] {
+            return Err(format!("tensor index {raw} out of range (size={})", shape[0]));
+        }
+        return if shape.len() == 1 {
+            Ok(Val::Num(data[i]))
+        } else {
+            let sub_size: usize = shape[1..].iter().product();
+            let start = i * sub_size;
+            Ok(Val::Tensor {
+                data: data[start..start + sub_size].to_vec(),
+                shape: shape[1..].to_vec(),
+            })
+        };
+    }
+
+    // Multi-dim or slice indexing: must match ndim exactly.
+    if items.len() != shape.len() {
+        return Err(format!("tensor: expected {} index/slice items, got {}", shape.len(), items.len()));
+    }
+
+    // Resolve each item into (is_range, selected_indices).
+    let resolved: Vec<(bool, Vec<usize>)> = items.iter().zip(shape.iter()).enumerate()
+        .map(|(k, (item, &dim))| resolve_index_item(item, dim, k, env))
+        .collect::<Result<_, _>>()?;
+
+    // Output shape: keep dims whose index is a range/slice.
+    let out_shape: Vec<usize> = resolved.iter()
+        .filter(|(keep, _)| *keep)
+        .map(|(_, idxs)| idxs.len())
+        .collect();
+
+    let range_sizes: Vec<usize> = resolved.iter().map(|(_, idxs)| idxs.len()).collect();
+    let total: usize = range_sizes.iter().product();
+    let in_strides = strides(shape);
+    let mut out_data = Vec::with_capacity(total);
+
+    for out_flat in 0..total {
+        let combo = unravel(out_flat, &range_sizes);
+        let in_flat: usize = combo.iter().zip(&resolved).zip(&in_strides)
+            .map(|((&ci, (_, idxs)), &stride)| idxs[ci] * stride)
+            .sum();
+        out_data.push(data[in_flat]);
+    }
+
+    if out_shape.is_empty() {
+        Ok(Val::Num(out_data[0]))
+    } else {
+        Ok(Val::Tensor { data: out_data, shape: out_shape })
+    }
+}
+
+/// Resolve one index item (Expr::Slice or a scalar/range expression) for a dimension of given size.
+/// Returns (is_range, selected_indices).
+///   is_range = true  → this dimension is kept in the output
+///   is_range = false → this dimension is collapsed (scalar index)
+fn resolve_index_item(item: &Expr, dim: usize, k: usize, env: &Env) -> Result<(bool, Vec<usize>), String> {
+    // Clamp a signed index to [0, dim).
+    let clamp = |raw: i64| -> Result<usize, String> {
+        let i = if raw < 0 { (dim as i64 + raw).max(0) as usize } else { raw as usize };
+        if i >= dim { Err(format!("index {raw} out of range for dim {k} (size={dim})")) }
+        else { Ok(i) }
+    };
+    match item {
+        // T[..] — all indices
+        Expr::Slice(None, None) => Ok((true, (0..dim).collect())),
+        // T[lo..] — from lo to end
+        Expr::Slice(Some(lo_expr), None) => {
+            let lo = eval(lo_expr, env)?.num("slice lo")? as i64;
+            let lo = if lo < 0 { (dim as i64 + lo).max(0) as usize } else { lo as usize };
+            Ok((true, (lo..dim).collect()))
+        }
+        // T[..hi] — from start to hi (inclusive)
+        Expr::Slice(None, Some(hi_expr)) => {
+            let hi = eval(hi_expr, env)?.num("slice hi")? as i64;
+            let hi = clamp(hi)?;
+            Ok((true, (0..=hi).collect()))
+        }
+        // T[lo..hi] — bounded slice (inclusive on both ends)
+        Expr::Slice(Some(lo_expr), Some(hi_expr)) => {
+            let lo = eval(lo_expr, env)?.num("slice lo")? as i64;
+            let hi = eval(hi_expr, env)?.num("slice hi")? as i64;
+            let lo = if lo < 0 { (dim as i64 + lo).max(0) as usize } else { lo as usize };
+            let hi = clamp(hi)?;
+            if lo > hi { return Ok((true, vec![])); }
+            Ok((true, (lo..=hi).collect()))
+        }
+        // Anything else: evaluate, must be a scalar index.
+        other => {
+            let val = eval(other, env)?;
+            let raw = val.num("tensor index")? as i64;
+            let i = clamp(raw)?;
+            Ok((false, vec![i]))
+        }
+    }
+}
+
 pub fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> {
     let label = if product { "prod" } else { "sum" };
     // 1-arg form: sum(tuple), sum(tensor), prod(tuple), prod(tensor)
@@ -1813,8 +2205,47 @@ pub fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> 
             _ => Err(format!("{label}: 1-arg form requires a tuple or tensor")),
         };
     }
+    // 2-arg form: sum(T, axis) — reduce tensor along one axis
+    if args.len() == 2 {
+        return match eval(&args[0], env)? {
+            Val::Tensor { data, shape } => {
+                let axis = eval(&args[1], env)?.num(label)? as usize;
+                if axis >= shape.len() {
+                    return Err(format!("{label}: axis {axis} out of range for {}-D tensor", shape.len()));
+                }
+                let mut out_shape = shape.clone();
+                out_shape.remove(axis);
+                let out_size: usize = if out_shape.is_empty() { 1 } else { out_shape.iter().product() };
+                let init = if product { 1.0 } else { 0.0 };
+                let mut out_data = vec![init; out_size];
+                // Output strides (for out_shape, which may be empty → scalar)
+                let out_strides: Vec<usize> = strides(&out_shape);
+                for in_flat in 0..data.len() {
+                    let multi = unravel(in_flat, &shape);
+                    // Build output multi-index by dropping the axis dimension
+                    let out_multi: Vec<usize> = multi.iter().enumerate()
+                        .filter(|&(k, _)| k != axis)
+                        .map(|(_, &i)| i)
+                        .collect();
+                    let out_flat: usize = if out_multi.is_empty() {
+                        0
+                    } else {
+                        out_multi.iter().zip(&out_strides).map(|(&i, &s)| i * s).sum()
+                    };
+                    if product { out_data[out_flat] *= data[in_flat]; }
+                    else       { out_data[out_flat] += data[in_flat]; }
+                }
+                if out_shape.is_empty() {
+                    Ok(Val::Num(out_data[0]))
+                } else {
+                    Ok(Val::Tensor { data: out_data, shape: out_shape })
+                }
+            }
+            _ => Err(format!("{label}(T, axis) requires a tensor as first argument")),
+        };
+    }
     if args.len() != 3 {
-        return Err(format!("{label} expects sum(tuple) or {label}(fn, start, stop)"));
+        return Err(format!("{label} expects {label}(T), {label}(T, axis), or {label}(fn, start, stop)"));
     }
     let start = eval(&args[1], env)?.num("start")? as i64;
     let stop  = eval(&args[2], env)?.num("stop")?  as i64;

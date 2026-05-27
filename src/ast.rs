@@ -12,6 +12,9 @@ pub enum Expr {
     Block(Vec<BlockStmt>),
     Apply(Box<Expr>, Vec<Expr>),
     Range(Box<Expr>, Box<Expr>),
+    /// Index-position slice: T[lo..hi]  T[lo..]  T[..hi]  T[..]
+    /// Only produced by parse_index_item; never appears outside Index children.
+    Slice(Option<Box<Expr>>, Option<Box<Expr>>),
 }
 
 #[derive(Debug, Clone)]

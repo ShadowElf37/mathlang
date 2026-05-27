@@ -282,12 +282,31 @@ impl Parser {
     }
 
     // Parse one bracket index item: expr or expr..expr (range)
+    /// Parse one element inside `T[…]`:
+    ///   expr          → scalar index (no slice)
+    ///   expr ..       → slice from expr to end: T[1..]
+    ///   expr .. expr  → bounded slice: T[1..3]
+    ///        ..       → all indices of this dimension: T[..]
+    ///        .. expr  → slice from start to expr: T[..3]
     fn parse_index_item(&mut self) -> Result<Expr, String> {
+        // Standalone `..` (or `.. end`)
+        if *self.peek() == Token::DotDot {
+            self.bump();
+            let hi = match self.peek() {
+                Token::Comma | Token::RBracket | Token::Eof => None,
+                _ => Some(Box::new(self.expr()?)),
+            };
+            return Ok(Expr::Slice(None, hi));
+        }
         let e = self.expr()?;
         if *self.peek() == Token::DotDot {
             self.bump();
-            let end = self.expr()?;
-            Ok(Expr::Range(Box::new(e), Box::new(end)))
+            // `expr ..` with nothing after → open-ended slice
+            let hi = match self.peek() {
+                Token::Comma | Token::RBracket | Token::Eof => None,
+                _ => Some(Box::new(self.expr()?)),
+            };
+            Ok(Expr::Slice(Some(Box::new(e)), hi))
         } else {
             Ok(e)
         }

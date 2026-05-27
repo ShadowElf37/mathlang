@@ -451,7 +451,7 @@ run "ten.norm_ones"     "norm(ones(4))"                       "2"
 run "ten.matmul_id"     "matmul(eye(2), eye(2))"              "⎡ 1  0 ⎤ ⎣ 0  1 ⎦"
 run "ten.matmul_basic"  "matmul(matrix((i,j)->j+1, 1, 2), matrix((i,j)->i+1, 2, 1))" "⎡ 5 ⎤"
 run "ten.matmul_2x2"    "trace(matmul(eye(3), ones(3,3)))"    "3"
-run "ten.flatten"       "flatten(eye(2))"                     "(1, 0, 0, 1)"
+run "ten.flatten"       "flatten(eye(2))"                     "[1, 0, 0, 1]"
 run "ten.sum_tensor"    "sum(ones(3,3))"                      "9"
 run "ten.prod_tensor"   "prod(ones(2,2) * 2)"                 "16"
 run "ten.map_tensor"    "map(x -> x*2, eye(2))"               "⎡ 2  0 ⎤ ⎣ 0  2 ⎦"
@@ -601,11 +601,25 @@ run_err "tomat.bad"  "tomat((1,2,3), 2, 2)"
 
 # ── lingrid ───────────────────────────────────────────────────────────────────
 section "LINGRID"
-run "lg.shape"       "shape(lingrid((0,0),(1,1),(3,3),(x,y)->x+y))"  "(3, 3)"
-run "lg.corner"      "lingrid((0,0),(1,1),(3,3),(x,y)->x+y)[0,0]"    "0"
-run "lg.mid"         "lingrid((0,0),(1,1),(3,3),(x,y)->x+y)[1,1]"    "1"
-run "lg.far"         "lingrid((0,0),(1,1),(3,3),(x,y)->x+y)[2,2]"    "2"
-run "lg.sum"         "sum(lingrid((0,0),(1,1),(2,2),(x,y)->1))"       "4"
+run "lg.1d_scalar"   "lingrid(0, 1, 3, x -> x^2)"                    "[0, 0.25, 1]"
+run "lg.1d_tuple"    "lingrid((0,),(1,),(3,), x -> x^2)"              "[0, 0.25, 1]"
+run "lg.1d_len"      "len(lingrid(0, 4, 5, x -> x))"                  "5"
+run "lg.2d_shape"    "shape(lingrid((0,0),(1,1),(3,3),(x,y)->x+y))"   "(3, 3)"
+run "lg.2d_corner"   "lingrid((0,0),(1,1),(3,3),(x,y)->x+y)[0,0]"    "0"
+run "lg.2d_mid"      "lingrid((0,0),(1,1),(3,3),(x,y)->x+y)[1,1]"    "1"
+run "lg.2d_far"      "lingrid((0,0),(1,1),(3,3),(x,y)->x+y)[2,2]"    "2"
+run "lg.2d_sum"      "sum(lingrid((0,0),(1,1),(2,2),(x,y)->1))"       "4"
+run "lg.3d_shape"    "shape(lingrid((0,0,0),(1,1,1),(3,3,3),(x,y,z)->x+y+z))" "(3, 3, 3)"
+run "lg.3d_origin"   "lingrid((0,0,0),(1,1,1),(3,3,3),(x,y,z)->x+y+z)[0,0,0]" "0"
+run "lg.3d_far"      "lingrid((0,0,0),(1,1,1),(3,3,3),(x,y,z)->x+y+z)[2,2,2]" "3"
+# vector-valued f: output shape = grid_shape ++ value_shape
+run "lg.vec_shape"   "shape(lingrid((-2,-2),(2,2),(5,5),(x,y)->(x,y)))"   "(5, 5, 2)"
+run "lg.vec_x"       "lingrid((-1,-1),(1,1),(3,3),(x,y)->(x,y))[.., .., 0][0,0]" "-1"
+run "lg.vec_y"       "lingrid((-1,-1),(1,1),(3,3),(x,y)->(x,y))[.., .., 1][2,2]" "1"
+run "lg.vec_xgrid"   "shape(lingrid((-1,-1),(1,1),(3,3),(x,y)->(x,y))[.., .., 0])" "(3, 3)"
+run "lg.1d_vec"      "shape(lingrid(0, 1, 4, x -> (sin(x), cos(x))))"     "(4, 2)"
+run "lg.1d_vec_sum"  "sum(lingrid(0,1,4, x -> (0.0, 1.0)), 0)"           "[0, 4]"
+run "lg.ten_val"     "shape(lingrid((0,0),(1,1),(3,3),(x,y)->eye(2)))"    "(3, 3, 2, 2)"
 
 # ── 2D slice indexing ─────────────────────────────────────────────────────────
 section "TENSOR SLICING"
@@ -616,6 +630,108 @@ run "sl.submat_shape"  "shape(eye(3)[0..1, 0..1])"        "(2, 2)"
 run "sl.submat_trace"  "trace(eye(4)[0..1, 0..1])"        "2"
 run "sl.row1_slice"    "(1,2,3; 4,5,6)[1, 0..2]"          "[4, 5, 6]"
 run "sl.col1_slice"    "(1,2,3; 4,5,6; 7,8,9)[0..2, 1]"  "[2, 5, 8]"
+run "sl.1d_range"      "tensor(i -> i, 6)[2..4]"           "[2, 3, 4]"
+run "sl.3d_scalar"     "tensor((i,j,k)->i*4+j*2+k, 2,2,2)[1,0,1]" "5"
+run "sl.3d_mixed"      "shape(zeros(3,4,5)[0, 0..2, 1..3])" "(3, 3)"
+run "sl.3d_slice"      "sum(ones(2,3,4)[0, 0..2, 0..1])"   "6"
+# "all" slices with ..
+run "sl.all_col"       "(1,2,3; 4,5,6; 7,8,9)[.., 0]"     "[1, 4, 7]"
+run "sl.all_row"       "(1,2,3; 4,5,6; 7,8,9)[0, ..]"     "[1, 2, 3]"
+run "sl.all_shape"     "shape((1,2,3; 4,5,6)[.., ..])"     "(2, 3)"
+run "sl.open_lo"       "(1,2,3; 4,5,6; 7,8,9)[1.., 0]"    "[4, 7]"
+run "sl.open_hi"       "(1,2,3; 4,5,6; 7,8,9)[..1, 0]"    "[1, 4]"
+run "sl.1d_all"        "tensor(i->i+1, 5)[..]"             "[1, 2, 3, 4, 5]"
+run "sl.1d_open_lo"    "tensor(i->i+1, 5)[2..]"            "[3, 4, 5]"
+run "sl.1d_open_hi"    "tensor(i->i+1, 5)[..2]"            "[1, 2, 3]"
+run "sl.3d_all"        "shape(zeros(2,3,4)[..,1,..])"      "(2, 4)"
+run "sl.neg_all"       "(1,2,3; 4,5,6; 7,8,9)[-1, ..]"    "[7, 8, 9]"
+# tuple slices
+run "sl.tup_all"       "(10,20,30,40)[..]"                 "(10, 20, 30, 40)"
+run "sl.tup_open_lo"   "(10,20,30,40)[2..]"                "(30, 40)"
+run "sl.tup_open_hi"   "(10,20,30,40)[..1]"                "(10, 20)"
+run "sl.tup_range"     "(10,20,30,40)[1..2]"               "(20, 30)"
+
+# ── outer product ─────────────────────────────────────────────────────────────
+section "OUTER PRODUCT"
+run "out.shape_2d"    "shape(outer(ones(2), ones(3)))"             "(2, 3)"
+run "out.sum_ones"    "sum(outer(ones(3), ones(4)))"               "12"
+run "out.vals"        "outer(tensor(i->i+1,2), tensor(i->i+1,3))[1,2]" "6"
+run "out.3d_shape"    "shape(outer(ones(2), outer(ones(3), ones(4))))" "(2, 3, 4)"
+
+# ── reshape ───────────────────────────────────────────────────────────────────
+section "RESHAPE"
+run "rs.2d_shape"     "shape(reshape(ones(6), 2, 3))"              "(2, 3)"
+run "rs.3d_shape"     "shape(reshape(zeros(24), 2, 3, 4))"         "(2, 3, 4)"
+run "rs.1d_from_2d"   "shape(reshape(eye(3), 9))"                  "(9)"
+run "rs.data_preserved" "sum(reshape(eye(3), 9))"                  "3"
+run "rs.roundtrip"    "trace(reshape(reshape(eye(3), 9), 3, 3))"   "3"
+run_err "rs.size_mismatch" "reshape(ones(6), 2, 4)"
+
+# ── permute ───────────────────────────────────────────────────────────────────
+section "PERMUTE"
+run "pm.2d_swap"      "shape(permute(zeros(2,3), 1, 0))"           "(3, 2)"
+run "pm.3d_shape"     "shape(permute(zeros(2,3,4), 2, 0, 1))"      "(4, 2, 3)"
+run "pm.identity"     "trace(permute(eye(3), 0, 1))"               "3"
+run "pm.val_check"    "permute(matrix((i,j)->i*3+j, 2, 3), 1, 0)[2,1]" "5"
+
+# ── transpose (generalized) ───────────────────────────────────────────────────
+section "TRANSPOSE GEN"
+run "tr.2d_classic"   "transpose(matrix((i,j)->i*3+j, 2, 3))[0,1]"  "3"
+run "tr.3d_rev_shape" "shape(transpose(zeros(2,3,4)))"               "(4, 3, 2)"
+run "tr.swap_axes"    "shape(transpose(zeros(2,3,4), 0, 2))"         "(4, 3, 2)"
+run "tr.swap_mid"     "shape(transpose(zeros(2,3,4), 1, 2))"         "(2, 4, 3)"
+
+# ── cat ───────────────────────────────────────────────────────────────────────
+section "CAT"
+run "cat.axis0"       "shape(cat(0, eye(2), eye(2)))"               "(4, 2)"
+run "cat.axis1"       "shape(cat(1, eye(2), eye(2)))"               "(2, 4)"
+run "cat.1d"          "cat(0, tensor(i->i,3), tensor(i->i,3))"      "[0, 1, 2, 0, 1, 2]"
+run "cat.vstack_eq"   "trace(cat(0, eye(3), eye(3)))"               "3"
+run "cat.hstack_eq"   "trace(cat(0, eye(3), eye(3)))"               "3"
+run "cat.3_tensors"   "shape(cat(0, ones(2,3), ones(2,3), ones(2,3)))" "(6, 3)"
+
+# ── squeeze / unsqueeze ───────────────────────────────────────────────────────
+section "SQUEEZE / UNSQUEEZE"
+run "sq.remove_ones"  "shape(squeeze(zeros(1,3,1)))"               "(3)"
+run "sq.all_ones"     "squeeze(zeros(1,1,1))"                      "0"
+run "sq.no_ones"      "shape(squeeze(zeros(2,3)))"                 "(2, 3)"
+run "us.front"        "shape(unsqueeze(zeros(3), 0))"              "(1, 3)"
+run "us.back"         "shape(unsqueeze(zeros(3), 1))"              "(3, 1)"
+run "us.mid"          "shape(unsqueeze(zeros(2,4), 1))"            "(2, 1, 4)"
+
+# ── sum / prod by axis ────────────────────────────────────────────────────────
+section "AXIS REDUCTION"
+run "ax.sum_axis0"    "sum(ones(2,3), 0)"                          "[2, 2, 2]"
+run "ax.sum_axis1"    "sum(ones(2,3), 1)"                          "[3, 3]"
+run "ax.prod_axis0"   "prod(ones(2,3)*2, 0)"                       "[4, 4, 4]"
+run "ax.sum_3d"       "shape(sum(zeros(2,3,4), 1))"                "(2, 4)"
+run "ax.sum_1d"       "sum(tensor(i->i,5), 0)"                     "10"
+
+# ── stats on tensors ──────────────────────────────────────────────────────────
+section "TENSOR STATS"
+run "ts.mean_2d"      "mean(ones(3,3))"                            "1"
+run "ts.mean_vals"    "mean(matrix((i,j)->i*2+j, 2, 2))"          "1.5"
+run "ts.std_zeros"    "std(ones(3,3))"                             "0"
+run "ts.var_uniform"  "var(ones(3,3))"                             "0"
+run "ts.median_2d"    "median(matrix((i,j)->i*3+j+1, 2, 3))"      "3.5"
+
+# ── reduce on tensors ────────────────────────────────────────────────────────
+section "REDUCE TENSOR"
+run "rdt.sum"         "reduce((a,b)->a+b, ones(2,3))"              "6"
+run "rdt.max"         "reduce((a,b)->if(a>b,a,b), matrix((i,j)->i*3+j, 2, 3))" "5"
+run "rdt.product"     "reduce((a,b)->a*b, tensor(i->i+1,4))"       "24"
+
+# ── diag from 1D tensor ───────────────────────────────────────────────────────
+section "DIAG FROM 1D TENSOR"
+run "dg.from_1d"      "trace(diag(tensor(i->i+1, 3)))"             "6"
+run "dg.from_flat"    "diag(flatten(eye(2))[0..1])"                "⎡ 1  0 ⎤ ⎣ 0  0 ⎦"
+
+# ── matmul extended (1D/2D mixed) ─────────────────────────────────────────────
+section "MATMUL EXTENDED"
+run "mm.1d_1d"        "tensor(i->i+1,3) @ tensor(i->i+1,3)"       "14"
+run "mm.2d_1d"        "matrix((i,j)->if(i==j,1,0),3,3) @ tensor(i->i,3)" "[0, 1, 2]"
+run "mm.1d_2d"        "tensor(i->1,3) @ eye(3)"                   "[1, 1, 1]"
+run "mm.2d_1d_sum"    "sum(eye(3) @ tensor(i->i,3))"              "3"
 
 # ── print summary ─────────────────────────────────────────────────────────────
 echo
