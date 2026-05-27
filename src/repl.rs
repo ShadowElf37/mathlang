@@ -40,6 +40,7 @@ pub const BUILTIN_FNS: &[&str] = &[
     "lingrid",
     "reshape", "permute", "cat", "squeeze", "unsqueeze",
     "dim", "tensordot",
+    "fftn", "ifftn",
 ];
 
 pub const BUILTIN_CONSTS: &[&str] = &["pi", "e", "phi", "inf", "i"];
@@ -334,6 +335,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "HOF:       map(f,t)  filter(f,t)  reduce(f,t)  compose(f,g)  partial(f,a)\n",
             "Control:   if(cond,a,b)\n",
             "Spectral:  fft(t)  ifft(t)  — DFT / inverse DFT on a tuple of numbers\n",
+            "           fftn(T[,axes])  ifftn(Re,Im[,axes])  — n-D DFT on tensors → (Re,Im)\n",
             "Random:    rand()  rand(a,b)\n",
             "Bitwise:   and or xor nand nor xnor not shl shr\n",
             "Complex:   i  re im abs arg conj  (all operators work on complex numbers)\n",

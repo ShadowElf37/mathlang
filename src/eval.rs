@@ -10,18 +10,22 @@ pub enum Val {
     Fn(Vec<String>, Expr, HashMap<String, Val>),
     Builtin(String),
     Tuple(Vec<Val>),
+    /// Real-valued tensor (row-major flat storage).
     Tensor { data: Vec<f64>, shape: Vec<usize> },
+    /// Complex tensor: two parallel real arrays (re, im) with identical shape.
+    ComplexTensor { re: Vec<f64>, im: Vec<f64>, shape: Vec<usize> },
 }
 
 impl Val {
     pub fn num(self, ctx: &str) -> Result<f64, String> {
         match self {
-            Val::Num(n)        => Ok(n),
-            Val::Complex(..)   => Err(format!("{ctx}: expected a real number, got complex")),
-            Val::Fn(..)        => Err(format!("{ctx}: expected a number, got a function")),
-            Val::Builtin(n)    => Err(format!("{ctx}: expected a number, got builtin '{n}'")),
-            Val::Tuple(..)     => Err(format!("{ctx}: expected a number, got a tuple")),
-            Val::Tensor { .. } => Err(format!("{ctx}: expected a number, got a tensor")),
+            Val::Num(n)               => Ok(n),
+            Val::Complex(..)          => Err(format!("{ctx}: expected a real number, got complex")),
+            Val::Fn(..)               => Err(format!("{ctx}: expected a number, got a function")),
+            Val::Builtin(n)           => Err(format!("{ctx}: expected a number, got builtin '{n}'")),
+            Val::Tuple(..)            => Err(format!("{ctx}: expected a number, got a tuple")),
+            Val::Tensor { .. }        => Err(format!("{ctx}: expected a number, got a tensor")),
+            Val::ComplexTensor { .. } => Err(format!("{ctx}: expected a number, got a complex tensor")),
         }
     }
 }
@@ -78,6 +82,7 @@ impl Env {
             "lingrid",
             "reshape", "permute", "cat", "squeeze", "unsqueeze",
             "dim", "tensordot",
+            "fftn", "ifftn",
         ] {
             vars.insert(name.to_string(), Val::Builtin(name.to_string()));
         }
@@ -121,6 +126,7 @@ pub fn is_protected(name: &str) -> bool {
         | "lingrid"
         | "reshape" | "permute" | "cat" | "squeeze" | "unsqueeze"
         | "dim" | "tensordot"
+        | "fftn" | "ifftn"
     )
 }
 
@@ -131,6 +137,20 @@ fn fmt_f(n: f64) -> String {
     if n.is_infinite() { return if n > 0.0 { "inf".into() } else { "-inf".into() }; }
     if n.fract() == 0.0 && n.abs() < 1e15 { return format!("{}", n as i64); }
     format!("{n}")
+}
+
+/// Format one complex element (real if im==0).
+fn fmt_complex_elem(r: f64, i: f64) -> String {
+    if i == 0.0 { return fmt_f(r); }
+    let babs = i.abs();
+    let im = if babs == 1.0 { String::new() } else { fmt_f(babs) };
+    if r == 0.0 {
+        if i < 0.0 { format!("-{im}i") } else { format!("{im}i") }
+    } else if i < 0.0 {
+        format!("{} - {im}i", fmt_f(r))
+    } else {
+        format!("{} + {im}i", fmt_f(r))
+    }
 }
 
 /// Box-character display for a 2D slice of data with given rows × cols.
@@ -179,7 +199,6 @@ pub fn fmt_val(v: &Val) -> String {
             if shape.len() == 2 {
                 return fmt_mat(data, shape[0], shape[1]);
             }
-            // 3D+: display as stacked 2D slices along the first axis
             if shape.len() == 3 {
                 let (d0, d1, d2) = (shape[0], shape[1], shape[2]);
                 let slice_size = d1 * d2;
@@ -189,6 +208,41 @@ pub fn fmt_val(v: &Val) -> String {
                 }).collect::<Vec<_>>().join("\n");
             }
             format!("<tensor shape={:?}>", shape)
+        }
+        Val::ComplexTensor { re, im, shape } => {
+            if shape.is_empty() || re.is_empty() { return "[]".into(); }
+            // Helper: matrix-style display using complex element strings.
+            let fmt_cmat = |re: &[f64], im: &[f64], r: usize, c: usize| -> String {
+                let cells: Vec<Vec<String>> = (0..r).map(|i| {
+                    (0..c).map(|j| fmt_complex_elem(re[i*c+j], im[i*c+j])).collect()
+                }).collect();
+                let col_widths: Vec<usize> = (0..c).map(|j| {
+                    cells.iter().map(|row| row[j].len()).max().unwrap_or(0)
+                }).collect();
+                cells.into_iter().enumerate().map(|(ri, row)| {
+                    let padded: Vec<String> = row.into_iter().zip(&col_widths)
+                        .map(|(s, &w)| format!("{:>w$}", s)).collect();
+                    let content = padded.join("  ");
+                    if r == 1 || ri == 0 { format!("\u{23A1} {} \u{23A4}", content) }
+                    else if ri == r - 1  { format!("\u{23A3} {} \u{23A6}", content) }
+                    else                 { format!("\u{23A2} {} \u{23A5}", content) }
+                }).collect::<Vec<_>>().join("\n")
+            };
+            if shape.len() == 1 {
+                let items: Vec<String> = re.iter().zip(im.iter()).map(|(&r, &i)| fmt_complex_elem(r, i)).collect();
+                return format!("[{}]", items.join(", "));
+            }
+            if shape.len() == 2 {
+                return fmt_cmat(re, im, shape[0], shape[1]);
+            }
+            if shape.len() == 3 {
+                let (d0, d1, d2) = (shape[0], shape[1], shape[2]);
+                let ss = d1 * d2;
+                return (0..d0).map(|k| {
+                    format!("[{k}]\n{}", fmt_cmat(&re[k*ss..(k+1)*ss], &im[k*ss..(k+1)*ss], d1, d2))
+                }).collect::<Vec<_>>().join("\n");
+            }
+            format!("<complex tensor shape={:?}>", shape)
         }
     }
 }
@@ -207,13 +261,44 @@ pub fn make_complex(a: f64, b: f64) -> Val {
 
 fn to_complex(v: Val) -> Result<(f64, f64), String> {
     match v {
-        Val::Num(n)        => Ok((n, 0.0)),
-        Val::Complex(a, b) => Ok((a, b)),
-        Val::Fn(..)        => Err("expected a number, got a function".into()),
-        Val::Builtin(n)    => Err(format!("expected a number, got builtin '{n}'")),
-        Val::Tuple(..)     => Err("expected a number, got a tuple".into()),
-        Val::Tensor { .. } => Err("expected a number, got a tensor".into()),
+        Val::Num(n)               => Ok((n, 0.0)),
+        Val::Complex(a, b)        => Ok((a, b)),
+        Val::Fn(..)               => Err("expected a number, got a function".into()),
+        Val::Builtin(n)           => Err(format!("expected a number, got builtin '{n}'")),
+        Val::Tuple(..)            => Err("expected a number, got a tuple".into()),
+        Val::Tensor { .. }        => Err("expected a number, got a tensor".into()),
+        Val::ComplexTensor { .. } => Err("expected a number, got a complex tensor".into()),
     }
+}
+
+/// Return Tensor if all imaginary parts are negligibly zero, else ComplexTensor.
+#[inline]
+fn maybe_real(re: Vec<f64>, im: Vec<f64>, shape: Vec<usize>) -> Val {
+    if im.iter().all(|&x| x == 0.0) {
+        Val::Tensor { data: re, shape }
+    } else {
+        Val::ComplexTensor { re, im, shape }
+    }
+}
+
+/// Element-wise complex binop on two parallel (re,im) arrays.
+fn complex_tensors_binop(
+    re1: Vec<f64>, im1: Vec<f64>, shape: Vec<usize>,
+    op: &Op, re2: &[f64], im2: &[f64],
+) -> Result<Val, String> {
+    let n = re1.len();
+    let mut re_out = Vec::with_capacity(n);
+    let mut im_out = Vec::with_capacity(n);
+    for i in 0..n {
+        let v1 = if im1[i] == 0.0 { Val::Num(re1[i]) } else { Val::Complex(re1[i], im1[i]) };
+        let v2 = if im2[i] == 0.0 { Val::Num(re2[i]) } else { Val::Complex(re2[i], im2[i]) };
+        match scalar_binop(v1, op, v2)? {
+            Val::Num(r)        => { re_out.push(r); im_out.push(0.0); }
+            Val::Complex(r, i) => { re_out.push(r); im_out.push(i); }
+            other => return Err(format!("binop: unexpected {}", fmt_val(&other))),
+        }
+    }
+    Ok(maybe_real(re_out, im_out, shape))
 }
 
 // z^w via exp(w·ln z)
@@ -256,36 +341,105 @@ fn broadcast1(v: Val, f: impl Fn(Val) -> Result<Val, String>) -> Result<Val, Str
                 .collect();
             Ok(Val::Tensor { data: new_data?, shape })
         }
+        Val::ComplexTensor { re, im, shape } => {
+            let mut re_out = Vec::with_capacity(re.len());
+            let mut im_out = Vec::with_capacity(re.len());
+            for (r, i) in re.into_iter().zip(im) {
+                let v = if i == 0.0 { Val::Num(r) } else { Val::Complex(r, i) };
+                match f(v)? {
+                    Val::Num(n)        => { re_out.push(n); im_out.push(0.0); }
+                    Val::Complex(a, b) => { re_out.push(a); im_out.push(b); }
+                    other => return Err(format!("broadcast: expected a number, got {}", fmt_val(&other))),
+                }
+            }
+            Ok(maybe_real(re_out, im_out, shape))
+        }
         other => f(other),
     }
 }
 
 // ── Tensor helpers ────────────────────────────────────────────────────────────
 
+/// Promote a Tensor or ComplexTensor into (re, im, shape) triple.
+fn as_complex_tensor(v: Val) -> Result<(Vec<f64>, Vec<f64>, Vec<usize>), String> {
+    match v {
+        Val::Tensor { data, shape } => { let n = data.len(); Ok((data, vec![0.0f64; n], shape)) }
+        Val::ComplexTensor { re, im, shape } => Ok((re, im, shape)),
+        _ => Err("expected a tensor".into()),
+    }
+}
+
 fn binop_tensor(lv: Val, op: &Op, rv: Val) -> Result<Val, String> {
-    match (lv, rv) {
-        (Val::Tensor { data: ld, shape: ls }, Val::Tensor { data: rd, shape: rs }) => {
-            if ls != rs {
-                return Err(format!("tensor op tensor: shape mismatch ({:?} vs {:?})", ls, rs));
+    macro_rules! shape_check {
+        ($ls:expr, $rs:expr) => {
+            if $ls != $rs {
+                return Err(format!("tensor op tensor: shape mismatch ({:?} vs {:?})", $ls, $rs));
             }
+        };
+    }
+    match (lv, rv) {
+        // ── Real × Real ────────────────────────────────────────────────────
+        (Val::Tensor { data: ld, shape: ls }, Val::Tensor { data: rd, shape: rs }) => {
+            shape_check!(ls, rs);
             let out: Result<Vec<f64>, _> = ld.into_iter().zip(rd)
                 .map(|(l, r)| scalar_binop(Val::Num(l), op, Val::Num(r))?.num("tensor op"))
                 .collect();
             Ok(Val::Tensor { data: out?, shape: ls })
         }
-        (Val::Tensor { data, shape }, scalar) => {
-            let s = scalar.num("tensor op scalar")?;
+        // ── Real tensor × real scalar ──────────────────────────────────────
+        (Val::Tensor { data, shape }, Val::Num(s)) => {
             let out: Result<Vec<f64>, _> = data.into_iter()
                 .map(|x| scalar_binop(Val::Num(x), op, Val::Num(s))?.num("tensor op"))
                 .collect();
             Ok(Val::Tensor { data: out?, shape })
         }
-        (scalar, Val::Tensor { data, shape }) => {
-            let s = scalar.num("scalar op tensor")?;
+        (Val::Num(s), Val::Tensor { data, shape }) => {
             let out: Result<Vec<f64>, _> = data.into_iter()
                 .map(|x| scalar_binop(Val::Num(s), op, Val::Num(x))?.num("tensor op"))
                 .collect();
             Ok(Val::Tensor { data: out?, shape })
+        }
+        // ── ComplexTensor × ComplexTensor ──────────────────────────────────
+        (Val::ComplexTensor { re: lr, im: li, shape: ls }, Val::ComplexTensor { re: rr, im: ri, shape: rs }) => {
+            shape_check!(ls, rs);
+            complex_tensors_binop(lr, li, ls, op, &rr, &ri)
+        }
+        // ── ComplexTensor × Tensor ─────────────────────────────────────────
+        (Val::ComplexTensor { re: lr, im: li, shape: ls }, Val::Tensor { data: rd, shape: rs }) => {
+            shape_check!(ls, rs);
+            let ri = vec![0.0f64; rd.len()];
+            complex_tensors_binop(lr, li, ls, op, &rd, &ri)
+        }
+        (Val::Tensor { data: ld, shape: ls }, Val::ComplexTensor { re: rr, im: ri, shape: rs }) => {
+            shape_check!(ls, rs);
+            let li = vec![0.0f64; ld.len()];
+            complex_tensors_binop(ld, li, ls, op, &rr, &ri)
+        }
+        // ── ComplexTensor × scalar ─────────────────────────────────────────
+        (Val::ComplexTensor { re, im, shape }, Val::Num(s)) => {
+            let n = re.len();
+            complex_tensors_binop(re, im, shape, op, &vec![s; n], &vec![0.0; n])
+        }
+        (Val::Num(s), Val::ComplexTensor { re, im, shape }) => {
+            let n = re.len();
+            complex_tensors_binop(vec![s; n], vec![0.0; n], shape, op, &re, &im)
+        }
+        (Val::ComplexTensor { re, im, shape }, Val::Complex(sr, si)) => {
+            let n = re.len();
+            complex_tensors_binop(re, im, shape, op, &vec![sr; n], &vec![si; n])
+        }
+        (Val::Complex(sr, si), Val::ComplexTensor { re, im, shape }) => {
+            let n = re.len();
+            complex_tensors_binop(vec![sr; n], vec![si; n], shape, op, &re, &im)
+        }
+        // ── Tensor × complex scalar ────────────────────────────────────────
+        (Val::Tensor { data, shape }, Val::Complex(sr, si)) => {
+            let n = data.len();
+            complex_tensors_binop(data, vec![0.0; n], shape, op, &vec![sr; n], &vec![si; n])
+        }
+        (Val::Complex(sr, si), Val::Tensor { data, shape }) => {
+            let n = data.len();
+            complex_tensors_binop(vec![sr; n], vec![si; n], shape, op, &data, &vec![0.0; n])
         }
         _ => unreachable!(),
     }
@@ -419,6 +573,46 @@ fn apply_permutation(data: Vec<f64>, shape: &[usize], perm: &[usize]) -> Result<
         out[out_flat] = data[in_flat];
     }
     Ok(Val::Tensor { data: out, shape: new_shape })
+}
+
+/// Apply a 1-D FFT/IFFT in-place along one axis of a complex tensor stored as
+/// two real arrays (re, im) with the given row-major shape.
+fn fft_axis_inplace(re: &mut [f64], im: &mut [f64], shape: &[usize], axis: usize, forward: bool) {
+    use rustfft::num_complex::Complex64;
+    let n = shape[axis];
+    let s = strides(shape);
+    let axis_stride = s[axis];
+
+    // Strides for all dims except `axis` — used to enumerate orthogonal slices.
+    let other_shape: Vec<usize> = shape.iter().enumerate()
+        .filter(|&(k, _)| k != axis).map(|(_, &d)| d).collect();
+    let other_strides: Vec<usize> = s.iter().enumerate()
+        .filter(|&(k, _)| k != axis).map(|(_, &st)| st).collect();
+    let other_total: usize = if other_shape.is_empty() { 1 } else { other_shape.iter().product() };
+
+    let mut planner = rustfft::FftPlanner::new();
+    let fft = if forward { planner.plan_fft_forward(n) } else { planner.plan_fft_inverse(n) };
+    let mut buf = vec![Complex64::new(0.0, 0.0); n];
+
+    for other_flat in 0..other_total {
+        let other_multi = unravel(other_flat, &other_shape);
+        let base: usize = other_multi.iter().zip(&other_strides).map(|(&i, &st)| i * st).sum();
+
+        for i in 0..n {
+            let flat = base + i * axis_stride;
+            buf[i] = Complex64::new(re[flat], im[flat]);
+        }
+        fft.process(&mut buf);
+        if !forward {
+            let scale = 1.0 / n as f64;
+            for c in &mut buf { *c *= scale; }
+        }
+        for i in 0..n {
+            let flat = base + i * axis_stride;
+            re[flat] = buf[i].re;
+            im[flat] = buf[i].im;
+        }
+    }
 }
 
 // ── Builtin dispatch ──────────────────────────────────────────────────────────
@@ -595,6 +789,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             match vals.into_iter().next().unwrap() {
                 Val::Tuple(items) => Ok(Val::Num(items.len() as f64)),
                 Val::Tensor { shape, .. } => Ok(Val::Num(shape[0] as f64)),
+                Val::ComplexTensor { shape, .. } => Ok(Val::Num(shape[0] as f64)),
                 _ => Err(format!("{name}: argument must be a tuple or tensor")),
             }
         }
@@ -940,6 +1135,97 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             Ok(Val::Tuple(buf.into_iter().map(|c| make_complex(c.re, c.im)).collect()))
         }
 
+        // fftn / ifftn — n-D DFT along any subset of axes.
+        // Returns (Re_tensor, Im_tensor) with the same shape as input.
+        //
+        // Signatures (T = real tensor, axes = scalar or tuple of axis indices):
+        //   fftn(T)             – forward DFT along all axes
+        //   fftn(T, axes)       – forward DFT along specified axes
+        //   fftn(Re, Im)        – forward DFT of complex tensor along all axes
+        //   fftn(Re, Im, axes)  – forward DFT of complex tensor along specified axes
+        // ifftn: same, inverse DFT (each axis divided by its size)
+        "fftn" | "ifftn" => {
+            let forward = name == "fftn";
+            // Helper: is this value a tensor or complex tensor?
+            let is_tensor_like = |v: &Val| matches!(v, Val::Tensor {..} | Val::ComplexTensor {..});
+
+            // Signatures:
+            //   fftn(T)              – forward DFT on real tensor, all axes
+            //   fftn(CT)             – forward DFT on complex tensor, all axes
+            //   fftn(T, axes)        – forward DFT on real tensor, specified axes
+            //   fftn(CT, axes)       – forward DFT on complex tensor, specified axes
+            //   fftn(Re, Im)         – forward DFT, Re+i*Im real-tensor pair, all axes
+            //   fftn(Re, Im, axes)   – forward DFT, Re+i*Im real-tensor pair, specified axes
+            let (mut re_data, mut im_data, shape, axes_opt): (Vec<f64>, Vec<f64>, Vec<usize>, Option<Val>) =
+                match vals.len() {
+                    1 => {
+                        let v = vals.into_iter().next().unwrap();
+                        let (re, im, shape) = as_complex_tensor(v)
+                            .map_err(|_| format!("{name}: argument must be a tensor or complex tensor"))?;
+                        (re, im, shape, None)
+                    },
+                    2 => {
+                        let mut it = vals.into_iter();
+                        let a = it.next().unwrap();
+                        let b = it.next().unwrap();
+                        if is_tensor_like(&b) {
+                            // fftn(Re, Im) — real-tensor pair as complex input, all axes
+                            let (re1, _, sh1) = as_complex_tensor(a)
+                                .map_err(|_| format!("{name}: first argument must be a tensor"))?;
+                            let (im2, _, sh2) = as_complex_tensor(b)
+                                .map_err(|_| format!("{name}: second argument must be a tensor"))?;
+                            if sh1 != sh2 {
+                                return Err(format!("{name}: Re and Im must have the same shape"));
+                            }
+                            (re1, im2, sh1, None)
+                        } else {
+                            // fftn(T, axes) or fftn(CT, axes)
+                            let (re, im, shape) = as_complex_tensor(a)
+                                .map_err(|_| format!("{name}: first argument must be a tensor or complex tensor"))?;
+                            (re, im, shape, Some(b))
+                        }
+                    }
+                    3 => {
+                        let mut it = vals.into_iter();
+                        let a = it.next().unwrap();
+                        let b = it.next().unwrap();
+                        let axes_v = it.next().unwrap();
+                        // fftn(Re, Im, axes) — real-tensor pair as complex input, specified axes
+                        let (re1, _, sh1) = as_complex_tensor(a)
+                            .map_err(|_| format!("{name}: first argument must be a tensor"))?;
+                        let (im2, _, sh2) = as_complex_tensor(b)
+                            .map_err(|_| format!("{name}: second argument must be a tensor"))?;
+                        if sh1 != sh2 {
+                            return Err(format!("{name}: Re and Im must have the same shape"));
+                        }
+                        (re1, im2, sh1, Some(axes_v))
+                    }
+                    n => return Err(format!("{name} expects 1–3 args, got {n}")),
+                };
+
+            // Resolve axes → Vec<usize>
+            let axes: Vec<usize> = match axes_opt {
+                None                  => (0..shape.len()).collect(),
+                Some(Val::Num(n))     => vec![n as usize],
+                Some(Val::Tuple(items)) => items.into_iter()
+                    .map(|v| v.num(name).map(|x| x as usize))
+                    .collect::<Result<_, _>>()?,
+                _ => return Err(format!("{name}: axes must be a number or tuple of numbers")),
+            };
+            for &ax in &axes {
+                if ax >= shape.len() {
+                    return Err(format!("{name}: axis {ax} out of range for {}-D tensor", shape.len()));
+                }
+            }
+
+            for &ax in &axes {
+                fft_axis_inplace(&mut re_data, &mut im_data, &shape, ax, forward);
+            }
+
+            // Return a ComplexTensor (collapses to real Tensor if all im parts are zero)
+            Ok(maybe_real(re_data, im_data, shape))
+        }
+
         "lt" | "leq" | "gt" | "geq" | "eq" | "neq" => {
             arity(name, 2, vals.len())?;
             let mut it = vals.into_iter();
@@ -959,6 +1245,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
         // ── Tensor constructors ───────────────────────────────────────────────
         "tensor" => {
             // tensor(f, n1, n2, ...) — variadic; f called with (i0, i1, ...) for each cell
+            // f may return real or complex values; if any element is complex, returns ComplexTensor.
             if vals.len() < 2 { return Err("tensor(f, n1, n2, …) expects at least 2 args".into()); }
             let mut it = vals.into_iter();
             let f = it.next().unwrap();
@@ -966,12 +1253,18 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                 .collect::<Result<_, _>>()?;
             let ndim = shape.len();
             let total: usize = shape.iter().product();
-            let mut data = Vec::with_capacity(total);
+            let mut results = Vec::with_capacity(total);
             let mut indices = vec![0usize; ndim];
+            let mut has_complex = false;
             for _ in 0..total {
                 let args: Vec<Val> = indices.iter().map(|&i| Val::Num(i as f64)).collect();
                 let v = apply_val(f.clone(), args, env)?;
-                data.push(v.num("tensor")?);
+                match &v {
+                    Val::Complex(..) => { has_complex = true; }
+                    Val::Num(_) => {}
+                    other => return Err(format!("tensor: f must return a number or complex, got {}", fmt_val(other))),
+                }
+                results.push(v);
                 // Advance row-major (rightmost index fastest)
                 for k in (0..ndim).rev() {
                     indices[k] += 1;
@@ -979,7 +1272,21 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                     indices[k] = 0;
                 }
             }
-            Ok(Val::Tensor { data, shape })
+            if has_complex {
+                let mut re_data = Vec::with_capacity(total);
+                let mut im_data = Vec::with_capacity(total);
+                for v in results {
+                    match v {
+                        Val::Num(x)        => { re_data.push(x); im_data.push(0.0); }
+                        Val::Complex(a, b) => { re_data.push(a); im_data.push(b); }
+                        _                  => unreachable!(),
+                    }
+                }
+                Ok(maybe_real(re_data, im_data, shape))
+            } else {
+                let data: Vec<f64> = results.into_iter().map(|v| match v { Val::Num(x) => x, _ => unreachable!() }).collect();
+                Ok(Val::Tensor { data, shape })
+            }
         }
         "matrix" => {
             // matrix(f, r, c) — 2D convenience wrapper around tensor
@@ -1038,7 +1345,8 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
         "shape" => {
             arity("shape", 1, vals.len())?;
             match vals.into_iter().next().unwrap() {
-                Val::Tensor { shape, .. } => Ok(Val::Tuple(shape.into_iter().map(|d| Val::Num(d as f64)).collect())),
+                Val::Tensor { shape, .. } | Val::ComplexTensor { shape, .. }
+                    => Ok(Val::Tuple(shape.into_iter().map(|d| Val::Num(d as f64)).collect())),
                 Val::Tuple(items) => Ok(Val::Tuple(vec![Val::Num(items.len() as f64)])),
                 _ => Err("shape: argument must be a tensor or tuple".into()),
             }
@@ -1046,16 +1354,18 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
         "rows" => {
             arity("rows", 1, vals.len())?;
             match vals.into_iter().next().unwrap() {
-                Val::Tensor { shape, .. } if shape.len() >= 2 => Ok(Val::Num(shape[0] as f64)),
-                Val::Tensor { .. } => Err("rows: tensor must be at least 2D".into()),
+                Val::Tensor { shape, .. } | Val::ComplexTensor { shape, .. } if shape.len() >= 2
+                    => Ok(Val::Num(shape[0] as f64)),
+                Val::Tensor { .. } | Val::ComplexTensor { .. } => Err("rows: tensor must be at least 2D".into()),
                 _ => Err("rows: argument must be a 2D+ tensor".into()),
             }
         }
         "cols" => {
             arity("cols", 1, vals.len())?;
             match vals.into_iter().next().unwrap() {
-                Val::Tensor { shape, .. } if shape.len() >= 2 => Ok(Val::Num(shape[1] as f64)),
-                Val::Tensor { .. } => Err("cols: tensor must be at least 2D".into()),
+                Val::Tensor { shape, .. } | Val::ComplexTensor { shape, .. } if shape.len() >= 2
+                    => Ok(Val::Num(shape[1] as f64)),
+                Val::Tensor { .. } | Val::ComplexTensor { .. } => Err("cols: tensor must be at least 2D".into()),
                 _ => Err("cols: argument must be a 2D+ tensor".into()),
             }
         }
@@ -1066,7 +1376,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                 let first = it.next().unwrap();
                 let axis_val = it.next().unwrap().num("dim")? as usize;
                 match first {
-                    Val::Tensor { shape, .. } => {
+                    Val::Tensor { shape, .. } | Val::ComplexTensor { shape, .. } => {
                         if axis_val >= shape.len() {
                             return Err(format!("dim: axis {axis_val} out of range for {}-D tensor", shape.len()));
                         }
@@ -1799,6 +2109,11 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                         return Ok(Val::Tensor { data: scaled, shape: shape.clone() });
                     }
                     Val::Complex(a, b) => return Ok(make_complex(s * a, s * b)),
+                    Val::ComplexTensor { re, im, shape } => {
+                        let re_scaled: Vec<f64> = re.iter().map(|&x| s * x).collect();
+                        let im_scaled: Vec<f64> = im.iter().map(|&x| s * x).collect();
+                        return Ok(maybe_real(re_scaled, im_scaled, shape.clone()));
+                    }
                     Val::Builtin(_) => return Err("cannot scale a builtin function".into()),
                 }
             }
@@ -1820,6 +2135,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
             Err("tuple apply: expected a single index".into())
         }
         Val::Tensor { .. } => Err("tensors are not callable".into()),
+        Val::ComplexTensor { .. } => Err("complex tensors are not callable".into()),
     }
 }
 
@@ -1961,6 +2277,8 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
             match v {
                 // ── Tensor: shape-aware indexing, handles Expr::Slice ────────
                 Val::Tensor { data, shape } => eval_tensor_index_ast(&data, &shape, idx, env),
+                // ── ComplexTensor: same indexing, returns Complex or ComplexTensor ──
+                Val::ComplexTensor { re, im, shape } => eval_complex_tensor_index_ast(&re, &im, &shape, idx, env),
                 // ── Tuple: also supports slice expressions ────────────────────
                 Val::Tuple(items) => eval_tuple_index_ast(items, idx, env),
                 _ => Err("indexing requires a tuple or tensor".into()),
@@ -2024,10 +2342,27 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                                 Ok(Val::Tuple(results?))
                             }
                             Val::Tensor { data, shape } => {
-                                let results: Result<Vec<f64>, _> = data.into_iter()
-                                    .map(|x| call_fn1(&arg_exprs[0], Val::Num(x), env)?.num("map"))
-                                    .collect();
-                                Ok(Val::Tensor { data: results?, shape })
+                                // map over a real tensor — result may become ComplexTensor
+                                let mut re_out = Vec::with_capacity(data.len());
+                                let mut im_out = Vec::with_capacity(data.len());
+                                let mut has_complex = false;
+                                for x in data {
+                                    let v = call_fn1(&arg_exprs[0], Val::Num(x), env)?;
+                                    match v {
+                                        Val::Num(n)        => { re_out.push(n); im_out.push(0.0); }
+                                        Val::Complex(a, b) => { re_out.push(a); im_out.push(b); has_complex = true; }
+                                        other => return Err(format!("map: f must return a number or complex, got {}", fmt_val(&other))),
+                                    }
+                                }
+                                if has_complex {
+                                    Ok(maybe_real(re_out, im_out, shape))
+                                } else {
+                                    Ok(Val::Tensor { data: re_out, shape })
+                                }
+                            }
+                            Val::ComplexTensor { re, im, shape } => {
+                                // map over a complex tensor — f receives Complex values
+                                broadcast1(Val::ComplexTensor { re, im, shape }, |v| call_fn1(&arg_exprs[0], v, env))
                             }
                             other => Err(format!("map: second arg must be a tuple or tensor, got {}", fmt_val(&other))),
                         };
@@ -2108,13 +2443,21 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
             Val::Tensor { data, shape } => {
                 Ok(Val::Tensor { data: data.into_iter().map(|x| -x).collect(), shape })
             }
+            Val::ComplexTensor { re, im, shape } => {
+                Ok(maybe_real(re.into_iter().map(|x| -x).collect(),
+                              im.into_iter().map(|x| -x).collect(),
+                              shape))
+            }
             Val::Fn(..) | Val::Builtin(_) => Err("unary minus: expected a number".into()),
         },
         Expr::BinOp(l, op, r) => {
             let lv = eval(l, env)?;
             let rv = eval(r, env)?;
-            // Tensor dispatch (before tuple, since Tensor is not a Tuple)
-            if matches!((&lv, &rv), (Val::Tensor { .. }, _) | (_, Val::Tensor { .. })) {
+            // Tensor/ComplexTensor dispatch (before tuple, since Tensor is not a Tuple)
+            if matches!((&lv, &rv),
+                (Val::Tensor { .. }, _) | (_, Val::Tensor { .. }) |
+                (Val::ComplexTensor { .. }, _) | (_, Val::ComplexTensor { .. }))
+            {
                 return binop_tensor(lv, op, rv);
             }
             // Whole-tuple equality/inequality before element-wise broadcast
@@ -2295,6 +2638,72 @@ fn eval_tensor_index_ast(data: &[f64], shape: &[usize], idx: &Expr, env: &Env) -
     }
 }
 
+/// Same as eval_tensor_index_ast but for ComplexTensor (re, im parallel arrays).
+/// Returns Complex for scalar result, or ComplexTensor (possibly collapsed to Tensor) for slices.
+fn eval_complex_tensor_index_ast(re: &[f64], im: &[f64], shape: &[usize], idx: &Expr, env: &Env) -> Result<Val, String> {
+    let items: Vec<&Expr> = match idx {
+        Expr::Tuple(es) => es.iter().collect(),
+        single          => vec![single],
+    };
+
+    // Single scalar index `CT[n]` — return row/sub-tensor.
+    if items.len() == 1 && !matches!(items[0], Expr::Slice(..)) {
+        let idx_val = eval(items[0], env)?;
+        let raw = idx_val.num("tensor index")? as i64;
+        let dim0 = shape[0] as i64;
+        let i = if raw < 0 { (dim0 + raw).max(0) as usize } else { raw as usize };
+        if i >= shape[0] {
+            return Err(format!("tensor index {raw} out of range (size={})", shape[0]));
+        }
+        return if shape.len() == 1 {
+            Ok(make_complex(re[i], im[i]))
+        } else {
+            let sub_size: usize = shape[1..].iter().product();
+            let start = i * sub_size;
+            Ok(maybe_real(
+                re[start..start + sub_size].to_vec(),
+                im[start..start + sub_size].to_vec(),
+                shape[1..].to_vec(),
+            ))
+        };
+    }
+
+    // Multi-dim or slice indexing: must match ndim exactly.
+    if items.len() != shape.len() {
+        return Err(format!("tensor: expected {} index/slice items, got {}", shape.len(), items.len()));
+    }
+
+    let resolved: Vec<(bool, Vec<usize>)> = items.iter().zip(shape.iter()).enumerate()
+        .map(|(k, (item, &dim))| resolve_index_item(item, dim, k, env))
+        .collect::<Result<_, _>>()?;
+
+    let out_shape: Vec<usize> = resolved.iter()
+        .filter(|(keep, _)| *keep)
+        .map(|(_, idxs)| idxs.len())
+        .collect();
+
+    let range_sizes: Vec<usize> = resolved.iter().map(|(_, idxs)| idxs.len()).collect();
+    let total: usize = range_sizes.iter().product();
+    let in_strides = strides(shape);
+    let mut out_re = Vec::with_capacity(total);
+    let mut out_im = Vec::with_capacity(total);
+
+    for out_flat in 0..total {
+        let combo = unravel(out_flat, &range_sizes);
+        let in_flat: usize = combo.iter().zip(&resolved).zip(&in_strides)
+            .map(|((&ci, (_, idxs)), &stride)| idxs[ci] * stride)
+            .sum();
+        out_re.push(re[in_flat]);
+        out_im.push(im[in_flat]);
+    }
+
+    if out_shape.is_empty() {
+        Ok(make_complex(out_re[0], out_im[0]))
+    } else {
+        Ok(maybe_real(out_re, out_im, out_shape))
+    }
+}
+
 /// Resolve one index item (Expr::Slice or a scalar/range expression) for a dimension of given size.
 /// Returns (is_range, selected_indices).
 ///   is_range = true  → this dimension is kept in the output
@@ -2342,28 +2751,53 @@ fn resolve_index_item(item: &Expr, dim: usize, k: usize, env: &Env) -> Result<(b
 
 pub fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> {
     let label = if product { "prod" } else { "sum" };
-    // 1-arg form: sum(tuple), sum(tensor), prod(tuple), prod(tensor)
+
+    /// Accumulate (acc_re, acc_im) with (r, i), either summing or multiplying.
+    fn accum(acc_re: &mut f64, acc_im: &mut f64, r: f64, i: f64, product: bool) {
+        if product {
+            // (acc_re + i*acc_im) * (r + i*i) = (acc_re*r - acc_im*i) + i*(acc_re*i + acc_im*r)
+            let new_re = *acc_re * r - *acc_im * i;
+            let new_im = *acc_re * i + *acc_im * r;
+            *acc_re = new_re;
+            *acc_im = new_im;
+        } else {
+            *acc_re += r;
+            *acc_im += i;
+        }
+    }
+
+    // 1-arg form: sum(tuple), sum(tensor), sum(ComplexTensor)
     if args.len() == 1 {
         return match eval(&args[0], env)? {
             Val::Tuple(items) => {
-                let mut acc = if product { 1.0 } else { 0.0 };
+                let mut acc_re = if product { 1.0 } else { 0.0 };
+                let mut acc_im = 0.0;
                 for v in items {
-                    let n = v.num(label)?;
-                    if product { acc *= n; } else { acc += n; }
+                    let (r, i) = to_complex(v)?;
+                    accum(&mut acc_re, &mut acc_im, r, i, product);
                 }
-                Ok(Val::Num(acc))
+                Ok(make_complex(acc_re, acc_im))
             }
             Val::Tensor { data, .. } => {
                 let acc: f64 = if product { data.iter().product() } else { data.iter().sum() };
                 Ok(Val::Num(acc))
             }
+            Val::ComplexTensor { re, im, .. } => {
+                let (init_re, init_im) = if product { (1.0, 0.0) } else { (0.0, 0.0) };
+                let mut acc_re = init_re;
+                let mut acc_im = init_im;
+                for (&r, &i) in re.iter().zip(&im) {
+                    accum(&mut acc_re, &mut acc_im, r, i, product);
+                }
+                Ok(make_complex(acc_re, acc_im))
+            }
             _ => Err(format!("{label}: 1-arg form requires a tuple or tensor")),
         };
     }
-    // 2-arg form: sum(T, axis) or sum(f, n)
+    // 2-arg form: sum(T, axis), sum(CT, axis), or sum(f, n)
     if args.len() == 2 {
         return match eval(&args[0], env)? {
-            // sum(T, axis) — reduce tensor along one axis
+            // sum(T, axis) — reduce real tensor along one axis
             Val::Tensor { data, shape } => {
                 let axis = eval(&args[1], env)?.num(label)? as usize;
                 if axis >= shape.len() {
@@ -2395,18 +2829,53 @@ pub fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> 
                     Ok(Val::Tensor { data: out_data, shape: out_shape })
                 }
             }
-            // sum(f, n) — sum f(k) for k in 0..n (exclusive)
+            // sum(CT, axis) — reduce complex tensor along one axis
+            Val::ComplexTensor { re, im, shape } => {
+                let axis = eval(&args[1], env)?.num(label)? as usize;
+                if axis >= shape.len() {
+                    return Err(format!("{label}: axis {axis} out of range for {}-D tensor", shape.len()));
+                }
+                let mut out_shape = shape.clone();
+                out_shape.remove(axis);
+                let out_size: usize = if out_shape.is_empty() { 1 } else { out_shape.iter().product() };
+                let (init_re, init_im) = if product { (1.0, 0.0) } else { (0.0, 0.0) };
+                let mut out_re = vec![init_re; out_size];
+                let mut out_im = vec![init_im; out_size];
+                let out_strides: Vec<usize> = strides(&out_shape);
+                for in_flat in 0..re.len() {
+                    let multi = unravel(in_flat, &shape);
+                    let out_multi: Vec<usize> = multi.iter().enumerate()
+                        .filter(|&(k, _)| k != axis)
+                        .map(|(_, &i)| i)
+                        .collect();
+                    let out_flat: usize = if out_multi.is_empty() {
+                        0
+                    } else {
+                        out_multi.iter().zip(&out_strides).map(|(&i, &s)| i * s).sum()
+                    };
+                    accum(&mut out_re[out_flat], &mut out_im[out_flat], re[in_flat], im[in_flat], product);
+                }
+                if out_shape.is_empty() {
+                    Ok(make_complex(out_re[0], out_im[0]))
+                } else {
+                    Ok(maybe_real(out_re, out_im, out_shape))
+                }
+            }
+            // sum(f, n) — sum f(k) for k in 0..n; f may return complex
             f @ (Val::Fn(..) | Val::Builtin(_)) => {
                 let n = eval(&args[1], env)?.num(label)? as i64;
                 if n < 0 {
                     return Err(format!("{label}: count must be non-negative, got {n}"));
                 }
-                let mut acc = if product { 1.0 } else { 0.0 };
+                let (init_re, init_im) = if product { (1.0, 0.0) } else { (0.0, 0.0) };
+                let mut acc_re = init_re;
+                let mut acc_im = init_im;
                 for k in 0..n {
-                    let v = apply_val(f.clone(), vec![Val::Num(k as f64)], env)?.num(label)?;
-                    if product { acc *= v; } else { acc += v; }
+                    let v = apply_val(f.clone(), vec![Val::Num(k as f64)], env)?;
+                    let (r, i) = to_complex(v).map_err(|_| format!("{label}: f must return a number or complex"))?;
+                    accum(&mut acc_re, &mut acc_im, r, i, product);
                 }
-                Ok(Val::Num(acc))
+                Ok(make_complex(acc_re, acc_im))
             }
             _ => Err(format!("{label}: 2-arg form is {label}(T, axis) or {label}(f, n)")),
         };
@@ -2416,12 +2885,15 @@ pub fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> 
     }
     let start = eval(&args[1], env)?.num("start")? as i64;
     let stop  = eval(&args[2], env)?.num("stop")?  as i64;
-    let mut acc = if product { 1.0 } else { 0.0 };
+    let (init_re, init_im) = if product { (1.0, 0.0) } else { (0.0, 0.0) };
+    let mut acc_re = init_re;
+    let mut acc_im = init_im;
     for k in start..=stop {
-        let v = call_fn1(&args[0], Val::Num(k as f64), env)?.num(label)?;
-        if product { acc *= v; } else { acc += v; }
+        let v = call_fn1(&args[0], Val::Num(k as f64), env)?;
+        let (r, i) = to_complex(v).map_err(|_| format!("{label}: f must return a number or complex"))?;
+        accum(&mut acc_re, &mut acc_im, r, i, product);
     }
-    Ok(Val::Num(acc))
+    Ok(make_complex(acc_re, acc_im))
 }
 
 // Simpson's rule: integral(f, a, b) or integral(f, a, b, n)

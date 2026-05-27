@@ -762,6 +762,60 @@ run "td.outer_via_0"    "shape(tensordot(zeros(2,3), zeros(4,5), 0))"      "(2, 
 run "td.3d_contract"    "shape(tensordot(zeros(2,3,4), zeros(4,5), 1))"    "(2, 3, 5)"
 run "td.scalar_result"  "tensordot(tensor(i->1,4), tensor(i->1,4), 1)"     "4"
 
+# ── ComplexTensor construction ────────────────────────────────────────────────
+section "COMPLEX TENSOR"
+run "ct.tensor_complex"   "tensor(k->k+i, 4)"                          "[i, 1 + i, 2 + i, 3 + i]"
+run "ct.tensor_2d"        "shape(tensor((i,j)->i+j*i, 3, 4))"          "(3, 4)"
+run "ct.tensor_imag_only" "tensor(k->k*i, 3)"                          "[0, i, 2i]"
+run "ct.tensor_real_fn"   "tensor(k->k, 3)"                            "[0, 1, 2]"
+
+# ── ComplexTensor arithmetic ──────────────────────────────────────────────────
+section "COMPLEX TENSOR ARITHMETIC"
+run "cta.add"    "tensor(k->k+k*i, 3) + tensor(k->1, 3)"              "[1, 2 + i, 3 + 2i]"
+run "cta.sub"    "tensor(k->k*(1+i), 3) - tensor(k->k, 3)"            "[0, i, 2i]"
+run "cta.mul"    "tensor(k->1+i, 2) * tensor(k->1+i, 2)"              "[2i, 2i]"
+run "cta.scale"  "2 * tensor(k->k+k*i, 3)"                            "[0, 2 + 2i, 4 + 4i]"
+run "cta.neg"    "-(tensor(k->k+k*i, 3))"                             "[0, -1 - i, -2 - 2i]"
+run "cta.ct_num" "tensor(k->k+k*i, 3) + 1"                            "[1, 2 + i, 3 + 2i]"
+run "cta.ct_cx"  "tensor(k->k, 3) + i"                                "[i, 1 + i, 2 + i]"
+
+# ── ComplexTensor queries ─────────────────────────────────────────────────────
+section "COMPLEX TENSOR QUERIES"
+run "ctq.shape"  "shape(tensor(k->k+i, 6))"                           "(6)"
+run "ctq.shape2" "shape(tensor((r,c)->r+c*i, 3, 4))"                  "(3, 4)"
+run "ctq.len"    "len(tensor(k->k+i, 5))"                             "5"
+run "ctq.rows"   "rows(tensor((r,c)->r+c*i, 3, 4))"                   "3"
+run "ctq.cols"   "cols(tensor((r,c)->r+c*i, 3, 4))"                   "4"
+run "ctq.dim0"   "dim(tensor((r,c)->r+c*i, 3, 4), 0)"                 "3"
+run "ctq.dim1"   "dim(tensor((r,c)->r+c*i, 3, 4), 1)"                 "4"
+
+# ── ComplexTensor indexing ────────────────────────────────────────────────────
+section "COMPLEX TENSOR INDEXING"
+run "cti.scalar" "tensor(k->k+k*i, 5)[2]"                             "2 + 2i"
+run "cti.slice"  "tensor(k->k+k*i, 5)[1..3]"                          "[1 + i, 2 + 2i, 3 + 3i]"
+run "cti.neg1"   "tensor(k->k+k*i, 4)[-1]"                            "3 + 3i"
+run "cti.2d_row"  "shape(tensor((r,c)->r+c*i, 3, 4)[1])"               "(4)"
+run "cti.2d_elem" "tensor((r,c)->r+c*i, 3, 3)[(1,2)]"                "1 + 2i"
+
+# ── ComplexTensor map / sum ───────────────────────────────────────────────────
+section "COMPLEX TENSOR MAP SUM"
+run "ctms.map_conj"     "map(conj, tensor(k->k+k*i, 3))"              "[0, 1 - i, 2 - 2i]"
+run "ctms.map_abs"      "map(abs, tensor(k->k+k*i, 3))"               "[0, 1.4142135623730951, 2.8284271247461903]"
+run "ctms.sum_total"    "sum(tensor(k->k+k*i, 4))"                    "6 + 6i"
+run "ctms.sum_axis"     "sum(tensor((r,c)->r+c*i, 3, 3), 0)"          "[3, 3 + 3i, 3 + 6i]"
+run "ctms.sum_fn_cx"    "sum(k->k*i, 4)"                              "6i"
+run "ctms.sum_lo_hi"    "sum(k->k*i, 0, 3)"                           "6i"
+
+# ── fftn / ifftn with ComplexTensor ──────────────────────────────────────────
+section "FFTN COMPLEX"
+run "ffc.shape_1d"      "shape(fftn(tensor(k->k+k*i, 8)))"            "(8)"
+run "ffc.shape_2d"      "shape(fftn(tensor((r,c)->r+c*i, 4, 4)))"     "(4, 4)"
+run "ffc.roundtrip"     "T = tensor(k->k+k*i, 4); sum(abs(ifftn(fftn(T)) - T))" "0"
+run "ffc.axis"          "shape(fftn(tensor((r,c)->r+c*i, 3, 4), 1))"  "(3, 4)"
+run "ffc.axes_tuple"    "shape(fftn(tensor((r,c)->r+c*i, 3, 4), (0,1)))" "(3, 4)"
+run "ffc.real_input_ct" "T = tensor(k->k, 4); shape(fftn(T))"         "(4)"
+run "ffc.re_im_pair"    "Re = zeros(4); Im = tensor(k->k, 4); shape(fftn(Re, Im))" "(4)"
+
 # ── print summary ─────────────────────────────────────────────────────────────
 echo
 echo "================================"
