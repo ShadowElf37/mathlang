@@ -39,6 +39,7 @@ pub const BUILTIN_FNS: &[&str] = &[
     "hstack", "vstack", "tomat",
     "lingrid",
     "reshape", "permute", "cat", "squeeze", "unsqueeze",
+    "dim", "tensordot",
 ];
 
 pub const BUILTIN_CONSTS: &[&str] = &["pi", "e", "phi", "inf", "i"];
@@ -93,7 +94,13 @@ fn highlight_line(line: &str, user_fns: &[String], user_vars: &[String]) -> Stri
             } else if BUILTIN_FNS.contains(&name) || user_fns.iter().any(|u| u == name) {
                 out.push_str(&format!("\x1b[95m{name}\x1b[0m"));
             } else if user_vars.iter().any(|u| u == name) {
-                out.push_str(name);
+                // Bold for ALLCAPS or Leading-Capital names (likely tensors/matrices)
+                let is_tensor_name = name.chars().next().map_or(false, |c| c.is_uppercase());
+                if is_tensor_name {
+                    out.push_str(&format!("\x1b[1;95m{name}\x1b[0m"));
+                } else {
+                    out.push_str(&format!("\x1b[95m{name}\x1b[0m"));
+                }
             } else {
                 out.push_str(name);
             }
@@ -310,7 +317,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "           2pi  3sin(x)  2(x+1)  — implicit multiplication\n",
             "Compare:   < > <= >= == !=  (return 0 or 1)  & | (bitwise and/or)\n",
             "           lt leq gt geq eq neq  — comparison fns for use with map/filter\n",
-            "Aggregates: sum(f,a,b)  prod(f,a,b)  sum(T)  sum(T,axis)\n",
+            "Aggregates: sum(f,a,b)  prod(f,a,b)  sum(f,n)  sum(T)  sum(T,axis)\n",
             "           integral(f,a,b[,n])  deriv(f,x[,dx])\n",
             "Grapher:   graph(f[,a,b])  saves graph_N.png to cwd\n\n",
             "Trig:      sin cos tan  asin acos atan atan2\n",
@@ -334,10 +341,11 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "Tensors:   (1,2; 3,4)  — 2D literal;  A @ B  — matmul\n",
             "           zeros(n1,n2,…)  ones(n1,n2,…)  eye(n)  diag(t|T)\n",
             "           tensor(f, n1, n2, …)  matrix(f, r, c)\n",
-            "           shape rows cols  transpose([a,b])  trace norm\n",
+            "           shape(T)  dim(T,axis)  rows cols  transpose([a,b])  trace norm\n",
             "           reshape(T, n1, n2, …)  permute(T, p0, p1, …)\n",
             "           cat(axis, T1, T2, …)  squeeze(T)  unsqueeze(T, dim)\n",
-            "           outer(T1, T2)  matmul(A,B)  row col\n",
+            "           outer(T1, T2)  tensordot(T1,T2,n)  tensordot(T1,T2,(a,b))\n",
+            "           matmul(A,B)  row col\n",
             "           det inv solve(A,b)  hstack vstack tomat(t,r,c)\n",
             "           lingrid(start,end,counts,f)  — supports any n-D via tuples\n",
             "           T[i,j,…]  T[i,a..b]  T[..,j]  T[i..,j]  T[..k,j]  — n-D slicing\n",
@@ -359,7 +367,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
                 }
             }
         }
-        "version" => println!("mathlang v0.9"),
+        "version" => println!("mathlang v0.10"),
         "defs" | "vars" | "fns" => show_defs(env),
         "clear" => {
             let n = env.vars.iter().filter(|(k,_)| {

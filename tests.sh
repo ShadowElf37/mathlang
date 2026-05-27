@@ -733,6 +733,35 @@ run "mm.2d_1d"        "matrix((i,j)->if(i==j,1,0),3,3) @ tensor(i->i,3)" "[0, 1,
 run "mm.1d_2d"        "tensor(i->1,3) @ eye(3)"                   "[1, 1, 1]"
 run "mm.2d_1d_sum"    "sum(eye(3) @ tensor(i->i,3))"              "3"
 
+# ── dim(T, axis) ─────────────────────────────────────────────────────────────
+section "DIM"
+run "dm.0"            "dim(eye(3), 0)"                              "3"
+run "dm.1"            "dim(eye(3), 1)"                              "3"
+run "dm.3d_last"      "dim(zeros(2,3,4), 2)"                        "4"
+run "dm.3d_first"     "dim(zeros(2,3,4), 0)"                        "2"
+run "dm.shape_check"  "dim(zeros(2,3,4), 1)"                        "3"
+run "dm.tuple"        "dim((1,2,3,4), 0)"                           "4"
+
+# ── sum(f, n) two-arg form ────────────────────────────────────────────────────
+section "SUM TWO-ARG"
+run "s2.sum_n"        "sum(k->k, 5)"                                "10"
+run "s2.sum_sq"       "sum(k->k^2, 4)"                              "14"
+run "s2.sum_zero"     "sum(k->k, 0)"                                "0"
+run "s2.prod_n"       "prod(k->k+1, 4)"                             "24"
+run "s2.with_dim"     "sum(k->k, dim(eye(3),0))"                   "3"
+run "s2.contraction"  "sum(k->tensor(i->i+1,3)[k]*tensor(i->i+1,3)[k], dim(eye(3),0))" "14"
+
+# ── tensordot ─────────────────────────────────────────────────────────────────
+section "TENSORDOT"
+run "td.matmul_scalar"  "tensordot(eye(3), eye(3), 1)"                     "⎡ 1  0  0 ⎤ ⎢ 0  1  0 ⎥ ⎣ 0  0  1 ⎦"
+run "td.dot_1d"         "tensordot(tensor(i->i+1,3), tensor(i->i+1,3), 1)" "14"
+run "td.pair_matmul"    "tensordot(eye(3), eye(3), (1,0))"                 "⎡ 1  0  0 ⎤ ⎢ 0  1  0 ⎥ ⎣ 0  0  1 ⎦"
+run "td.pair_dot"       "tensordot(tensor(i->i+1,3), tensor(i->i+1,3), (0,0))" "14"
+run "td.2x3_3x2"        "shape(tensordot(zeros(2,3), zeros(3,2), 1))"      "(2, 2)"
+run "td.outer_via_0"    "shape(tensordot(zeros(2,3), zeros(4,5), 0))"      "(2, 3, 4, 5)"
+run "td.3d_contract"    "shape(tensordot(zeros(2,3,4), zeros(4,5), 1))"    "(2, 3, 5)"
+run "td.scalar_result"  "tensordot(tensor(i->1,4), tensor(i->1,4), 1)"     "4"
+
 # ── print summary ─────────────────────────────────────────────────────────────
 echo
 echo "================================"

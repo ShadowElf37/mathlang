@@ -77,6 +77,7 @@ impl Env {
             "hstack", "vstack", "tomat",
             "lingrid",
             "reshape", "permute", "cat", "squeeze", "unsqueeze",
+            "dim", "tensordot",
         ] {
             vars.insert(name.to_string(), Val::Builtin(name.to_string()));
         }
@@ -119,6 +120,7 @@ pub fn is_protected(name: &str) -> bool {
         | "hstack" | "vstack" | "tomat"
         | "lingrid"
         | "reshape" | "permute" | "cat" | "squeeze" | "unsqueeze"
+        | "dim" | "tensordot"
     )
 }
 
@@ -1057,6 +1059,30 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                 _ => Err("cols: argument must be a 2D+ tensor".into()),
             }
         }
+        "dim" => {
+            arity("dim", 2, vals.len())?;
+            let mut it = vals.into_iter();
+            let axis = {
+                let first = it.next().unwrap();
+                let axis_val = it.next().unwrap().num("dim")? as usize;
+                match first {
+                    Val::Tensor { shape, .. } => {
+                        if axis_val >= shape.len() {
+                            return Err(format!("dim: axis {axis_val} out of range for {}-D tensor", shape.len()));
+                        }
+                        Ok(Val::Num(shape[axis_val] as f64))
+                    }
+                    Val::Tuple(items) => {
+                        if axis_val != 0 {
+                            return Err(format!("dim: axis {axis_val} out of range for 1-D tuple (only axis 0 exists)"));
+                        }
+                        Ok(Val::Num(items.len() as f64))
+                    }
+                    _ => Err("dim: first argument must be a tensor or tuple".into()),
+                }
+            };
+            axis
+        }
 
         // ── Tensor operations ─────────────────────────────────────────────────
 
@@ -1231,6 +1257,135 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             // Not yet implemented — requires string literal support.
             let _ = vals;
             return Err("einsum is not yet implemented".into());
+        }
+
+        // tensordot(T1, T2, n)       – contract last n axes of T1 with first n of T2
+        // tensordot(T1, T2, (a, b))  – contract axis a of T1 with axis b of T2
+        // tensordot(T1, T2, ((a1,…),(b1,…))) – contract multiple axis pairs
+        "tensordot" => {
+            arity("tensordot", 3, vals.len())?;
+            let mut it = vals.into_iter();
+            let (ad, ash) = match it.next().unwrap() {
+                Val::Tensor { data, shape } => (data, shape),
+                _ => return Err("tensordot: first argument must be a tensor".into()),
+            };
+            let (bd, bsh) = match it.next().unwrap() {
+                Val::Tensor { data, shape } => (data, shape),
+                _ => return Err("tensordot: second argument must be a tensor".into()),
+            };
+            let axes_val = it.next().unwrap();
+
+            // Resolve the axes spec to (a_axes, b_axes) — which dims to contract.
+            let (a_axes, b_axes): (Vec<usize>, Vec<usize>) = match axes_val {
+                Val::Num(n) => {
+                    let n = n as usize;
+                    if n > ash.len() || n > bsh.len() {
+                        return Err(format!(
+                            "tensordot: cannot contract {n} axes (T1 is {}-D, T2 is {}-D)",
+                            ash.len(), bsh.len()
+                        ));
+                    }
+                    ((ash.len()-n..ash.len()).collect(), (0..n).collect())
+                }
+                Val::Tuple(pair) if pair.len() == 2 => {
+                    match (pair[0].clone(), pair[1].clone()) {
+                        // Single pair: (a, b)
+                        (Val::Num(a), Val::Num(b)) => (vec![a as usize], vec![b as usize]),
+                        // Multiple pairs: ((a1,…), (b1,…))
+                        (Val::Tuple(al), Val::Tuple(bl)) => {
+                            let a_axes: Result<Vec<usize>, _> = al.into_iter()
+                                .map(|v| v.num("tensordot").map(|x| x as usize))
+                                .collect();
+                            let b_axes: Result<Vec<usize>, _> = bl.into_iter()
+                                .map(|v| v.num("tensordot").map(|x| x as usize))
+                                .collect();
+                            (a_axes?, b_axes?)
+                        }
+                        _ => return Err("tensordot: axes tuple must be (a,b) or ((a1,…),(b1,…))".into()),
+                    }
+                }
+                _ => return Err("tensordot: axes must be a scalar or tuple".into()),
+            };
+
+            if a_axes.len() != b_axes.len() {
+                return Err("tensordot: axes lists must have the same length".into());
+            }
+            for (&a, &b) in a_axes.iter().zip(&b_axes) {
+                if a >= ash.len() {
+                    return Err(format!("tensordot: axis {a} out of range for {}-D T1", ash.len()));
+                }
+                if b >= bsh.len() {
+                    return Err(format!("tensordot: axis {b} out of range for {}-D T2", bsh.len()));
+                }
+                if ash[a] != bsh[b] {
+                    return Err(format!(
+                        "tensordot: contracted axis size mismatch (T1 axis {a} has size {}, T2 axis {b} has size {})",
+                        ash[a], bsh[b]
+                    ));
+                }
+            }
+
+            // Free axes: all axes not being contracted.
+            let a_free: Vec<usize> = (0..ash.len()).filter(|k| !a_axes.contains(k)).collect();
+            let b_free: Vec<usize> = (0..bsh.len()).filter(|k| !b_axes.contains(k)).collect();
+
+            // Output shape = [ash[a_free[0]], …, bsh[b_free[0]], …]
+            let out_shape: Vec<usize> = a_free.iter().map(|&k| ash[k])
+                .chain(b_free.iter().map(|&k| bsh[k]))
+                .collect();
+
+            let a_free_shape: Vec<usize> = a_free.iter().map(|&k| ash[k]).collect();
+            let b_free_shape: Vec<usize> = b_free.iter().map(|&k| bsh[k]).collect();
+            let contracted_shape: Vec<usize> = a_axes.iter().map(|&k| ash[k]).collect();
+
+            let a_free_total: usize = if a_free_shape.is_empty() { 1 } else { a_free_shape.iter().product() };
+            let b_free_total: usize = if b_free_shape.is_empty() { 1 } else { b_free_shape.iter().product() };
+            let contracted_total: usize = if contracted_shape.is_empty() { 1 } else { contracted_shape.iter().product() };
+
+            let out_size: usize = if out_shape.is_empty() { 1 } else { out_shape.iter().product() };
+            let out_strides = strides(&out_shape);
+            let a_strides = strides(&ash);
+            let b_strides = strides(&bsh);
+
+            let mut out_data = vec![0.0f64; out_size];
+
+            for af in 0..a_free_total {
+                let af_multi = unravel(af, &a_free_shape);
+                for bf in 0..b_free_total {
+                    let bf_multi = unravel(bf, &b_free_shape);
+
+                    // Flat index into output
+                    let out_flat: usize = af_multi.iter().chain(bf_multi.iter())
+                        .zip(out_strides.iter())
+                        .map(|(&i, &s)| i * s)
+                        .sum();
+
+                    // Sum over contracted indices
+                    let mut dot = 0.0f64;
+                    for ck in 0..contracted_total {
+                        let c_multi = unravel(ck, &contracted_shape);
+
+                        let mut a_multi = vec![0usize; ash.len()];
+                        for (&fa, &fi) in a_free.iter().zip(&af_multi) { a_multi[fa] = fi; }
+                        for (&ca, &ci) in a_axes.iter().zip(&c_multi)  { a_multi[ca] = ci; }
+
+                        let mut b_multi = vec![0usize; bsh.len()];
+                        for (&fb, &fi) in b_free.iter().zip(&bf_multi) { b_multi[fb] = fi; }
+                        for (&cb, &ci) in b_axes.iter().zip(&c_multi)  { b_multi[cb] = ci; }
+
+                        let a_flat: usize = a_multi.iter().zip(&a_strides).map(|(&i, &s)| i * s).sum();
+                        let b_flat: usize = b_multi.iter().zip(&b_strides).map(|(&i, &s)| i * s).sum();
+                        dot += ad[a_flat] * bd[b_flat];
+                    }
+                    out_data[out_flat] = dot;
+                }
+            }
+
+            if out_shape.is_empty() {
+                Ok(Val::Num(out_data[0]))
+            } else {
+                Ok(Val::Tensor { data: out_data, shape: out_shape })
+            }
         }
 
         // ── Linear algebra ────────────────────────────────────────────────────
@@ -2205,9 +2360,10 @@ pub fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> 
             _ => Err(format!("{label}: 1-arg form requires a tuple or tensor")),
         };
     }
-    // 2-arg form: sum(T, axis) — reduce tensor along one axis
+    // 2-arg form: sum(T, axis) or sum(f, n)
     if args.len() == 2 {
         return match eval(&args[0], env)? {
+            // sum(T, axis) — reduce tensor along one axis
             Val::Tensor { data, shape } => {
                 let axis = eval(&args[1], env)?.num(label)? as usize;
                 if axis >= shape.len() {
@@ -2218,11 +2374,9 @@ pub fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> 
                 let out_size: usize = if out_shape.is_empty() { 1 } else { out_shape.iter().product() };
                 let init = if product { 1.0 } else { 0.0 };
                 let mut out_data = vec![init; out_size];
-                // Output strides (for out_shape, which may be empty → scalar)
                 let out_strides: Vec<usize> = strides(&out_shape);
                 for in_flat in 0..data.len() {
                     let multi = unravel(in_flat, &shape);
-                    // Build output multi-index by dropping the axis dimension
                     let out_multi: Vec<usize> = multi.iter().enumerate()
                         .filter(|&(k, _)| k != axis)
                         .map(|(_, &i)| i)
@@ -2241,11 +2395,24 @@ pub fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> 
                     Ok(Val::Tensor { data: out_data, shape: out_shape })
                 }
             }
-            _ => Err(format!("{label}(T, axis) requires a tensor as first argument")),
+            // sum(f, n) — sum f(k) for k in 0..n (exclusive)
+            f @ (Val::Fn(..) | Val::Builtin(_)) => {
+                let n = eval(&args[1], env)?.num(label)? as i64;
+                if n < 0 {
+                    return Err(format!("{label}: count must be non-negative, got {n}"));
+                }
+                let mut acc = if product { 1.0 } else { 0.0 };
+                for k in 0..n {
+                    let v = apply_val(f.clone(), vec![Val::Num(k as f64)], env)?.num(label)?;
+                    if product { acc *= v; } else { acc += v; }
+                }
+                Ok(Val::Num(acc))
+            }
+            _ => Err(format!("{label}: 2-arg form is {label}(T, axis) or {label}(f, n)")),
         };
     }
     if args.len() != 3 {
-        return Err(format!("{label} expects {label}(T), {label}(T, axis), or {label}(fn, start, stop)"));
+        return Err(format!("{label} expects {label}(T), {label}(T,axis), {label}(f,n), or {label}(f,lo,hi)"));
     }
     let start = eval(&args[1], env)?.num("start")? as i64;
     let stop  = eval(&args[2], env)?.num("stop")?  as i64;
