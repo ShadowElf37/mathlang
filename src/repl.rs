@@ -31,6 +31,10 @@ pub const BUILTIN_FNS: &[&str] = &[
     "sum", "prod", "integral", "deriv", "map",
     "sinc", "sech", "csch", "erf", "erfc", "j0", "j1", "jinc",
     "graph",
+    // Tensor ops
+    "matrix", "zeros", "ones", "eye", "diag",
+    "shape", "rows", "cols", "transpose", "trace", "norm",
+    "row", "col", "matmul",
 ];
 
 pub const BUILTIN_CONSTS: &[&str] = &["pi", "e", "phi", "inf", "i"];
