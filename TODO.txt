@@ -12,7 +12,7 @@
 
 5. Claude Opus exhaustive ergonomics and bug check
 
-6. !print <text? vars? string?>
+6. [DONE] !print [text with {expr} interpolation]
 
 7. [DONE] unify REPL and file evaluation — !commands now work in .math files (import_file routes !-prefixed lines to bang_command)
 

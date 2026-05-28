@@ -145,7 +145,7 @@ impl rustyline::completion::Completer for MathHelper {
         -> rustyline::Result<(usize, Vec<String>)>
     {
         if line.starts_with('!') {
-            let cmds = ["!clear", "!defs", "!help", "!include ", "!loadhdf5 ", "!loadtensor ", "!savehdf5 ", "!savetensor ", "!version"];
+            let cmds = ["!clear", "!defs", "!help", "!include ", "!loadhdf5 ", "!loadtensor ", "!print ", "!savehdf5 ", "!savetensor ", "!version"];
             return Ok((0, cmds.iter().filter(|&&c| c.starts_with(line)).map(|s| s.to_string()).collect()));
         }
         let start = line[..pos].rfind(|c: char| !c.is_alphanumeric() && c != '_').map_or(0, |i| i+1);
@@ -505,6 +505,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
     match name.trim() {
         "help" => print!(concat!(
             "Commands:  !help  !include <file>  !defs  !clear  !version\n",
+            "           !print [text with {{expr}} interpolation]  — print formatted output\n",
             "           !savetensor <var> <file>  — save tensor to binary .mlt file\n",
             "           !loadtensor <var> <file>  — load tensor from .mlt file\n",
             "           !savehdf5 <var> <file> [/ds] [--append] [--overwrite] [--gzip 0-9]\n",
@@ -585,6 +586,50 @@ fn bang_command(cmd: &str, env: &mut Env) {
             }
         }
         "version" => println!("mathlang v{}", env!("CARGO_PKG_VERSION")),
+        "print" => {
+            let mut out = String::new();
+            let mut chars = arg.chars().peekable();
+            while let Some(ch) = chars.next() {
+                if ch == '{' {
+                    if chars.peek() == Some(&'{') {
+                        chars.next();
+                        out.push('{');
+                    } else {
+                        let mut expr_src = String::new();
+                        let mut depth = 1usize;
+                        loop {
+                            match chars.next() {
+                                None => { eprintln!("print: unclosed {{"); return; }
+                                Some('}') => {
+                                    depth -= 1;
+                                    if depth == 0 { break; }
+                                    expr_src.push('}');
+                                }
+                                Some('{') => { depth += 1; expr_src.push('{'); }
+                                Some(c)   => expr_src.push(c),
+                            }
+                        }
+                        let toks = Lexer::new(expr_src.trim()).tokenize();
+                        match Parser::new(toks).parse_repl() {
+                            Err(e) => out.push_str(&format!("<parse error: {e}>")),
+                            Ok((_, exprs)) => match exprs.first() {
+                                None => {}
+                                Some(node) => match eval(node, env) {
+                                    Ok(val) => out.push_str(&fmt_val(&val)),
+                                    Err(e)  => out.push_str(&format!("<error: {e}>")),
+                                },
+                            },
+                        }
+                    }
+                } else if ch == '}' && chars.peek() == Some(&'}') {
+                    chars.next();
+                    out.push('}');
+                } else {
+                    out.push(ch);
+                }
+            }
+            println!("{out}");
+        }
         "savetensor" => {
             let mut it = arg.splitn(2, ' ');
             let (var, fp) = (it.next().unwrap_or("").trim(), it.next().unwrap_or("").trim());

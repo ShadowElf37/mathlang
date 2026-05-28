@@ -1094,6 +1094,23 @@ U[1]"                                                                   "5"
 
 rm -f /tmp/mlt_file_bang_test.mlt
 
+# ── !print ────────────────────────────────────────────────────────────────────
+section "!print"
+
+_repl_check "print.plain"       "!print hello world"              "hello world"
+_repl_check "print.interp"      "x = 7
+!print x is {x}"                                                   "x is 7"
+_repl_check "print.expr"        "!print 2 + 2 = {2 + 2}"          "2 \+ 2 = 4"
+_repl_check "print.multi"       "a = 3
+b = 4
+!print {a} {b} {sqrt(a^2+b^2)}"                                    "3 4 5"
+_repl_check "print.blank"       "!print"                           "^$"
+_repl_check "print.escape"      "!print {{x}} is a placeholder"   "\{x\} is a placeholder"
+_repl_check "print.tensor"      "!print {(1,2,3)}"                 "\[1, 2, 3\]"
+_repl_check "print.err"         "!print {nosuchvar}"               "<error:"
+_file_check  "print.in_file"    "n = 5
+!print sum = {sum(x -> x, 1, n)}"                                  "sum = 15"
+
 # ── HDF5 (skipped unless built with --features hdf5) ─────────────────────────
 section "HDF5"
 _H5F=$(mktemp /tmp/mlt_test_XXXXXX.h5)

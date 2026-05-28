@@ -82,6 +82,7 @@ result = 10
 | `!include <file>` | load a `.math` file into the current session |
 | `!clear` | clear all user definitions |
 | `!version` | show version |
+| `!print [text with {expr}]` | print text with interpolated expressions |
 | `!savetensor <var> <file>` | save tensor to binary `.mlt` file |
 | `!loadtensor <var> <file>` | load tensor from `.mlt` file |
 | `!savehdf5 <var> <file> …` | save tensor to HDF5 (requires `--features hdf5`) |
@@ -92,7 +93,7 @@ result = 10
 
 ## `.math` files
 
-A `.math` file is plain text: one expression or definition per line. Lines starting with `#` are comments. Braces `{ }` can span multiple lines. **All `!commands` work in `.math` files** — `!include`, `!savetensor`, `!loadtensor`, `!savehdf5`, `!loadhdf5`, `!defs`, `!version`, etc.
+A `.math` file is plain text: one expression or definition per line. Lines starting with `#` are comments. Braces `{ }` can span multiple lines. **All `!commands` work in `.math` files** — `!include`, `!print`, `!savetensor`, `!loadtensor`, `!savehdf5`, `!loadhdf5`, `!defs`, `!version`, etc.
 
 ```
 # my_lib.math
@@ -101,6 +102,28 @@ cube = x -> x^3
 # load another file
 !include conversions.math
 ```
+
+`!print` lets you emit formatted output from a `.math` file. Use `{expr}` to interpolate any expression; `{{` / `}}` produce literal braces:
+
+```
+# solver.math
+!print running solver...
+n = 100
+result = sum(x -> x^2, 1, n)
+!print n = {n}, sum of squares = {result}
+!print norm of solution: {norm(solve(A, b))}
+!print use {{expr}} for interpolation
+```
+
+```
+> !include solver.math
+running solver...
+n = 100, sum of squares = 338350
+norm of solution: …
+use {expr} for interpolation
+```
+
+`!print` with no argument prints a blank line.
 
 ### Loading files from the shell
 
