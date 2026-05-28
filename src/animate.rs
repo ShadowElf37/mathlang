@@ -49,10 +49,10 @@ fn write_frame(out: &mut impl Write, data: &[f64], rows: usize, cols: usize, t: 
 fn call_for_frame(f: &Val, t: f64, env: &Env) -> Result<(Vec<f64>, usize, usize), String> {
     let result = apply_val(f.clone(), vec![Val::Num(t)], env)?;
     match result {
-        Val::Tensor { data, shape } if shape.len() == 2 => Ok((data, shape[0], shape[1])),
+        Val::Tensor { data, shape } if shape.len() == 2 => Ok((data.into_vec(), shape[0], shape[1])),
         Val::Tensor { data, shape } if shape.len() == 1 => {
             let cols = data.len();
-            Ok((data, 1, cols))
+            Ok((data.into_vec(), 1, cols))
         }
         other => Err(format!(
             "animate2D: f(t) must return a 2-D tensor, got {}",
@@ -114,7 +114,7 @@ fn stream_frames(
                 1 => {
                     let tv = eval(&rest[0], env)?;
                     match tv {
-                        Val::Tensor { data, shape } if shape.len() == 1 => data,
+                        Val::Tensor { data, shape } if shape.len() == 1 => data.into_vec(),
                         Val::Num(n) => (0..n as usize).map(|k| k as f64).collect(),
                         other => return Err(format!(
                             "animate2D: 2nd arg must be a 1-D tensor of timestamps or a count, got {}",

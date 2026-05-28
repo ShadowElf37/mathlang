@@ -6,7 +6,10 @@
 
 3. [DONE] ctrl+d — ConditionalEventHandler: Ctrl+D always exits regardless of buffer content
 
-4. we should have a discussion about a manually and selectively triggered GPU backend using wgpu compute for large operations
+4. [DISCUSSED] GPU backend using wgpu compute — see CONSIDERATIONS.md for full design.
+   Syntax: GPU(vars){ code }. Separate src/gpu/ directory; only 6 small seams into
+   main codebase. Two-phase eval (record ops → single submit). Shader-per-builtin.
+   f64→f32 on upload. Do NOT wait for bytecode first.
 
 5. we should have a discussion about pushing the AST of lambdas into bytecode, or bytecode compilation in general
 
@@ -18,8 +21,8 @@
 
 9. animator colorbar is on top of part of the rendered grid, and its background is blue and not transparent - transparent background colorbar would be fine
 
-10. O(n²) memory from env cloning: every function definition does env.vars.clone(),
+10. [DONE] O(n²) memory from env cloning: every function definition does env.vars.clone(),
     which deep-copies all Val::Tensor data (Vec<f64>) into the captured env.
     With n functions and large tensors, this is O(n) copies of each tensor.
-    Fix: wrap env.vars in Arc<HashMap<String,Val>> with copy-on-write on mutation,
-    so cloning the env is O(1) and only modified entries allocate. Non-trivial refactor.
+    Fix: TData newtype wrapping Arc<Vec<f64>> (O(1) clone); Env.vars: Arc<HashMap<String,Val>>
+    (O(1) env clone; CoW on mutation via Arc::make_mut). All 643 tests pass.

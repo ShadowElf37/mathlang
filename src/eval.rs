@@ -3,6 +3,52 @@ use std::sync::Arc;
 use std::cell::RefCell;
 use crate::ast::{Expr, BlockStmt, Op, Def};
 
+// ── TData: Arc-wrapped tensor data ────────────────────────────────────────────
+//
+// Cloning TData is O(1) — it just increments the Arc refcount.  The underlying
+// Vec<f64> is only deep-copied when Arc::make_mut detects multiple owners
+// (copy-on-write).  This eliminates the O(n²) memory explosion that previously
+// occurred from env.vars.clone() deep-copying all tensor data on every function
+// definition or call (see TODO #10).
+
+#[derive(Debug)]
+pub struct TData(Arc<Vec<f64>>);
+
+impl TData {
+    /// Wrap a Vec<f64> in a new TData.  Construction is always O(n) — we don't
+    /// avoid building the Vec, only avoid copying it on subsequent clones.
+    #[inline] pub fn new(v: Vec<f64>) -> Self { TData(Arc::new(v)) }
+
+    /// Unwrap to Vec<f64>.  O(1) if this is the sole owner; CoW-clone otherwise.
+    #[inline] pub fn into_vec(self) -> Vec<f64> {
+        Arc::try_unwrap(self.0).unwrap_or_else(|a| (*a).clone())
+    }
+}
+
+/// O(1) clone — just increments the Arc refcount.
+impl Clone for TData {
+    #[inline] fn clone(&self) -> Self { TData(Arc::clone(&self.0)) }
+}
+
+/// Read-only deref to Vec<f64>:  data.len(), data[i], data.iter(), &data[a..b] all work.
+impl std::ops::Deref for TData {
+    type Target = Vec<f64>;
+    #[inline] fn deref(&self) -> &Vec<f64> { &self.0 }
+}
+
+/// CoW write deref — only clones the Vec if the Arc has multiple owners.
+impl std::ops::DerefMut for TData {
+    #[inline] fn deref_mut(&mut self) -> &mut Vec<f64> { Arc::make_mut(&mut self.0) }
+}
+
+/// Consuming iteration: data.into_iter() → Iterator<Item=f64>.
+/// O(1) if sole owner (Arc::try_unwrap succeeds), CoW-clone otherwise.
+impl IntoIterator for TData {
+    type Item = f64;
+    type IntoIter = std::vec::IntoIter<f64>;
+    #[inline] fn into_iter(self) -> Self::IntoIter { self.into_vec().into_iter() }
+}
+
 // ── Values ────────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
@@ -16,9 +62,11 @@ pub enum Val {
     Builtin(String),
     Tuple(Vec<Val>),
     /// Real-valued tensor (row-major flat storage).
-    Tensor { data: Vec<f64>, shape: Vec<usize> },
+    /// `data` is a TData (Arc<Vec<f64>>), so cloning a Tensor Val is O(1).
+    Tensor { data: TData, shape: Vec<usize> },
     /// Complex tensor: two parallel real arrays (re, im) with identical shape.
-    ComplexTensor { re: Vec<f64>, im: Vec<f64>, shape: Vec<usize> },
+    /// Both re and im are TData for O(1) cloning.
+    ComplexTensor { re: TData, im: TData, shape: Vec<usize> },
     /// Mutable cell — a shared, reference-counted mutable container.
     /// Cloning a Cell shares the same RefCell (identity semantics).
     /// Created with cell(v); read with get(c); written with set(c, v).
@@ -41,10 +89,23 @@ impl Val {
 }
 
 // ── Environment ───────────────────────────────────────────────────────────────
+//
+// vars is Arc-wrapped so env.clone() is O(1).  Mutations (variable definitions,
+// parameter binding) use Arc::make_mut() for copy-on-write semantics: the
+// HashMap is only cloned when there are multiple outstanding references to it,
+// which is rare in practice.
 
 #[derive(Clone)]
 pub struct Env {
-    pub vars: HashMap<String, Val>,
+    pub vars: Arc<HashMap<String, Val>>,
+}
+
+impl Env {
+    /// Insert a variable into this env, CoW-cloning the HashMap only if needed.
+    #[inline]
+    pub fn define(&mut self, k: String, v: Val) {
+        Arc::make_mut(&mut self.vars).insert(k, v);
+    }
 }
 
 impl Env {
@@ -98,7 +159,7 @@ impl Env {
         ] {
             vars.insert(name.to_string(), Val::Builtin(name.to_string()));
         }
-        Self { vars }
+        Self { vars: Arc::new(vars) }
     }
 }
 
@@ -291,9 +352,9 @@ fn to_complex(v: Val) -> Result<(f64, f64), String> {
 #[inline]
 fn maybe_real(re: Vec<f64>, im: Vec<f64>, shape: Vec<usize>) -> Val {
     if im.iter().all(|&x| x == 0.0) {
-        Val::Tensor { data: re, shape }
+        Val::Tensor { data: TData::new(re), shape }
     } else {
-        Val::ComplexTensor { re, im, shape }
+        Val::ComplexTensor { re: TData::new(re), im: TData::new(im), shape }
     }
 }
 
@@ -355,12 +416,12 @@ fn broadcast1(v: Val, f: impl Fn(Val) -> Result<Val, String>) -> Result<Val, Str
             let new_data: Result<Vec<f64>, _> = data.into_iter()
                 .map(|x| f(Val::Num(x))?.num("broadcast"))
                 .collect();
-            Ok(Val::Tensor { data: new_data?, shape })
+            Ok(Val::Tensor { data: TData::new(new_data?), shape })
         }
         Val::ComplexTensor { re, im, shape } => {
             let mut re_out = Vec::with_capacity(re.len());
             let mut im_out = Vec::with_capacity(re.len());
-            for (r, i) in re.into_iter().zip(im) {
+            for (r, i) in re.into_iter().zip(im.into_iter()) {
                 let v = if i == 0.0 { Val::Num(r) } else { Val::Complex(r, i) };
                 match f(v)? {
                     Val::Num(n)        => { re_out.push(n); im_out.push(0.0); }
@@ -379,8 +440,8 @@ fn broadcast1(v: Val, f: impl Fn(Val) -> Result<Val, String>) -> Result<Val, Str
 /// Promote a Tensor or ComplexTensor into (re, im, shape) triple.
 fn as_complex_tensor(v: Val) -> Result<(Vec<f64>, Vec<f64>, Vec<usize>), String> {
     match v {
-        Val::Tensor { data, shape } => { let n = data.len(); Ok((data, vec![0.0f64; n], shape)) }
-        Val::ComplexTensor { re, im, shape } => Ok((re, im, shape)),
+        Val::Tensor { data, shape } => { let n = data.len(); Ok((data.into_vec(), vec![0.0f64; n], shape)) }
+        Val::ComplexTensor { re, im, shape } => Ok((re.into_vec(), im.into_vec(), shape)),
         _ => Err("expected a tensor".into()),
     }
 }
@@ -397,44 +458,44 @@ fn binop_tensor(lv: Val, op: &Op, rv: Val) -> Result<Val, String> {
         // ── Real × Real ────────────────────────────────────────────────────
         (Val::Tensor { data: ld, shape: ls }, Val::Tensor { data: rd, shape: rs }) => {
             shape_check!(ls, rs);
-            let out: Result<Vec<f64>, _> = ld.into_iter().zip(rd)
+            let out: Result<Vec<f64>, _> = ld.into_iter().zip(rd.into_iter())
                 .map(|(l, r)| scalar_binop(Val::Num(l), op, Val::Num(r))?.num("tensor op"))
                 .collect();
-            Ok(Val::Tensor { data: out?, shape: ls })
+            Ok(Val::Tensor { data: TData::new(out?), shape: ls })
         }
         // ── Real tensor × real scalar ──────────────────────────────────────
         (Val::Tensor { data, shape }, Val::Num(s)) => {
             let out: Result<Vec<f64>, _> = data.into_iter()
                 .map(|x| scalar_binop(Val::Num(x), op, Val::Num(s))?.num("tensor op"))
                 .collect();
-            Ok(Val::Tensor { data: out?, shape })
+            Ok(Val::Tensor { data: TData::new(out?), shape })
         }
         (Val::Num(s), Val::Tensor { data, shape }) => {
             let out: Result<Vec<f64>, _> = data.into_iter()
                 .map(|x| scalar_binop(Val::Num(s), op, Val::Num(x))?.num("tensor op"))
                 .collect();
-            Ok(Val::Tensor { data: out?, shape })
+            Ok(Val::Tensor { data: TData::new(out?), shape })
         }
         // ── ComplexTensor × ComplexTensor ──────────────────────────────────
         (Val::ComplexTensor { re: lr, im: li, shape: ls }, Val::ComplexTensor { re: rr, im: ri, shape: rs }) => {
             shape_check!(ls, rs);
-            complex_tensors_binop(lr, li, ls, op, &rr, &ri)
+            complex_tensors_binop(lr.into_vec(), li.into_vec(), ls, op, &rr, &ri)
         }
         // ── ComplexTensor × Tensor ─────────────────────────────────────────
         (Val::ComplexTensor { re: lr, im: li, shape: ls }, Val::Tensor { data: rd, shape: rs }) => {
             shape_check!(ls, rs);
             let ri = vec![0.0f64; rd.len()];
-            complex_tensors_binop(lr, li, ls, op, &rd, &ri)
+            complex_tensors_binop(lr.into_vec(), li.into_vec(), ls, op, &rd, &ri)
         }
         (Val::Tensor { data: ld, shape: ls }, Val::ComplexTensor { re: rr, im: ri, shape: rs }) => {
             shape_check!(ls, rs);
             let li = vec![0.0f64; ld.len()];
-            complex_tensors_binop(ld, li, ls, op, &rr, &ri)
+            complex_tensors_binop(ld.into_vec(), li, ls, op, &rr, &ri)
         }
         // ── ComplexTensor × scalar ─────────────────────────────────────────
         (Val::ComplexTensor { re, im, shape }, Val::Num(s)) => {
             let n = re.len();
-            complex_tensors_binop(re, im, shape, op, &vec![s; n], &vec![0.0; n])
+            complex_tensors_binop(re.into_vec(), im.into_vec(), shape, op, &vec![s; n], &vec![0.0; n])
         }
         (Val::Num(s), Val::ComplexTensor { re, im, shape }) => {
             let n = re.len();
@@ -442,7 +503,7 @@ fn binop_tensor(lv: Val, op: &Op, rv: Val) -> Result<Val, String> {
         }
         (Val::ComplexTensor { re, im, shape }, Val::Complex(sr, si)) => {
             let n = re.len();
-            complex_tensors_binop(re, im, shape, op, &vec![sr; n], &vec![si; n])
+            complex_tensors_binop(re.into_vec(), im.into_vec(), shape, op, &vec![sr; n], &vec![si; n])
         }
         (Val::Complex(sr, si), Val::ComplexTensor { re, im, shape }) => {
             let n = re.len();
@@ -451,7 +512,7 @@ fn binop_tensor(lv: Val, op: &Op, rv: Val) -> Result<Val, String> {
         // ── Tensor × complex scalar ────────────────────────────────────────
         (Val::Tensor { data, shape }, Val::Complex(sr, si)) => {
             let n = data.len();
-            complex_tensors_binop(data, vec![0.0; n], shape, op, &vec![sr; n], &vec![si; n])
+            complex_tensors_binop(data.into_vec(), vec![0.0; n], shape, op, &vec![sr; n], &vec![si; n])
         }
         (Val::Complex(sr, si), Val::Tensor { data, shape }) => {
             let n = data.len();
@@ -588,7 +649,7 @@ fn apply_permutation(data: Vec<f64>, shape: &[usize], perm: &[usize]) -> Result<
         let in_flat: usize = in_multi.iter().zip(&old_strides).map(|(&i, &s)| i * s).sum();
         out[out_flat] = data[in_flat];
     }
-    Ok(Val::Tensor { data: out, shape: new_shape })
+    Ok(Val::Tensor { data: TData::new(out), shape: new_shape })
 }
 
 /// Apply a 1-D FFT/IFFT in-place along one axis of a complex tensor stored as
@@ -818,7 +879,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
         "min" | "max" => match (vals.len(), &vals[..]) {
             (1, _) => {
                 let nums: Vec<f64> = match vals.into_iter().next().unwrap() {
-                    Val::Tensor { data, .. } => data,
+                    Val::Tensor { data, .. } => data.into_vec(),
                     Val::Tuple(v) => v.into_iter().map(|x| x.num(name)).collect::<Result<_,_>>()?,
                     _ => return Err(format!("{name}: 1-arg form requires a tensor or tuple")),
                 };
@@ -864,13 +925,13 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
         "sort" => {
             arity("sort", 1, vals.len())?;
             let mut nums: Vec<f64> = match vals.into_iter().next().unwrap() {
-                Val::Tensor { data, .. } => data,
+                Val::Tensor { data, .. } => data.into_vec(),
                 Val::Tuple(v) => v.into_iter().map(|x| x.num("sort")).collect::<Result<_, _>>()?,
                 _ => return Err("sort: argument must be a tensor or tuple".into()),
             };
             nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let n = nums.len();
-            Ok(Val::Tensor { data: nums, shape: vec![n] })
+            Ok(Val::Tensor { data: TData::new(nums), shape: vec![n] })
         }
         "zip" => {
             arity("zip", 2, vals.len())?;
@@ -879,19 +940,19 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             let av = it.next().unwrap();
             let bv = it.next().unwrap();
             let a: Vec<f64> = match av {
-                Val::Tensor { data, shape } if shape.len() == 1 => data,
+                Val::Tensor { data, shape } if shape.len() == 1 => data.into_vec(),
                 Val::Tuple(v) => v.into_iter().map(|x| x.num("zip")).collect::<Result<_, _>>()?,
                 _ => return Err("zip: args must be 1D tensors or tuples".into()),
             };
             let b: Vec<f64> = match bv {
-                Val::Tensor { data, shape } if shape.len() == 1 => data,
+                Val::Tensor { data, shape } if shape.len() == 1 => data.into_vec(),
                 Val::Tuple(v) => v.into_iter().map(|x| x.num("zip")).collect::<Result<_, _>>()?,
                 _ => return Err("zip: args must be 1D tensors or tuples".into()),
             };
             if a.len() != b.len() { return Err(format!("zip: length mismatch ({} vs {})", a.len(), b.len())); }
             let n = a.len();
             let data: Vec<f64> = a.into_iter().zip(b).flat_map(|(x, y)| [x, y]).collect();
-            Ok(Val::Tensor { data, shape: vec![n, 2] })
+            Ok(Val::Tensor { data: TData::new(data), shape: vec![n, 2] })
         }
         "dot" => {
             arity("dot", 2, vals.len())?;
@@ -899,12 +960,12 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             let av = it.next().unwrap();
             let bv = it.next().unwrap();
             let a: Vec<f64> = match av {
-                Val::Tensor { data, shape } if shape.len() == 1 => data,
+                Val::Tensor { data, shape } if shape.len() == 1 => data.into_vec(),
                 Val::Tuple(v) => v.into_iter().map(|x| x.num("dot")).collect::<Result<_, _>>()?,
                 _ => return Err("dot: args must be 1D tensors".into()),
             };
             let b: Vec<f64> = match bv {
-                Val::Tensor { data, shape } if shape.len() == 1 => data,
+                Val::Tensor { data, shape } if shape.len() == 1 => data.into_vec(),
                 Val::Tuple(v) => v.into_iter().map(|x| x.num("dot")).collect::<Result<_, _>>()?,
                 _ => return Err("dot: args must be 1D tensors".into()),
             };
@@ -919,7 +980,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             let elem  = it.next().unwrap();
             match first {
                 Val::Tensor { mut data, shape } if shape.len() == 1 => {
-                    data.push(elem.num("append")?);
+                    data.push(elem.num("append")?);  // DerefMut CoW-clones only if Arc has multiple owners
                     let n = data.len();
                     Ok(Val::Tensor { data, shape: vec![n] })
                 }
@@ -936,7 +997,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             match (av, bv) {
                 (Val::Tensor { mut data, shape: sa }, Val::Tensor { data: bd, shape: sb })
                     if sa.len() == 1 && sb.len() == 1 => {
-                    data.extend(bd);
+                    data.extend(bd.into_iter());  // DerefMut CoW + IntoIterator
                     let n = data.len();
                     Ok(Val::Tensor { data, shape: vec![n] })
                 }
@@ -960,8 +1021,8 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
         }
         "argmin" | "argmax" => {
             arity(name, 1, vals.len())?;
-            let (nums, shape) = match vals.into_iter().next().unwrap() {
-                Val::Tensor { data, shape } => (data, shape),
+            let (nums, shape): (Vec<f64>, Vec<usize>) = match vals.into_iter().next().unwrap() {
+                Val::Tensor { data, shape } => (data.into_vec(), shape),
                 Val::Tuple(v) => {
                     let n = v.len();
                     let data = v.into_iter().map(|x| x.num(name)).collect::<Result<Vec<_>, _>>()?;
@@ -987,7 +1048,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                     idx[k] = rem % shape[k];
                     rem /= shape[k];
                 }
-                Ok(Val::Tensor { data: idx.into_iter().map(|x| x as f64).collect(), shape: vec![ndim] })
+                Ok(Val::Tensor { data: TData::new(idx.into_iter().map(|x| x as f64).collect()), shape: vec![ndim] })
             }
         }
 
@@ -996,7 +1057,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             arity("mean", 1, vals.len())?;
             let nums: Vec<f64> = match vals.into_iter().next().unwrap() {
                 Val::Tuple(v)       => v.into_iter().map(|x| x.num("mean")).collect::<Result<_, _>>()?,
-                Val::Tensor { data, .. } => data,
+                Val::Tensor { data, .. } => data.into_vec(),
                 _ => return Err("mean: argument must be a tuple or tensor".into()),
             };
             if nums.is_empty() { return Err("mean: empty".into()); }
@@ -1007,7 +1068,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             arity("median", 1, vals.len())?;
             let mut nums: Vec<f64> = match vals.into_iter().next().unwrap() {
                 Val::Tuple(v)       => v.into_iter().map(|x| x.num("median")).collect::<Result<_, _>>()?,
-                Val::Tensor { data, .. } => data,
+                Val::Tensor { data, .. } => data.into_vec(),
                 _ => return Err("median: argument must be a tuple or tensor".into()),
             };
             if nums.is_empty() { return Err("median: empty".into()); }
@@ -1019,7 +1080,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             arity("mode", 1, vals.len())?;
             let nums: Vec<f64> = match vals.into_iter().next().unwrap() {
                 Val::Tuple(v)       => v.into_iter().map(|x| x.num("mode")).collect::<Result<_, _>>()?,
-                Val::Tensor { data, .. } => data,
+                Val::Tensor { data, .. } => data.into_vec(),
                 _ => return Err("mode: argument must be a tuple or tensor".into()),
             };
             if nums.is_empty() { return Err("mode: empty".into()); }
@@ -1035,7 +1096,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             arity("var", 1, vals.len())?;
             let nums: Vec<f64> = match vals.into_iter().next().unwrap() {
                 Val::Tuple(v)       => v.into_iter().map(|x| x.num("var")).collect::<Result<_, _>>()?,
-                Val::Tensor { data, .. } => data,
+                Val::Tensor { data, .. } => data.into_vec(),
                 _ => return Err("var: argument must be a tuple or tensor".into()),
             };
             if nums.is_empty() { return Err("var: empty".into()); }
@@ -1047,7 +1108,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             arity("std", 1, vals.len())?;
             let nums: Vec<f64> = match vals.into_iter().next().unwrap() {
                 Val::Tuple(v)       => v.into_iter().map(|x| x.num("std")).collect::<Result<_, _>>()?,
-                Val::Tensor { data, .. } => data,
+                Val::Tensor { data, .. } => data.into_vec(),
                 _ => return Err("std: argument must be a tuple or tensor".into()),
             };
             if nums.is_empty() { return Err("std: empty".into()); }
@@ -1132,9 +1193,9 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             let b = it.next().unwrap().num("linspace")?;
             let n = it.next().unwrap().num("linspace")? as usize;
             if n == 0 { return Err("linspace: n must be ≥ 1".into()); }
-            if n == 1 { return Ok(Val::Tensor { data: vec![a], shape: vec![1] }); }
+            if n == 1 { return Ok(Val::Tensor { data: TData::new(vec![a]), shape: vec![1] }); }
             let data: Vec<f64> = (0..n).map(|i| a + (b - a) * i as f64 / (n - 1) as f64).collect();
-            Ok(Val::Tensor { data, shape: vec![n] })
+            Ok(Val::Tensor { data: TData::new(data), shape: vec![n] })
         }
         "range" => {
             arity("range", 2, vals.len())?;
@@ -1143,7 +1204,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             let b = it.next().unwrap().num("range")? as i64;
             let data: Vec<f64> = (a..b).map(|n| n as f64).collect();
             let n = data.len();
-            Ok(Val::Tensor { data, shape: vec![n] })
+            Ok(Val::Tensor { data: TData::new(data), shape: vec![n] })
         }
         "gaussian" => {
             arity("gaussian", 3, vals.len())?;
@@ -1176,7 +1237,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                         .collect::<Result<_, _>>()?;
                     let n: usize = shape.iter().product();
                     let data: Vec<f64> = (0..n).map(|_| rand::random::<f64>()).collect();
-                    Ok(Val::Tensor { data, shape })
+                    Ok(Val::Tensor { data: TData::new(data), shape })
                 }
             }
         }
@@ -1211,9 +1272,9 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             // Accept a 1D tensor or a tuple of numbers
             let (re_in, im_in): (Vec<f64>, Vec<f64>) = match vals.into_iter().next().unwrap() {
                 Val::Tensor { data, shape } if shape.len() == 1
-                    => (data.clone(), vec![0.0; data.len()]),
-                Val::Tensor { data, .. } => (data.clone(), vec![0.0; data.len()]),
-                Val::ComplexTensor { re, im, .. } => (re, im),
+                    => { let n = data.len(); (data.into_vec(), vec![0.0; n]) }
+                Val::Tensor { data, .. } => { let n = data.len(); (data.into_vec(), vec![0.0; n]) }
+                Val::ComplexTensor { re, im, .. } => (re.into_vec(), im.into_vec()),
                 Val::Tuple(v) => {
                     let mut re = Vec::with_capacity(v.len());
                     let mut im = Vec::with_capacity(v.len());
@@ -1405,7 +1466,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                 Ok(maybe_real(re_data, im_data, shape))
             } else {
                 let data: Vec<f64> = results.into_iter().map(|v| match v { Val::Num(x) => x, _ => unreachable!() }).collect();
-                Ok(Val::Tensor { data, shape })
+                Ok(Val::Tensor { data: TData::new(data), shape })
             }
         }
         "matrix" => {
@@ -1422,7 +1483,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                     data.push(v.num("matrix")?);
                 }
             }
-            Ok(Val::Tensor { data, shape: vec![r, c] })
+            Ok(Val::Tensor { data: TData::new(data), shape: vec![r, c] })
         }
         "zeros" => {
             if vals.is_empty() { return Err("zeros(d0, d1, …) expects at least 1 arg".into()); }
@@ -1430,7 +1491,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                 .map(|v| v.num("zeros").map(|x| x as usize))
                 .collect::<Result<_, _>>()?;
             let n: usize = shape.iter().product();
-            Ok(Val::Tensor { data: vec![0.0; n], shape })
+            Ok(Val::Tensor { data: TData::new(vec![0.0; n]), shape })
         }
         "ones" => {
             if vals.is_empty() { return Err("ones(d0, d1, …) expects at least 1 arg".into()); }
@@ -1438,27 +1499,27 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                 .map(|v| v.num("ones").map(|x| x as usize))
                 .collect::<Result<_, _>>()?;
             let n: usize = shape.iter().product();
-            Ok(Val::Tensor { data: vec![1.0; n], shape })
+            Ok(Val::Tensor { data: TData::new(vec![1.0; n]), shape })
         }
         "eye" => {
             arity("eye", 1, vals.len())?;
             let n = vals.into_iter().next().unwrap().num("eye")? as usize;
             let mut data = vec![0.0f64; n * n];
             for i in 0..n { data[i * n + i] = 1.0; }
-            Ok(Val::Tensor { data, shape: vec![n, n] })
+            Ok(Val::Tensor { data: TData::new(data), shape: vec![n, n] })
         }
         "diag" => {
             arity("diag", 1, vals.len())?;
             let nums: Vec<f64> = match vals.into_iter().next().unwrap() {
                 Val::Tuple(v) => v.into_iter().map(|x| x.num("diag")).collect::<Result<_, _>>()?,
-                Val::Tensor { data, shape } if shape.len() == 1 => data,
+                Val::Tensor { data, shape } if shape.len() == 1 => data.into_vec(),
                 Val::Tensor { .. } => return Err("diag: tensor argument must be 1D".into()),
                 _ => return Err("diag: argument must be a tuple or 1D tensor".into()),
             };
             let n = nums.len();
             let mut data = vec![0.0f64; n * n];
             for (i, &x) in nums.iter().enumerate() { data[i * n + i] = x; }
-            Ok(Val::Tensor { data, shape: vec![n, n] })
+            Ok(Val::Tensor { data: TData::new(data), shape: vec![n, n] })
         }
 
         // ── Tensor queries ────────────────────────────────────────────────────
@@ -1470,7 +1531,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                 _ => return Err("shape: argument must be a tensor or tuple".into()),
             };
             let n = dims.len();
-            Ok(Val::Tensor { data: dims.into_iter().map(|d| d as f64).collect(), shape: vec![n] })
+            Ok(Val::Tensor { data: TData::new(dims.into_iter().map(|d| d as f64).collect()), shape: vec![n] })
         }
         "rows" => {
             arity("rows", 1, vals.len())?;
@@ -1543,7 +1604,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                         p.swap(a, b);
                         p
                     };
-                    apply_permutation(data, &shape, &perm)
+                    apply_permutation(data.into_vec(), &shape, &perm)
                 }
                 _ => Err("transpose: argument must be a tensor".into()),
             }
@@ -1584,7 +1645,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                     let (r, c) = (shape[0], shape[1]);
                     let i = it.next().unwrap().num("row")? as usize;
                     if i >= r { return Err(format!("row: index {i} out of range (rows={r})")); }
-                    Ok(Val::Tensor { data: data[i*c..(i+1)*c].to_vec(), shape: vec![c] })
+                    Ok(Val::Tensor { data: TData::new(data[i*c..(i+1)*c].to_vec()), shape: vec![c] })
                 }
                 Val::Tensor { .. } => Err("row: tensor must be 2D".into()),
                 _ => Err("row: first argument must be a 2D tensor".into()),
@@ -1598,7 +1659,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                     let (r, c) = (shape[0], shape[1]);
                     let j = it.next().unwrap().num("col")? as usize;
                     if j >= c { return Err(format!("col: index {j} out of range (cols={c})")); }
-                    Ok(Val::Tensor { data: (0..r).map(|i| data[i * c + j]).collect(), shape: vec![r] })
+                    Ok(Val::Tensor { data: TData::new((0..r).map(|i| data[i * c + j]).collect()), shape: vec![r] })
                 }
                 Val::Tensor { .. } => Err("col: tensor must be 2D".into()),
                 _ => Err("col: first argument must be a 2D tensor".into()),
@@ -1626,7 +1687,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                             }
                         }
                     }
-                    Ok(Val::Tensor { data: out, shape: vec![ar, bc] })
+                    Ok(Val::Tensor { data: TData::new(out), shape: vec![ar, bc] })
                 }
                 // 2D × 1D → 1D  (matrix-vector)
                 (Val::Tensor { data: ad, shape: ash }, Val::Tensor { data: bd, shape: bsh })
@@ -1640,7 +1701,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                     for i in 0..ar {
                         for k in 0..ac { out[i] += ad[i * ac + k] * bd[k]; }
                     }
-                    Ok(Val::Tensor { data: out, shape: vec![ar] })
+                    Ok(Val::Tensor { data: TData::new(out), shape: vec![ar] })
                 }
                 // 1D × 2D → 1D  (vector-matrix)
                 (Val::Tensor { data: ad, shape: ash }, Val::Tensor { data: bd, shape: bsh })
@@ -1654,7 +1715,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                     for j in 0..bc {
                         for k in 0..br { out[j] += ad[k] * bd[k * bc + j]; }
                     }
-                    Ok(Val::Tensor { data: out, shape: vec![bc] })
+                    Ok(Val::Tensor { data: TData::new(out), shape: vec![bc] })
                 }
                 // 1D × 1D → scalar  (dot product)
                 (Val::Tensor { data: ad, shape: ash }, Val::Tensor { data: bd, shape: bsh })
@@ -1663,7 +1724,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                     if ash[0] != bsh[0] {
                         return Err(format!("matmul: length mismatch ({} vs {})", ash[0], bsh[0]));
                     }
-                    Ok(Val::Num(ad.iter().zip(&bd).map(|(x, y)| x * y).sum()))
+                    Ok(Val::Num(ad.iter().zip(bd.iter()).map(|(x, y)| x * y).sum()))
                 }
                 _ => Err("matmul: arguments must be 1D or 2D tensors".into()),
             }
@@ -1678,8 +1739,8 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                     let mut shape = ash.clone();
                     shape.extend_from_slice(&bsh);
                     let mut data = Vec::with_capacity(ad.len() * bd.len());
-                    for &x in &ad { for &y in &bd { data.push(x * y); } }
-                    Ok(Val::Tensor { data, shape })
+                    for &x in &*ad { for &y in &*bd { data.push(x * y); } }
+                    Ok(Val::Tensor { data: TData::new(data), shape })
                 }
                 _ => Err("outer: both arguments must be tensors".into()),
             }
@@ -1826,7 +1887,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             if out_shape.is_empty() {
                 Ok(Val::Num(out_data[0]))
             } else {
-                Ok(Val::Tensor { data: out_data, shape: out_shape })
+                Ok(Val::Tensor { data: TData::new(out_data), shape: out_shape })
             }
         }
 
@@ -1850,7 +1911,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                     let (r, c) = (shape[0], shape[1]);
                     if r != c { return Err(format!("inv: matrix must be square ({r}×{c})")); }
                     let out = inv_nxn(&data, r)?;
-                    Ok(Val::Tensor { data: out, shape: vec![r, r] })
+                    Ok(Val::Tensor { data: TData::new(out), shape: vec![r, r] })
                 }
                 Val::Tensor { .. } => Err("inv: argument must be a 2D tensor".into()),
                 _ => Err("inv: argument must be a square matrix".into()),
@@ -1869,7 +1930,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                     let b: Vec<f64> = bv.into_iter().map(|v| v.num("solve")).collect::<Result<_, _>>()?;
                     let x = solve_nxn(&ad, &b, r)?;
                     let n = x.len();
-                    Ok(Val::Tensor { data: x, shape: vec![n] })
+                    Ok(Val::Tensor { data: TData::new(x), shape: vec![n] })
                 }
                 (Val::Tensor { data: ad, shape: ash }, Val::Tensor { data: bd, shape: bsh })
                     if ash.len() == 2 && bsh.len() == 1 =>
@@ -1879,7 +1940,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                     if bd.len() != r { return Err(format!("solve: b length {} ≠ matrix rows {r}", bd.len())); }
                     let x = solve_nxn(&ad, &bd, r)?;
                     let n = x.len();
-                    Ok(Val::Tensor { data: x, shape: vec![n] })
+                    Ok(Val::Tensor { data: TData::new(x), shape: vec![n] })
                 }
                 _ => Err("solve(A, b): A must be a 2D tensor, b must be a tuple or 1D tensor".into()),
             }
@@ -1901,7 +1962,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                         out.extend_from_slice(&ad[i*ac..(i+1)*ac]);
                         out.extend_from_slice(&bd[i*bc..(i+1)*bc]);
                     }
-                    Ok(Val::Tensor { data: out, shape: vec![ar, ac + bc] })
+                    Ok(Val::Tensor { data: TData::new(out), shape: vec![ar, ac + bc] })
                 }
                 _ => Err("hstack: both arguments must be 2D tensors".into()),
             }
@@ -1916,7 +1977,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                     let (ar, ac) = (ash[0], ash[1]);
                     let (br, bc) = (bsh[0], bsh[1]);
                     if ac != bc { return Err(format!("vstack: column count mismatch ({ac} vs {bc})")); }
-                    ad.extend(bd);
+                    ad.extend(bd.into_iter());
                     Ok(Val::Tensor { data: ad, shape: vec![ar + br, ac] })
                 }
                 _ => Err("vstack: both arguments must be 2D tensors".into()),
@@ -1925,9 +1986,9 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
         "tomat" => {
             arity("tomat", 3, vals.len())?;
             let mut it = vals.into_iter();
-            let data: Vec<f64> = match it.next().unwrap() {
+            let data: TData = match it.next().unwrap() {
                 Val::Tensor { data, shape } if shape.len() == 1 => data,
-                Val::Tuple(v) => v.into_iter().map(|x| x.num("tomat")).collect::<Result<_, _>>()?,
+                Val::Tuple(v) => TData::new(v.into_iter().map(|x| x.num("tomat")).collect::<Result<_, _>>()?),
                 _ => return Err("tomat(t, r, c): first arg must be a 1D tensor or tuple".into()),
             };
             let r = it.next().unwrap().num("tomat")? as usize;
@@ -1967,7 +2028,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             match x {
                 Val::Num(v) => Ok(Val::Num(v.clamp(lo, hi))),
                 Val::Tensor { data, shape } => Ok(Val::Tensor {
-                    data: data.into_iter().map(|v| v.clamp(lo, hi)).collect(),
+                    data: TData::new(data.into_iter().map(|v| v.clamp(lo, hi)).collect()),
                     shape,
                 }),
                 other => Err(format!("clamp: expected number or tensor, got {}", fmt_val(&other))),
@@ -2004,7 +2065,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                     + (in_ax - ax_idx) * stride as i64;
                 out[out_flat] = data[in_flat as usize];
             }
-            Ok(Val::Tensor { data: out, shape })
+            Ok(Val::Tensor { data: TData::new(out), shape })
         }
 
         // ── roll(T, n, axis) — circular shift along axis (periodic) ──────────
@@ -2033,7 +2094,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                     + (in_ax - ax_idx) * stride as i64;
                 out[out_flat] = data[in_flat as usize];
             }
-            Ok(Val::Tensor { data: out, shape })
+            Ok(Val::Tensor { data: TData::new(out), shape })
         }
 
         "lingrid" => {
@@ -2046,7 +2107,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             fn as_vec(v: Val, label: &str) -> Result<Vec<f64>, String> {
                 match v {
                     Val::Num(n)                               => Ok(vec![n]),
-                    Val::Tensor { data, shape } if shape.len() == 1 => Ok(data),
+                    Val::Tensor { data, shape } if shape.len() == 1 => Ok(data.into_vec()),
                     Val::Tuple(items)                         => items.into_iter()
                         .map(|x| x.num(label))
                         .collect::<Result<Vec<_>, _>>(),
@@ -2081,7 +2142,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             fn flatten_val(v: Val) -> Result<(Vec<f64>, Vec<usize>), String> {
                 match v {
                     Val::Num(n)                 => Ok((vec![n], vec![])),
-                    Val::Tensor { data, shape } => Ok((data, shape)),
+                    Val::Tensor { data, shape } => Ok((data.into_vec(), shape)),
                     Val::Tuple(items)           => {
                         let d: Vec<f64> = items.into_iter()
                             .map(|x| x.num("lingrid value"))
@@ -2132,7 +2193,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             // Output shape = grid_shape ++ value_shape
             let mut out_shape = ns.clone();
             out_shape.extend(val_shape.unwrap_or_default());
-            Ok(Val::Tensor { data, shape: out_shape })
+            Ok(Val::Tensor { data: TData::new(data), shape: out_shape })
         }
 
         // ── Shape manipulation ────────────────────────────────────────────────
@@ -2150,7 +2211,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                     if old_n != new_n {
                         return Err(format!("reshape: size mismatch ({old_n} vs {new_n})"));
                     }
-                    Ok(Val::Tensor { data, shape: new_shape })
+                    Ok(Val::Tensor { data, shape: new_shape })  // data (TData) reused as-is: O(1)
                 }
                 _ => Err("reshape: first argument must be a tensor".into()),
             }
@@ -2174,7 +2235,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                         if seen[p]  { return Err(format!("permute: axis {p} appears more than once")); }
                         seen[p] = true;
                     }
-                    apply_permutation(data, &shape, &perm)
+                    apply_permutation(data.into_vec(), &shape, &perm)
                 }
                 _ => Err("permute: first argument must be a tensor".into()),
             }
@@ -2186,7 +2247,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             let mut it = vals.into_iter();
             let axis = it.next().unwrap().num("cat")? as usize;
             let tensors: Vec<(Vec<f64>, Vec<usize>)> = it.map(|v| match v {
-                Val::Tensor { data, shape } => Ok((data, shape)),
+                Val::Tensor { data, shape } => Ok((data.into_vec(), shape)),
                 _ => Err(String::from("cat: all arguments after axis must be tensors")),
             }).collect::<Result<Vec<(Vec<f64>, Vec<usize>)>, String>>()?;
             let ndim = tensors[0].1.len();
@@ -2223,7 +2284,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                 }
                 axis_offset += shape[axis];
             }
-            Ok(Val::Tensor { data: out_data, shape: out_shape })
+            Ok(Val::Tensor { data: TData::new(out_data), shape: out_shape })
         }
 
         // squeeze(T)        – remove all size-1 dimensions
@@ -2235,7 +2296,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                     if new_shape.is_empty() {
                         Ok(Val::Num(*data.first().unwrap_or(&0.0)))
                     } else {
-                        Ok(Val::Tensor { data, shape: new_shape })
+                        Ok(Val::Tensor { data, shape: new_shape })  // data (TData) reused: O(1)
                     }
                 }
                 _ => Err("squeeze: argument must be a tensor".into()),
@@ -2253,7 +2314,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                         return Err(format!("unsqueeze: dim {dim} out of range (ndim={})", shape.len()));
                     }
                     shape.insert(dim, 1);
-                    Ok(Val::Tensor { data, shape })
+                    Ok(Val::Tensor { data, shape })  // data (TData) reused: O(1)
                 }
                 _ => Err("unsqueeze: first argument must be a tensor".into()),
             }
@@ -2291,14 +2352,14 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                 if let Some(items) = destructured {
                     let mut local = make_local(env, captured);
                     for (p, v) in params.iter().zip(items) {
-                        local.vars.insert(p.clone(), v);
+                        local.define(p.clone(), v);
                     }
                     return eval(body, &local);
                 }
                 // Single scalar/complex arg with 1-param fn → direct apply
                 if n == 1 {
                     let mut local = make_local(env, captured);
-                    local.vars.insert(params[0].clone(), args.into_iter().next().unwrap());
+                    local.define(params[0].clone(), args.into_iter().next().unwrap());
                     return eval(body, &local);
                 }
                 return Err(format!("function expects {n} args, got 1"));
@@ -2307,7 +2368,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
             // vacuous all_n_seqs branch below would produce an empty tensor).
             if k == n {
                 let mut local = make_local(env, captured);
-                for (p, v) in params.iter().zip(args) { local.vars.insert(p.clone(), v); }
+                for (p, v) in params.iter().zip(args) { local.define(p.clone(), v); }
                 return eval(body, &local);
             }
             // k args, all n-element sequences → map with destructuring
@@ -2325,7 +2386,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                         _ => unreachable!(),
                     };
                     let mut local = make_local(env, captured);
-                    for (p, v) in params.iter().zip(items) { local.vars.insert(p.clone(), v); }
+                    for (p, v) in params.iter().zip(items) { local.define(p.clone(), v); }
                     eval(body, &local)
                 }).collect();
                 // Promote result to Tensor if all-numeric
@@ -2335,7 +2396,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                 return if all_num {
                     let data = res.into_iter().map(|v| match v { Val::Num(x) => x, _ => 0.0 }).collect::<Vec<_>>();
                     let nn = data.len();
-                    Ok(Val::Tensor { data, shape: vec![nn] })
+                    Ok(Val::Tensor { data: TData::new(data), shape: vec![nn] })
                 } else if all_cx {
                     let (re, im): (Vec<f64>, Vec<f64>) = res.into_iter().map(|v| match v {
                         Val::Num(x) => (x, 0.0), Val::Complex(a, b) => (a, b), _ => (0.0, 0.0)
@@ -2350,7 +2411,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
             if n == 1 {
                 let results: Result<Vec<Val>, _> = args.into_iter().map(|a| {
                     let mut local = make_local(env, captured);
-                    local.vars.insert(params[0].clone(), a);
+                    local.define(params[0].clone(), a);
                     eval(body, &local)
                 }).collect();
                 let res = results?;
@@ -2359,7 +2420,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                 return if all_num {
                     let data = res.into_iter().map(|v| match v { Val::Num(x) => x, _ => 0.0 }).collect::<Vec<_>>();
                     let nn = data.len();
-                    Ok(Val::Tensor { data, shape: vec![nn] })
+                    Ok(Val::Tensor { data: TData::new(data), shape: vec![nn] })
                 } else if all_cx {
                     let (re, im): (Vec<f64>, Vec<f64>) = res.into_iter().map(|v| match v {
                         Val::Num(x) => (x, 0.0), Val::Complex(a, b) => (a, b), _ => (0.0, 0.0)
@@ -2388,7 +2449,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                     }
                     Val::Tensor { data, shape } => {
                         let scaled = data.iter().map(|&x| s * x).collect();
-                        return Ok(Val::Tensor { data: scaled, shape: shape.clone() });
+                        return Ok(Val::Tensor { data: TData::new(scaled), shape: shape.clone() });
                     }
                     Val::Complex(a, b) => return Ok(make_complex(s * a, s * b)),
                     Val::ComplexTensor { re, im, shape } => {
@@ -2426,9 +2487,9 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
 // Three-layer env merge: global scope → closure's captured env → param bindings.
 // Global scope provides forward-declared names; captured env provides lexical closure.
 fn make_local(global: &Env, captured: &Arc<HashMap<String, Val>>) -> Env {
-    let mut vars = global.vars.clone();
+    let mut vars = (*global.vars).clone();
     vars.extend(captured.iter().map(|(k, v)| (k.clone(), v.clone())));
-    Env { vars }
+    Env { vars: Arc::new(vars) }
 }
 
 fn compose_fns(f: Val, g: Val) -> Val {
@@ -2532,7 +2593,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
     match expr {
         Expr::Num(n)      => Ok(Val::Num(*n)),
         Expr::ImagLit(n)  => Ok(if *n == 0.0 { Val::Num(0.0) } else { Val::Complex(0.0, *n) }),
-        Expr::Lambda(p, b) => Ok(Val::Fn(p.clone(), *b.clone(), Arc::new(env.vars.clone()))),
+        Expr::Lambda(p, b) => Ok(Val::Fn(p.clone(), *b.clone(), Arc::clone(&env.vars))),
         Expr::Tuple(exprs) => {
             let vals: Result<Vec<Val>, _> = exprs.iter().map(|e| eval(e, env)).collect();
             let vals = vals?;
@@ -2556,7 +2617,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                         return Ok(maybe_real(re, im, vec![n]));
                     } else {
                         let data: Vec<f64> = vals.into_iter().map(|v| match v { Val::Num(x) => x, _ => unreachable!() }).collect();
-                        return Ok(Val::Tensor { data, shape: vec![n] });
+                        return Ok(Val::Tensor { data: TData::new(data), shape: vec![n] });
                     }
                 }
             }
@@ -2568,7 +2629,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
             // Unlike (a,b,c) which auto-promotes, [] always means tensor.
             // [x]  → length-1 tensor;  [] → empty tensor.
             if exprs.is_empty() {
-                return Ok(Val::Tensor { data: vec![], shape: vec![0] });
+                return Ok(Val::Tensor { data: TData::new(vec![]), shape: vec![0] });
             }
             let mut data = Vec::with_capacity(exprs.len());
             let mut re_data: Vec<f64> = Vec::new();
@@ -2597,11 +2658,11 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
             if has_complex {
                 Ok(maybe_real(re_data, im_data, vec![n]))
             } else {
-                Ok(Val::Tensor { data, shape: vec![n] })
+                Ok(Val::Tensor { data: TData::new(data), shape: vec![n] })
             }
         }
         Expr::TensorLit(rows) => {
-            if rows.is_empty() { return Ok(Val::Tensor { data: vec![], shape: vec![0, 0] }); }
+            if rows.is_empty() { return Ok(Val::Tensor { data: TData::new(vec![]), shape: vec![0, 0] }); }
             let r = rows.len();
             let c = rows[0].len();
             let mut data = Vec::with_capacity(r * c);
@@ -2615,7 +2676,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                     data.push(eval(expr, env)?.num("tensor literal")?);
                 }
             }
-            Ok(Val::Tensor { data, shape: vec![r, c] })
+            Ok(Val::Tensor { data: TData::new(data), shape: vec![r, c] })
         }
         Expr::Slice(..) => Err("slice expression can only appear inside T[…]".into()),
 
@@ -2642,16 +2703,16 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                                 return Err(format!("cannot redefine built-in '{name}'"));
                             }
                             let v = eval(expr, &child)?;
-                            child.vars.insert(name.clone(), v);
+                            child.define(name.clone(), v);
                         }
                         Def::Func(name, params, body) => {
                             if is_protected(name) {
                                 return Err(format!("cannot redefine built-in '{name}'"));
                             }
-                            let mut captured = child.vars.clone();
+                            let mut captured = (*child.vars).clone();
                             let fn_val = Val::Fn(params.clone(), body.clone(), Arc::new(captured.clone()));
                             captured.insert(name.clone(), fn_val);
-                            child.vars.insert(name.clone(), Val::Fn(params.clone(), body.clone(), Arc::new(captured)));
+                            child.define(name.clone(), Val::Fn(params.clone(), body.clone(), Arc::new(captured)));
                         }
                     },
                     BlockStmt::Expr(e) => { last_val = eval(e, &child)?; }
@@ -2706,7 +2767,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                                 if has_complex {
                                     Ok(maybe_real(re_out, im_out, shape))
                                 } else {
-                                    Ok(Val::Tensor { data: re_out, shape })
+                                    Ok(Val::Tensor { data: TData::new(re_out), shape })
                                 }
                             }
                             Val::ComplexTensor { re, im, shape } => {
@@ -2728,7 +2789,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                                     if keep != 0.0 { out.push(x); }
                                 }
                                 let n = out.len();
-                                Ok(Val::Tensor { data: out, shape: vec![n] })
+                                Ok(Val::Tensor { data: TData::new(out), shape: vec![n] })
                             }
                             Val::Tuple(items) => {
                                 let mut out = vec![];
@@ -2800,7 +2861,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                 Ok(Val::Tuple(neg?))
             }
             Val::Tensor { data, shape } => {
-                Ok(Val::Tensor { data: data.into_iter().map(|x| -x).collect(), shape })
+                Ok(Val::Tensor { data: TData::new(data.into_iter().map(|x| -x).collect()), shape })
             }
             Val::ComplexTensor { re, im, shape } => {
                 Ok(maybe_real(re.into_iter().map(|x| -x).collect(),
@@ -2955,7 +3016,7 @@ fn eval_tensor_index_ast(data: &[f64], shape: &[usize], idx: &Expr, env: &Env) -
             let sub_size: usize = shape[1..].iter().product();
             let start = i * sub_size;
             Ok(Val::Tensor {
-                data: data[start..start + sub_size].to_vec(),
+                data: TData::new(data[start..start + sub_size].to_vec()),
                 shape: shape[1..].to_vec(),
             })
         };
@@ -2993,7 +3054,7 @@ fn eval_tensor_index_ast(data: &[f64], shape: &[usize], idx: &Expr, env: &Env) -
     if out_shape.is_empty() {
         Ok(Val::Num(out_data[0]))
     } else {
-        Ok(Val::Tensor { data: out_data, shape: out_shape })
+        Ok(Val::Tensor { data: TData::new(out_data), shape: out_shape })
     }
 }
 
@@ -3145,7 +3206,7 @@ pub fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> 
                 let (init_re, init_im) = if product { (1.0, 0.0) } else { (0.0, 0.0) };
                 let mut acc_re = init_re;
                 let mut acc_im = init_im;
-                for (&r, &i) in re.iter().zip(&im) {
+                for (&r, &i) in re.iter().zip(im.iter()) {
                     accum(&mut acc_re, &mut acc_im, r, i, product);
                 }
                 Ok(make_complex(acc_re, acc_im))
@@ -3185,7 +3246,7 @@ pub fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> 
                 if out_shape.is_empty() {
                     Ok(Val::Num(out_data[0]))
                 } else {
-                    Ok(Val::Tensor { data: out_data, shape: out_shape })
+                    Ok(Val::Tensor { data: TData::new(out_data), shape: out_shape })
                 }
             }
             // sum(CT, axis) — reduce complex tensor along one axis
@@ -3297,7 +3358,7 @@ pub fn call_fn1(f_expr: &Expr, x: Val, env: &Env) -> Result<Val, String> {
                 return Err("lambda must take exactly 1 argument here".into());
             }
             let mut local = env.clone();
-            local.vars.insert(params[0].clone(), x);
+            local.define(params[0].clone(), x);
             eval(body, &local)
         }
         Expr::Var(name) => {
@@ -3306,7 +3367,7 @@ pub fn call_fn1(f_expr: &Expr, x: Val, env: &Env) -> Result<Val, String> {
                     return Err(format!("{name} must be a 1-arg function"));
                 }
                 let mut local = make_local(env, &captured);
-                local.vars.insert(params[0].clone(), x);
+                local.define(params[0].clone(), x);
                 return eval(&body, &local);
             }
             if let Some(Val::Builtin(bname)) = env.vars.get(name).cloned() {

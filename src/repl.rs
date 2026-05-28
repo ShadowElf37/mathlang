@@ -65,7 +65,7 @@ impl MathHelper {
         let mut fns  = self.user_fns.borrow_mut();
         let mut vars = self.user_vars.borrow_mut();
         fns.clear(); vars.clear();
-        for (k, v) in &env.vars {
+        for (k, v) in env.vars.iter() {
             if BUILTIN_CONSTS.contains(&k.as_str()) || BUILTIN_FNS.contains(&k.as_str()) { continue; }
             if matches!(v, Val::Fn(..)) { fns.push(k.clone()); } else { vars.push(k.clone()); }
         }
@@ -219,7 +219,7 @@ pub fn eval_line(line: &str, env: &mut Env, repl: bool) -> bool {
                     return false;
                 }
                 match eval(expr, env) {
-                    Ok(v) => { env.vars.insert(name.clone(), v); }
+                    Ok(v) => { env.define(name.clone(), v); }
                     Err(e) => { eprintln!("error: {e}"); return false; }
                 }
             }
@@ -228,10 +228,10 @@ pub fn eval_line(line: &str, env: &mut Env, repl: bool) -> bool {
                     eprintln!("error: cannot redefine built-in '{name}'");
                     return false;
                 }
-                let mut captured = env.vars.clone();
+                let mut captured = (*env.vars).clone();
                 let fn_val = Val::Fn(params.clone(), body.clone(), std::sync::Arc::new(captured.clone()));
                 captured.insert(name.clone(), fn_val);
-                env.vars.insert(name.clone(), Val::Fn(params.clone(), body.clone(), std::sync::Arc::new(captured)));
+                env.define(name.clone(), Val::Fn(params.clone(), body.clone(), std::sync::Arc::new(captured)));
             }
         }
     }
@@ -249,7 +249,7 @@ pub fn eval_line(line: &str, env: &mut Env, repl: bool) -> bool {
         let v = if vals.len() == 1 { vals.into_iter().next().unwrap() } else { Val::Tuple(vals) };
         if repl {
             println!("\x1b[2mresult = \x1b[0m{}", fmt_repl(&v));
-            env.vars.insert("result".into(), v);
+            env.define("result".into(), v);
         } else {
             println!("{}", fmt_val(&v));
         }
@@ -259,11 +259,11 @@ pub fn eval_line(line: &str, env: &mut Env, repl: bool) -> bool {
 
 pub fn show_defs(env: &Env) {
     let mut items: Vec<(String, String)> = vec![];
-    for (k, v) in &env.vars {
+    for (k, v) in env.vars.iter() {
         if BUILTIN_CONSTS.contains(&k.as_str()) || BUILTIN_FNS.contains(&k.as_str()) || k == "result" { continue; }
         let display = match v {
             Val::Fn(params, _, _) => format!("fn({}) = …", params.join(", ")),
-            _ => fmt_val(v),
+            _ => fmt_val(&v),
         };
         items.push((k.clone(), display));
     }
