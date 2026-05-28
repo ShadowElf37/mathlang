@@ -15,3 +15,7 @@ plotters = { version = "0.3", default-features = false, features = [
 ] }
 libm = "0.2"
 rustfft = "6"
+hdf5 = { package = "hdf5-metno", version = "0.12", optional = true }
+
+[features]
+hdf5 = ["dep:hdf5"]

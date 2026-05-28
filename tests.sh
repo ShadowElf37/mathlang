@@ -1051,6 +1051,70 @@ shape(D)"                              "\[4\]"
 
 rm -f "$_TMLT"
 
+# ── HDF5 (skipped unless built with --features hdf5) ─────────────────────────
+section "HDF5"
+_H5F=$(mktemp /tmp/mlt_test_XXXXXX.h5)
+_H5F2=$(mktemp /tmp/mlt_test_XXXXXX.h5)
+# Probe: feature absent → "build with --features hdf5"; feature present → "not defined"
+_h5_probe=$(printf '!savehdf5 __probe__ /dev/null\n' | "$M" 2>&1)
+if echo "$_h5_probe" | grep -q "not defined"; then
+    _H5_OK=true
+else
+    _H5_OK=false
+fi
+
+if $_H5_OK; then
+    _repl_check "h5.real.val"     "A=(1,2,3;4,5,6)
+!savehdf5 A $_H5F
+!loadhdf5 B $_H5F /A
+B[0,1]"                                         "2"
+
+    _repl_check "h5.real.shape"   "A=(1,2,3;4,5,6)
+!savehdf5 A $_H5F --overwrite
+!loadhdf5 B $_H5F /A
+shape(B)"                                       "\[2, 3\]"
+
+    _repl_check "h5.append"       "A=[10,20,30]
+!savehdf5 A $_H5F --overwrite
+B=[7,8,9]
+!savehdf5 B $_H5F /B --append
+!loadhdf5 C $_H5F /B
+C[2]"                                           "9"
+
+    _repl_check "h5.nested"       "V=[1,2,3]
+!savehdf5 V $_H5F2 /grp/sub/data
+!loadhdf5 W $_H5F2 /grp/sub/data
+W[1]"                                           "2"
+
+    _repl_check "h5.list"         "A=(1,2;3,4)
+!savehdf5 A $_H5F2 --overwrite
+!loadhdf5 _ $_H5F2 --list"                      "f64"
+
+    _repl_check "h5.complex.val"  "C=fft([1,1,0,0])
+!savehdf5 C $_H5F2 --overwrite
+!loadhdf5 D $_H5F2 /C
+im(D[1])"                                       "-1"
+
+    _repl_check "h5.complex.shape" "C=fft([1,1,0,0])
+!savehdf5 C $_H5F2 --overwrite
+!loadhdf5 D $_H5F2 /C
+shape(D)"                                       "\[4\]"
+
+    _repl_check "h5.gzip"         "T=ones(10,10)
+!savehdf5 T $_H5F2 --overwrite --gzip 6
+!loadhdf5 U $_H5F2 /T
+U[0,0]"                                         "1"
+
+    _repl_check "h5.err.undef"    "!savehdf5 nosuchvar $_H5F2"   "not defined"
+    _repl_check "h5.err.nonten"   "x=42
+!savehdf5 x $_H5F2"                             "not a tensor"
+    _repl_check "h5.err.nofile"   "!loadhdf5 Z /tmp/no_such_file_h5_xyz.h5" \
+                                                "loadhdf5:"
+else
+    echo "(skipping HDF5 tests — binary not compiled with --features hdf5)"
+fi
+rm -f "$_H5F" "$_H5F2"
+
 # ── print summary ─────────────────────────────────────────────────────────────
 echo
 echo "================================"

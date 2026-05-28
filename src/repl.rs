@@ -145,7 +145,7 @@ impl rustyline::completion::Completer for MathHelper {
         -> rustyline::Result<(usize, Vec<String>)>
     {
         if line.starts_with('!') {
-            let cmds = ["!clear", "!defs", "!help", "!include ", "!loadtensor ", "!savetensor ", "!version"];
+            let cmds = ["!clear", "!defs", "!help", "!include ", "!loadhdf5 ", "!loadtensor ", "!savehdf5 ", "!savetensor ", "!version"];
             return Ok((0, cmds.iter().filter(|&&c| c.starts_with(line)).map(|s| s.to_string()).collect()));
         }
         let start = line[..pos].rfind(|c: char| !c.is_alphanumeric() && c != '_').map_or(0, |i| i+1);
@@ -386,6 +386,109 @@ fn load_tensor(path: &str) -> Result<Val, String> {
     }
 }
 
+// ── HDF5 I/O ──────────────────────────────────────────────────────────────────
+
+#[cfg(feature = "hdf5")]
+fn h5_split(path: &str) -> (String, String) {
+    let path = path.trim_start_matches('/');
+    match path.rfind('/') {
+        Some(i) => (path[..i].to_string(), path[i+1..].to_string()),
+        None    => (String::new(), path.to_string()),
+    }
+}
+
+#[cfg(feature = "hdf5")]
+fn h5_write_ds(grp: &::hdf5::Group, name: &str, data: &[f64], shape: &[usize], gzip: Option<u32>) -> Result<(), String> {
+    let mut b = grp.new_dataset::<f64>().shape(shape);
+    if let Some(lvl) = gzip { b = b.chunk(shape).deflate(lvl as u8); }
+    b.create(name).map_err(|e| e.to_string())?.write_raw(data).map_err(|e| e.to_string())
+}
+
+#[cfg(feature = "hdf5")]
+fn h5_save(file_path: &str, ds_path: &str, val: &Val, append: bool, overwrite: bool, gzip: Option<u32>) -> Result<usize, String> {
+    let file = if append && std::path::Path::new(file_path).exists() {
+        ::hdf5::File::open_rw(file_path).map_err(|e| e.to_string())?
+    } else {
+        ::hdf5::File::create(file_path).map_err(|e| e.to_string())?
+    };
+    let (grp_path, ds_name) = h5_split(ds_path);
+    let grp_owned: Option<::hdf5::Group> = if grp_path.is_empty() { None } else {
+        Some(match file.group(&grp_path) {
+            Ok(g) => g,
+            Err(_) => file.create_group(&grp_path).map_err(|e| e.to_string())?,
+        })
+    };
+    let grp: &::hdf5::Group = match &grp_owned { Some(g) => g, None => &*file };
+    if overwrite { let _ = grp.unlink(&ds_name); }
+    match val {
+        Val::Tensor { data, shape } => {
+            h5_write_ds(grp, &ds_name, data, shape, gzip)?;
+            Ok(data.len())
+        }
+        Val::ComplexTensor { re, im, shape } => {
+            let cg = grp.create_group(&ds_name).map_err(|e| e.to_string())?;
+            h5_write_ds(&cg, "re", re, shape, gzip)?;
+            h5_write_ds(&cg, "im", im, shape, gzip)?;
+            cg.new_attr::<u8>().create("mlt_complex").map_err(|e| e.to_string())?
+              .write_raw(&[1u8]).map_err(|e| e.to_string())?;
+            Ok(re.len())
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[cfg(feature = "hdf5")]
+fn h5_load(file_path: &str, ds_path: &str) -> Result<Val, String> {
+    let file = ::hdf5::File::open(file_path).map_err(|e| e.to_string())?;
+    let (grp_path, ds_name) = h5_split(ds_path);
+    let grp_owned: Option<::hdf5::Group> = if grp_path.is_empty() { None } else {
+        Some(file.group(&grp_path).map_err(|e| e.to_string())?)
+    };
+    let grp: &::hdf5::Group = match &grp_owned { Some(g) => g, None => &*file };
+    if let Ok(ds) = grp.dataset(&ds_name) {
+        let shape = ds.shape();
+        let data  = ds.read_raw::<f64>().map_err(|e| e.to_string())?;
+        return Ok(Val::Tensor { data: TData::new(data), shape });
+    }
+    if let Ok(cg) = grp.group(&ds_name) {
+        if cg.attr("mlt_complex").is_ok() {
+            let ds_re = cg.dataset("re").map_err(|e| e.to_string())?;
+            let shape = ds_re.shape();
+            let re    = ds_re.read_raw::<f64>().map_err(|e| e.to_string())?;
+            let im    = cg.dataset("im").map_err(|e| e.to_string())?
+                          .read_raw::<f64>().map_err(|e| e.to_string())?;
+            return Ok(Val::ComplexTensor { re: TData::new(re), im: TData::new(im), shape });
+        }
+    }
+    Err(format!("'{ds_name}' not found in '{file_path}'"))
+}
+
+#[cfg(feature = "hdf5")]
+fn h5_list(file_path: &str) -> Result<(), String> {
+    fn recurse(grp: &::hdf5::Group, depth: usize) -> Result<(), String> {
+        let ind = "  ".repeat(depth);
+        for name in grp.member_names().map_err(|e| e.to_string())? {
+            if let Ok(ds) = grp.dataset(&name) {
+                let dims: Vec<String> = ds.shape().iter().map(|d| d.to_string()).collect();
+                println!("{}{}  [{}  f64]", ind, name, dims.join("×"));
+            } else if let Ok(cg) = grp.group(&name) {
+                if cg.attr("mlt_complex").is_ok() {
+                    let dims: Vec<String> = cg.dataset("re").ok()
+                        .map_or_else(Vec::new, |d| d.shape())
+                        .iter().map(|d| d.to_string()).collect();
+                    println!("{}{}  [complex {}  f64]", ind, name, dims.join("×"));
+                } else {
+                    println!("{}{}/", ind, name);
+                    recurse(&cg, depth + 1)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    let file = ::hdf5::File::open(file_path).map_err(|e| e.to_string())?;
+    recurse(&*file, 0)
+}
+
 fn bang_command(cmd: &str, env: &mut Env) {
     let (name, arg) = cmd.split_once(' ').map_or((cmd, ""), |(a, b)| (a, b.trim()));
     match name.trim() {
@@ -393,6 +496,8 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "Commands:  !help  !include <file>  !defs  !clear  !version\n",
             "           !savetensor <var> <file>  — save tensor to binary .mlt file\n",
             "           !loadtensor <var> <file>  — load tensor from .mlt file\n",
+            "           !savehdf5 <var> <file> [/ds] [--append] [--overwrite] [--gzip 0-9]\n",
+            "           !loadhdf5 <var> <file> [/ds] [--list]\n",
             "Init file: ~/.mathlangrc (auto-imported on start; override with $MATHLANG_INIT)\n",
             "Exit:      quit / exit / Ctrl-D\n\n",
             "Syntax:    x = 3              variable\n",
@@ -511,6 +616,90 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     println!("loaded {var} ({desc}) from {fp}");
                 }
                 Err(e) => eprintln!("loadtensor: {e}"),
+            }
+        }
+        "savehdf5" => {
+            #[cfg(not(feature = "hdf5"))]
+            eprintln!("savehdf5: build with --features hdf5 to enable HDF5 support");
+            #[cfg(feature = "hdf5")]
+            {
+                let tokens: Vec<&str> = arg.split_whitespace().collect();
+                if tokens.len() < 2 {
+                    eprintln!("usage: !savehdf5 <var> <file> [/dataset] [--append] [--overwrite] [--gzip <0-9>]");
+                    return;
+                }
+                let (var, fp) = (tokens[0], tokens[1]);
+                let mut ds_path = format!("/{var}");
+                let mut append   = false;
+                let mut overwrite = false;
+                let mut gzip: Option<u32> = None;
+                let mut i = 2;
+                loop {
+                    match tokens.get(i).copied() {
+                        None => break,
+                        Some("--append")    => { append    = true; i += 1; }
+                        Some("--overwrite") => { overwrite = true; i += 1; }
+                        Some("--gzip") => {
+                            i += 1;
+                            match tokens.get(i).and_then(|s| s.parse::<u32>().ok()).filter(|&n| n <= 9) {
+                                Some(n) => { gzip = Some(n); i += 1; }
+                                None    => { eprintln!("savehdf5: --gzip requires a level 0–9"); return; }
+                            }
+                        }
+                        Some(s) if !s.starts_with("--") => { ds_path = s.to_string(); i += 1; }
+                        Some(s) => { eprintln!("savehdf5: unknown option {s}"); return; }
+                    }
+                }
+                let val = match env.vars.get(var) {
+                    Some(v @ Val::Tensor { .. }) | Some(v @ Val::ComplexTensor { .. }) => v.clone(),
+                    Some(_) => { eprintln!("savehdf5: {var} is not a tensor"); return; }
+                    None    => { eprintln!("savehdf5: {var} not defined"); return; }
+                };
+                match h5_save(&expand_path(fp), &ds_path, &val, append, overwrite, gzip) {
+                    Ok(n)  => println!("saved {var} ({n} elements) → {fp}:{ds_path}"),
+                    Err(e) => eprintln!("savehdf5: {e}"),
+                }
+            }
+        }
+        "loadhdf5" => {
+            #[cfg(not(feature = "hdf5"))]
+            eprintln!("loadhdf5: build with --features hdf5 to enable HDF5 support");
+            #[cfg(feature = "hdf5")]
+            {
+                let tokens: Vec<&str> = arg.split_whitespace().collect();
+                if tokens.len() < 2 {
+                    eprintln!("usage: !loadhdf5 <var> <file> [/dataset] [--list]");
+                    return;
+                }
+                let (var, fp) = (tokens[0], tokens[1]);
+                let mut ds_path = format!("/{var}");
+                let mut list_only = false;
+                let mut i = 2;
+                loop {
+                    match tokens.get(i).copied() {
+                        None => break,
+                        Some("--list") => { list_only = true; i += 1; }
+                        Some(s) if !s.starts_with("--") => { ds_path = s.to_string(); i += 1; }
+                        Some(s) => { eprintln!("loadhdf5: unknown option {s}"); return; }
+                    }
+                }
+                let fp_exp = expand_path(fp);
+                if list_only {
+                    if let Err(e) = h5_list(&fp_exp) { eprintln!("loadhdf5: {e}"); }
+                    return;
+                }
+                match h5_load(&fp_exp, &ds_path) {
+                    Ok(val) => {
+                        let desc = match &val {
+                            Val::Tensor { data, .. }      => format!("{} elements, real", data.len()),
+                            Val::ComplexTensor { re, .. } => format!("{} elements, complex", re.len()),
+                            _ => unreachable!(),
+                        };
+                        env.define(var.to_string(), val);
+                        println!("loaded {var} ({desc}) ← {fp}:{ds_path}");
+                    }
+                    Err(e) => eprintln!("loadhdf5: {e}"),
+                }
             }
         }
         "defs" | "vars" | "fns" => show_defs(env),
