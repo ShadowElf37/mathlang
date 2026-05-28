@@ -25,3 +25,9 @@
 
 9. Split eval.rs — it is too large; defer until the GPU eval path (gpu_eval.rs) is
    designed, so the split boundary is clear.
+
+10. graphing should display the graph instead of saving to file?
+
+11. aur package that puts animator and m executables in bin; hdf5 option?
+
+12. replace quit/exit commands with !q, !quit, !exit
