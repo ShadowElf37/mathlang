@@ -39,13 +39,16 @@ enum Val {
 
 ### Bytecode VM (`src/eval.rs`):
 
-mathlang now has a stack-based bytecode VM for user-defined function bodies.
+mathlang has a stack-based bytecode VM for user-defined function bodies.
 `compile_fn(params, body, captured)` compiles an `Expr` to `Vec<Instruction>` or
-returns `None` for unsupported nodes (nested lambdas, indexing, ranges). On first
-call, `apply_fn_direct()` uses `OnceLock::get_or_init()` to compile once and cache;
-all `Val::Fn` clones share the same `Arc<OnceLock>`.  Subsequent calls run the VM
-directly. `map`, `filter`, `integral`, `sum(f,lo,hi)` pre-evaluate `f` before their
-loops so the cache is shared across all N iterations.
+returns `None` for unsupported nodes (slices, ranges, tensor literals, recursive
+functions). On first call, `apply_fn_direct()` uses `OnceLock::get_or_init()` to
+compile once and cache; all `Val::Fn` clones share the same `Arc<OnceLock>`.
+Subsequent calls run the VM directly. `map`, `filter`, `integral`, `sum(f,lo,hi)`
+pre-evaluate `f` before their loops so the cache is shared across all N iterations.
+Tensor indexing (`T[i]`, `T[i,j]`), nested lambdas (`MakeClosure`), and
+non-recursive `Def::Func` in blocks all compile to bytecode. Recursive local
+functions fall back silently to the tree-walk evaluator.
 
 The `Instruction` enum is currently defined in `eval.rs`. It is also the natural IR
 for GPU lambda lowering — see section 15.
@@ -87,16 +90,16 @@ the six seam changes, and the project compiles without a trace of GPU code.
 ## 3. The GPU Block Syntax
 
 ```
-GPU(var1, var2, ...) {
+GPU {
     intermediate = var1 * var2;
     intermediate + sum(var1)
 }
 ```
 
-- `GPU(...)` is a **keyword form**, not a function call — like `if(...)`. The parser
-  needs a dedicated branch.
-- The capture list names variables from the enclosing CPU environment.
-  Only `Val::Num` (scalar) and `Val::Tensor` are permitted; anything else is a
+- `GPU` is a **keyword form**, not a function call. The parser needs a dedicated branch.
+- Free variables from the enclosing CPU scope are **automatically detected** by
+  walking the block body AST (same approach as `collect_free_vars` in the bytecode
+  VM). Only `Val::Num` (scalar) and `Val::Tensor` are permitted; anything else is a
   runtime error at block entry.
 - The body is a standard mathlang block: semicolon-separated statements, last
   expression is the return value.
@@ -105,22 +108,17 @@ GPU(var1, var2, ...) {
 - Local bindings inside the block (e.g. `intermediate = ...`) are GPU-local and
   never visible on the CPU side.
 
-(N.B.: there may not be a need for the vars to be specified for movement, maybe you can analyze the code to find which vars need moving and only move them, automatically - then the block looks like `GPU{code}`)
-
 ### Parser addition (ast.rs + parser.rs):
 ```rust
 // ast.rs — new Expr variant:
-GpuBlock { captures: Vec<String>, body: Box<Expr> }
+GpuBlock { body: Box<Expr> }
 
 // parser.rs — in parse_primary(), before the general Ident path:
 Token::Gpu => {
-    expect(LParen);
-    let captures = parse_comma_separated_idents();
-    expect(RParen);
     expect(LBrace);
     let body = parse_block();  // reuse existing block parser
     expect(RBrace);
-    Expr::GpuBlock { captures, body: Box::new(body) }
+    Expr::GpuBlock { body: Box::new(body) }
 }
 ```
 
@@ -289,15 +287,17 @@ This is the single synchronization point for the entire GPU block.
 
 Add one match arm:
 ```rust
-Expr::GpuBlock { captures, body } => {
-    // 1. Validate and collect captures from CPU env
-    let gpu_env: HashMap<String, GpuVal> = captures.iter().map(|name| {
+Expr::GpuBlock { body } => {
+    // 1. Walk body to find free variables; validate each against CPU env.
+    //    Only Val::Num and Val::Tensor are allowed; anything else is a runtime error.
+    let free_names = collect_gpu_free_vars(body, env); // AST walk, same idea as collect_free_vars
+    let gpu_env: HashMap<String, GpuVal> = free_names.iter().map(|name| {
         match env.vars.get(name) {
             Some(Val::Num(f))    => Ok((name.clone(), GpuVal::Scalar(*f))),
             Some(Val::Tensor{data, shape}) => Ok((name.clone(), GpuVal::Buffer(
                 gpu_upload(data, shape, ctx)? // creates staging buffer, copies
             ))),
-            Some(other) => Err(format!("GPU capture `{}`: only tensors and scalars \
+            Some(other) => Err(format!("GPU: `{}`: only tensors and scalars \
                                         are allowed; got {}", name, fmt_val(other))),
             None => Err(format!("undefined variable `{}`", name)),
         }
@@ -315,7 +315,10 @@ Expr::GpuBlock { captures, body } => {
 }
 ```
 
-This is the **only** change to `src/eval.rs`. Everything else lives in `src/gpu/`.
+`collect_gpu_free_vars` is a simple AST walk that returns all `Expr::Var` names not
+bound locally within the block. It can reuse or adapt `expr_contains_var` from
+`eval.rs`. This is the **only** change to `src/eval.rs`; everything else lives in
+`src/gpu/`.
 
 ---
 
@@ -464,70 +467,32 @@ intermediate tensors are computed.
 
 ## 11. Bytecode VM — Current State and GPU Interface
 
-The bytecode VM landed in the `bytecode-vm` branch. The full picture:
+The bytecode VM is fully implemented in `src/eval.rs` (merged in v0.17.0).
 
-### What exists
+### What compiles to bytecode
 
-- `Instruction` enum in `src/eval.rs`: stack-based — `PushNum`, `BinOp`, `CallBuiltin`,
-  `JumpIfFalse`/`Jump` (for `if`), `StoreLocal`/`LoadLocal` (for block-scoped vars),
-  `MakeTuple`, `MakeArray`, `Neg`, `Pop`, `Return`
-- `compile_fn(params, body, captured) -> Option<Vec<Instruction>>`: compiles lambda
-  bodies; returns `None` for unsupported nodes (nested lambdas, indexing, ranges,
-  special forms)
-- `run_vm(code, args, captured, env) -> Result<Val, String>`: flat loop, no recursion
-  into `eval()` for arithmetic
-- `apply_fn_direct()`: `OnceLock::get_or_init` → compile once, cache forever
-- `map`, `filter`, `integral`, `sum(f,lo,hi)`: pre-evaluate `f` before loops so the
-  cache is shared across all N calls — zero recompile overhead
+- **Arithmetic/logic**: `PushNum`, `PushComplex`, `BinOp`, `Neg`, `JumpIfFalse`/`Jump` (`if`)
+- **Variables**: `LoadParam`, `LoadLocal`, `LoadCaptured`; captured scalar constants
+  inlined as `PushNum`/`PushComplex`
+- **Calls**: `CallBuiltin` (named builtins), `CallVal` (computed callees)
+- **Collections**: `MakeTuple`, `MakeArray`
+- **Block locals**: `StoreLocal`/`LoadLocal`; `Def::Var` and non-recursive `Def::Func`
+- **Tensor indexing**: `Index` — handles `T[i]`, `T[i,j]`, negative indices,
+  sub-tensor extraction; rejects slice expressions (fall back)
+- **Nested lambdas**: `MakeClosure` — `collect_free_vars()` walks the inner body to
+  find outer params/locals to snapshot; inner code eagerly pre-compiled via
+  `Val::make_fn_compiled()`; `expr_contains_var()` detects recursive functions and
+  falls back to tree-walk (which sets up the self-reference correctly)
+- **Hot-loop caching**: `map`, `filter`, `integral`, `sum(f,lo,hi)` pre-evaluate `f`
+  before their loops — OnceLock cache shared across all N calls
 
-### Nested lambdas — the plan
+### What falls back to tree-walk (transparently, no behavior change)
 
-Currently `compile_fn` returns `None` for `Expr::Lambda` in a body (e.g., `x -> y -> x+y`).
-
-Planned addition: **`MakeClosure` instruction**
-
-```rust
-// New variant in the Instruction enum:
-MakeClosure(
-    Vec<String>,            // inner params
-    Box<Expr>,              // inner body expr (kept for tree-walk fallback)
-    Arc<Vec<Instruction>>,  // eagerly pre-compiled inner code; empty = lazy fallback
-    Vec<String>,            // free variables to pop from stack into inner captured env
-)
-```
-
-**Compile-time** (inside the `Compiler` for `Expr::Lambda(inner_params, inner_body)`):
-1. Walk `inner_body` with `collect_free_vars()` to find names not in `inner_params`
-   that ARE in the outer `params` or `locals` (outer `captured` vars pass through
-   automatically — they'll be in the clone of `captured` at runtime).
-2. For each free var, emit `LoadParam(i)` or `LoadLocal(i)` to push its value.
-3. Build an `inner_captured_hint` = outer `captured` + placeholder entries for the
-   free vars (any non-`Num`/`Complex` value so the inner compile emits `LoadCaptured`
-   rather than inlining the placeholder).
-4. Recursively call `compile_fn(inner_params, inner_body, &inner_captured_hint)`;
-   use `Arc::new(code)` if it succeeds, `Arc::new(vec![])` if it fails.
-5. Emit `MakeClosure(inner_params, inner_body, code_arc, free_var_names)`.
-
-**Runtime** (`run_vm` handling `MakeClosure`):
-1. Pop `free_vars.len()` values from the stack.
-2. Build `new_captured = (*outer_captured).clone()` + insert each `{name: val}`.
-3. If `inner_code` is non-empty: call `Val::make_fn_compiled(params, body, cap, code)`
-   — creates a `Val::Fn` with the OnceLock pre-filled (zero recompile on first call).
-4. If `inner_code` is empty: call `Val::make_fn(params, body, cap)` — lazy compile.
-5. Push the resulting `Val::Fn` onto the stack.
-
-New constructor needed:
-```rust
-pub fn make_fn_compiled(params, body, captured, code: Vec<Instruction>) -> Self {
-    let lock = OnceLock::new();
-    let _ = lock.set(Some(code));
-    Val::Fn(params, body, captured, Arc::new(lock))
-}
-```
-
-This handles common cases: curried functions (`x -> y -> x+y`), closures returned
-from functions, higher-order combinators. `collect_free_vars` is a simple recursive
-AST walk (~30 lines).
+- Slices (`T[lo..hi]`), ranges (`lo..hi`), tensor literals (`(1,2; 3,4)`)
+- Recursive local functions (`f(x) = ... f(x-1) ...` inside a block)
+- Special forms that require unevaluated Expr args: `sum`, `prod`, `integral`,
+  `deriv`, `map`, `filter`, `reduce` (these are handled at the `eval` level with
+  hot-loop f-caching, not compiled into the VM body)
 
 ### Pipeline with bytecode
 
@@ -578,19 +543,19 @@ above.
 
 All tests go in `tests.sh` following the existing pattern:
 ```bash
-expect "GPU(a,b){ a + b }" "..." # with a and b defined as tensors
+run "gpu.add"  "GPU{ a + b }"  "..."   # with a and b defined as tensors
 ```
 
 For GPU vs CPU parity, run both and compare (with tolerance for f32 rounding):
 ```bash
-expect "GPU(T){ sum(T) }"         "some_value"
-expect "sum(T)"                   "same_value"
+run "gpu.sum"    "GPU{ sum(T) }"  "some_value"
+run "cpu.sum"    "sum(T)"         "same_value"
 ```
 
 Also test error cases:
 ```bash
-expect_err 'GPU(f){ f + 1 }'  "only tensors and scalars"   # f is a lambda
-expect_err 'GPU(){ no_such }' "undefined variable"
+run_err "gpu.err.fn"      'f = x -> x; GPU{ f + 1 }'   # f is a lambda — not allowed
+run_err "gpu.err.undef"   'GPU{ no_such_var }'           # undefined variable
 ```
 
 ---
@@ -656,8 +621,9 @@ Not all Instructions can be lowered to WGSL. The GPU-safe subset:
 | `JumpIfFalse(t)` / `Jump(t)` | `if/else` block | ✓ |
 | `StoreLocal(s)` / `LoadLocal(s)` | `var x: f32 = ...;` | ✓ |
 | `Pop` | discard | ✓ |
+| `Index` | — | ✗ Requires CPU tensor ref; use `LoadBuffer` (future) in GPU context |
 | `MakeTuple(n)` / `MakeArray(n)` | — | ✗ Runtime heap allocation |
-| `MakeClosure(...)` | — | ✗ No nested functions in WGSL |
+| `MakeClosure(...)` | — | ✗ No nested functions in WGSL; recursion impossible on GPU |
 | `CallVal(...)` | — | ✗ Dynamic dispatch impossible |
 | `CallBuiltin(special form, ...)` | — | ✗ sum, map, etc. are not scalar |
 
@@ -701,12 +667,12 @@ The result is an inline WGSL function body that can be embedded in a
 ### `tensor((i,j)->expr, m, n)` on GPU — the full path
 
 ```
-User writes:   GPU(T) { tensor((i,j) -> sin(T[i,j]) + i*j, rows(T), cols(T)) }
-                                                              ↑ T[i,j] — not GPU-safe in v1
-                                                              (indexing not compilable)
+User writes:   GPU { tensor((i,j) -> sin(T[i,j]) + i*j, rows(T), cols(T)) }
+                                                           ↑ T[i,j] — not GPU-safe in v1
+                                                           (Index instruction rejected by is_gpu_safe)
 
-Simpler form:  GPU(T) { tensor((i,j) -> i*j, 4, 4) }
-                                         ↑ GPU-safe: only LoadParam(0), LoadParam(1), BinOp(Mul)
+Simpler form:  GPU { tensor((i,j) -> i*j, 4, 4) }
+                                    ↑ GPU-safe: only LoadParam(0), LoadParam(1), BinOp(Mul)
 ```
 
 Path for GPU-safe lambda:
