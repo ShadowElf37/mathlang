@@ -299,13 +299,24 @@ pub fn import_file(path: &str, display: &str, env: &mut Env, verbose: bool) {
                 }
                 if buf.is_empty() { buf.push_str(trimmed); } else { buf.push(' '); buf.push_str(trimmed); }
                 if depth <= 0 {
-                    eval_line(&buf, env, false);
+                    if buf.starts_with('!') {
+                        bang_command(buf[1..].trim_start(), env);
+                    } else {
+                        eval_line(&buf, env, false);
+                    }
                     n += 1;
                     buf.clear();
                     depth = 0;
                 }
             }
-            if !buf.is_empty() { eval_line(&buf, env, false); n += 1; }
+            if !buf.is_empty() {
+                if buf.starts_with('!') {
+                    bang_command(buf[1..].trim_start(), env);
+                } else {
+                    eval_line(&buf, env, false);
+                }
+                n += 1;
+            }
             if verbose { println!("included {n} definition(s) from {display}"); }
         }
         Err(e) => eprintln!("include {display}: {e}"),

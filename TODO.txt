@@ -2,12 +2,18 @@
 
 2. gpu (in progress, see CONSIDERATIONS.md)
 
-3. `!savetensor <var> <fp>` to save in some serialized format (should be simple, just for tensors)
+3. [DONE] `!savetensor <var> <fp>` to save in some serialized binary format (should be simple, just for tensors, maybe a shape header and just bytes of data, one tensor per file)
 
-3.1. `!loadtensor <fp>` loads serialized tensor
+3.1. [DONE] `!loadtensor <fp>` loads serialized tensor
 
-3.5. `!savehdf5 <var> <fp>` saves a tensor in hdf5 format
+3.5. [DONE] `!savehdf5 <var> <fp>` saves a tensor in hdf5 format
 
 4. consider removing : syntax for final evaluated expression in a block and the cli, as it's synonymous with ; for the final expression, and the comma separation after : could be simplified to a tuple put in by the user
 
 5. Claude Opus exhaustive ergonomics and bug check
+
+6. !print <text? vars? string?>
+
+7. [DONE] unify REPL and file evaluation — !commands now work in .math files (import_file routes !-prefixed lines to bang_command)
+
+7.1 refactor README to be file/REPL-focused rather than cli-focused

@@ -1051,6 +1051,49 @@ shape(D)"                              "\[4\]"
 
 rm -f "$_TMLT"
 
+# ── Bang commands in .math files ──────────────────────────────────────────────
+section "BANG COMMANDS IN FILES"
+
+# Helper: write a temp .math file, run it with -f, check output matches pattern
+_file_check() {
+    local label="$1" script="$2" pat="$3"
+    local tf; tf=$(mktemp /tmp/mlt_test_XXXXXX.math)
+    printf '%s\n' "$script" > "$tf"
+    local out; out=$("$M" -f "$tf" 2>&1)
+    rm -f "$tf"
+    if [ -z "$pat" ] || echo "$out" | grep -qE -- "$pat"; then
+        PASS=$((PASS+1))
+    else
+        FAIL=$((FAIL+1))
+        FAILS+=("$label | pat='$pat' | got='$(norm "$out")'")
+    fi
+}
+
+_file_check "file.bang.version"   "!version"                           "mathlang v"
+_file_check "file.bang.defs"      "x = 99
+!defs"                                                                  "x"
+
+# include chaining: write a lib file, include it from a main file
+_TLIB=$(mktemp /tmp/mlt_lib_XXXXXX.math)
+printf 'sq = x -> x*x\n' > "$_TLIB"
+_file_check "file.bang.include.chain"  "!include $_TLIB
+sq(4)"                                                                  "16"
+rm -f "$_TLIB"
+
+_file_check "file.bang.savetensor" "T = (1.0,2.0,3.0)
+!savetensor T /tmp/mlt_file_bang_test.mlt"                              "saved T"
+
+_file_check "file.bang.loadtensor" "T = (1.0,2.0,3.0)
+!savetensor T /tmp/mlt_file_bang_test.mlt
+!loadtensor U /tmp/mlt_file_bang_test.mlt"                              "loaded U"
+
+_file_check "file.bang.tensor.val" "T = (4.0,5.0,6.0)
+!savetensor T /tmp/mlt_file_bang_test.mlt
+!loadtensor U /tmp/mlt_file_bang_test.mlt
+U[1]"                                                                   "5"
+
+rm -f /tmp/mlt_file_bang_test.mlt
+
 # ── HDF5 (skipped unless built with --features hdf5) ─────────────────────────
 section "HDF5"
 _H5F=$(mktemp /tmp/mlt_test_XXXXXX.h5)
