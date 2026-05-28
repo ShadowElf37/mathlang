@@ -1,7 +1,38 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::cell::RefCell;
 use crate::ast::{Expr, BlockStmt, Op, Def};
+
+// ── Bytecode instructions ─────────────────────────────────────────────────────
+// Flat instruction set for the stack-based bytecode VM.
+// Val::Fn lazily compiles its body to Vec<Instruction> on first call.
+
+#[derive(Debug, Clone)]
+pub enum Instruction {
+    PushNum(f64),
+    PushComplex(f64, f64),
+    LoadParam(usize),           // bind from args[i]
+    LoadCaptured(String),       // live env lookup (Cells, Fns, Tensors)
+    BinOp(Op),                  // pop 2, push 1
+    Neg,                        // pop 1, push 1
+    CallBuiltin(String, usize), // pop argc args, call builtin, push result
+    CallVal(usize),             // pop callee then argc args, call, push result
+    MakeTuple(usize),           // pop n, promote to Tensor if all-numeric
+    MakeArray(usize),           // pop n, always produce Tensor ([] syntax)
+    JumpIfFalse(usize),         // pop cond, jump to absolute pc if 0.0
+    Jump(usize),                // unconditional absolute jump
+    StoreLocal(usize),          // pop → locals[slot]
+    LoadLocal(usize),           // push locals[slot]
+    Pop,                        // discard top of stack
+    Return,                     // result is top of stack
+    Index,                      // pop idx then base → element (scalar indices only, no slices)
+    MakeClosure {               // build Val::Fn capturing free vars from the stack
+        params:    Vec<String>,
+        body:      Arc<Expr>,
+        code:      Arc<Vec<Instruction>>, // eagerly pre-compiled; empty = lazy fallback
+        free_vars: Vec<String>,           // names to pop from stack into captured env
+    },
+}
 
 // ── TData: Arc-wrapped tensor data ────────────────────────────────────────────
 //
@@ -58,7 +89,10 @@ pub enum Val {
     /// Fn(params, body, captured_env)
     /// `captured_env` is Arc-wrapped so cloning a closure is O(1) regardless
     /// of how many functions are in scope.
-    Fn(Vec<String>, Expr, Arc<HashMap<String, Val>>),
+    /// Fn(params, body, captured_env, bytecode_cache)
+    /// `bytecode_cache` is an Arc<OnceLock> so all clones share the compiled code.
+    /// Initialised on first call via apply_fn_direct; None means fall back to tree-walk.
+    Fn(Vec<String>, Expr, Arc<HashMap<String, Val>>, Arc<OnceLock<Option<Vec<Instruction>>>>),
     Builtin(String),
     Tuple(Vec<Val>),
     /// Real-valued tensor (row-major flat storage).
@@ -85,6 +119,19 @@ impl Val {
             Val::ComplexTensor { .. } => Err(format!("{ctx}: expected a number, got a complex tensor")),
             Val::Cell(..)             => Err(format!("{ctx}: expected a number, got a cell (use get())")),
         }
+    }
+
+    /// Construct a new user function with a fresh (empty) bytecode cache.
+    pub fn make_fn(params: Vec<String>, body: Expr, captured: Arc<HashMap<String, Val>>) -> Self {
+        Val::Fn(params, body, captured, Arc::new(OnceLock::new()))
+    }
+
+    /// Construct a user function with bytecode pre-filled — zero recompile cost on first call.
+    /// Used by MakeClosure to pass eagerly-compiled inner code to the resulting Val::Fn.
+    pub fn make_fn_compiled(params: Vec<String>, body: Expr, captured: Arc<HashMap<String, Val>>, code: Vec<Instruction>) -> Self {
+        let lock = OnceLock::new();
+        let _ = lock.set(Some(code));
+        Val::Fn(params, body, captured, Arc::new(lock))
     }
 }
 
@@ -127,7 +174,7 @@ impl Env {
             "sign", "signum", "id", "delta", "fact", "factorial", "not", "sinc",
             "sech", "csch",
             "erf", "erfc", "j0", "j1", "jinc",
-            "step",
+            "heaviside",
             "deg", "rad",
             "len", "length",
             "linspace", "range",
@@ -177,7 +224,7 @@ pub fn is_protected(name: &str) -> bool {
         | "sign" | "signum" | "id" | "delta" | "fact" | "factorial" | "not" | "sinc"
         | "sech" | "csch"
         | "erf" | "erfc" | "j0" | "j1" | "jinc"
-        | "step"
+        | "heaviside"
         | "deg" | "rad"
         | "len" | "length"
         | "linspace" | "range"
@@ -266,7 +313,7 @@ pub fn fmt_val(v: &Val) -> String {
                 format!("{re} + {im}i")
             }
         }
-        Val::Fn(params, _, _) => format!("<fn({}) = …>", params.join(", ")),
+        Val::Fn(params, ..) => format!("<fn({}) = …>", params.join(", ")),
         Val::Builtin(name) => format!("<builtin {name}>"),
         Val::Cell(c) => format!("cell({})", fmt_val(&c.borrow())),
         Val::Tuple(items) => format!("({})", items.iter().map(fmt_val).collect::<Vec<_>>().join(", ")),
@@ -921,7 +968,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             if s == 0.0 { return Err("cot: undefined (sin is zero)".into()); }
             Ok(Val::Num(x.cos() / s))
         }),
-        "step" => b1!(|v| Ok(Val::Num(match v.num("step")? {
+        "heaviside" => b1!(|v| Ok(Val::Num(match v.num("heaviside")? {
             x if x < 0.0 => 0.0,
             x if x > 0.0 => 1.0,
             _             => 0.5,
@@ -1267,13 +1314,13 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             let f = it.next().unwrap();
             let a = it.next().unwrap();
             match f {
-                Val::Fn(params, body, captured) => {
+                Val::Fn(params, body, captured, _) => {
                     if params.is_empty() { return Err("partial: function has no parameters".into()); }
                     let first = params[0].clone();
                     let rest  = params[1..].to_vec();
                     let mut new_cap = (*captured).clone();
                     new_cap.insert(first, a);
-                    Ok(Val::Fn(rest, body, Arc::new(new_cap)))
+                    Ok(Val::make_fn(rest, body, Arc::new(new_cap)))
                 }
                 Val::Builtin(bname) => {
                     let mut cap = HashMap::new();
@@ -1283,7 +1330,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                         Box::new(Expr::Var("__b__".into())),
                         vec![Expr::Var("__a__".into()), Expr::Var("__z__".into())],
                     );
-                    Ok(Val::Fn(vec!["__z__".into()], body, Arc::new(cap)))
+                    Ok(Val::make_fn(vec!["__z__".into()], body, Arc::new(cap)))
                 }
                 _ => Err("partial: first argument must be a function".into()),
             }
@@ -2526,17 +2573,639 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
     }
 }
 
+// ── Bytecode compiler ─────────────────────────────────────────────────────────
+// Compiles a lambda body to Vec<Instruction>.  Returns None for any unsupported
+// node (range, tensor literal, func-def in block, special forms that need
+// unevaluated Expr args).  None triggers a tree-walk fallback.
+
+fn has_slice(expr: &Expr) -> bool {
+    matches!(expr, Expr::Slice(..))
+        || matches!(expr, Expr::Tuple(es) if es.iter().any(|e| matches!(e, Expr::Slice(..))))
+}
+
+/// Collect names from `expr` that are free in the inner lambda — i.e. they appear
+/// in `outer_params` or `outer_locals` but not in `inner_params` or `outer_captured`.
+/// These must be explicitly pushed onto the stack before a MakeClosure instruction.
+fn collect_free_vars(
+    expr:           &Expr,
+    inner_params:   &[String],
+    outer_params:   &[String],
+    outer_locals:   &[String],
+    outer_captured: &HashMap<String, Val>,
+) -> Vec<String> {
+    let mut vars: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    cfv(expr, inner_params, outer_params, outer_locals, outer_captured, &mut vars, &mut seen);
+    vars
+}
+
+fn cfv(
+    expr:           &Expr,
+    inner_params:   &[String],
+    outer_params:   &[String],
+    outer_locals:   &[String],
+    outer_captured: &HashMap<String, Val>,
+    vars:           &mut Vec<String>,
+    seen:           &mut std::collections::HashSet<String>,
+) {
+    match expr {
+        Expr::Num(_) | Expr::ImagLit(_) => {}
+        Expr::Var(name) => {
+            // Capture if the name is bound in the outer scope (params or locals) but not
+            // already an inner param.  We intentionally ignore outer_captured here: a
+            // local variable can shadow a captured builtin, and the local must win.
+            if !inner_params.contains(name)
+                && (outer_params.contains(name) || outer_locals.contains(name))
+                && seen.insert(name.clone())
+            {
+                vars.push(name.clone());
+            }
+        }
+        Expr::BinOp(l, _, r) => {
+            cfv(l, inner_params, outer_params, outer_locals, outer_captured, vars, seen);
+            cfv(r, inner_params, outer_params, outer_locals, outer_captured, vars, seen);
+        }
+        Expr::Neg(e) => cfv(e, inner_params, outer_params, outer_locals, outer_captured, vars, seen),
+        Expr::Apply(f, args) => {
+            cfv(f, inner_params, outer_params, outer_locals, outer_captured, vars, seen);
+            for a in args { cfv(a, inner_params, outer_params, outer_locals, outer_captured, vars, seen); }
+        }
+        Expr::Tuple(es) | Expr::Array(es) => {
+            for e in es { cfv(e, inner_params, outer_params, outer_locals, outer_captured, vars, seen); }
+        }
+        Expr::Index(base, idx) => {
+            cfv(base, inner_params, outer_params, outer_locals, outer_captured, vars, seen);
+            cfv(idx, inner_params, outer_params, outer_locals, outer_captured, vars, seen);
+        }
+        Expr::Lambda(ps, body) => {
+            let mut new_inner = inner_params.to_vec();
+            new_inner.extend_from_slice(ps);
+            cfv(body, &new_inner, outer_params, outer_locals, outer_captured, vars, seen);
+        }
+        Expr::Block(stmts) => {
+            let mut ext = inner_params.to_vec();
+            for stmt in stmts {
+                match stmt {
+                    BlockStmt::Def(Def::Var(name, body)) => {
+                        cfv(body, &ext, outer_params, outer_locals, outer_captured, vars, seen);
+                        ext.push(name.clone());
+                    }
+                    BlockStmt::Def(Def::Func(name, ps, body)) => {
+                        ext.push(name.clone());
+                        let mut fn_inner = ext.clone();
+                        fn_inner.extend_from_slice(ps);
+                        cfv(body, &fn_inner, outer_params, outer_locals, outer_captured, vars, seen);
+                    }
+                    BlockStmt::Expr(e) => cfv(e, &ext, outer_params, outer_locals, outer_captured, vars, seen),
+                }
+            }
+        }
+        Expr::TensorLit(rows) => {
+            for row in rows { for e in row { cfv(e, inner_params, outer_params, outer_locals, outer_captured, vars, seen); } }
+        }
+        Expr::Range(lo, hi) => {
+            cfv(lo, inner_params, outer_params, outer_locals, outer_captured, vars, seen);
+            cfv(hi, inner_params, outer_params, outer_locals, outer_captured, vars, seen);
+        }
+        Expr::Slice(lo, hi) => {
+            if let Some(e) = lo { cfv(e, inner_params, outer_params, outer_locals, outer_captured, vars, seen); }
+            if let Some(e) = hi { cfv(e, inner_params, outer_params, outer_locals, outer_captured, vars, seen); }
+        }
+    }
+}
+
+/// Returns true if `target` appears as a free variable anywhere in `expr`
+/// (accounting for shadowing by inner params/locals).
+fn expr_contains_var(expr: &Expr, target: &str) -> bool {
+    match expr {
+        Expr::Var(name)      => name == target,
+        Expr::Num(_) | Expr::ImagLit(_) => false,
+        Expr::BinOp(l, _, r) => expr_contains_var(l, target) || expr_contains_var(r, target),
+        Expr::Neg(e)         => expr_contains_var(e, target),
+        Expr::Apply(f, args) => expr_contains_var(f, target) || args.iter().any(|a| expr_contains_var(a, target)),
+        Expr::Tuple(es) | Expr::Array(es) => es.iter().any(|e| expr_contains_var(e, target)),
+        Expr::Index(b, i)    => expr_contains_var(b, target) || expr_contains_var(i, target),
+        Expr::Lambda(ps, body) => !ps.iter().any(|p| p == target) && expr_contains_var(body, target),
+        Expr::Block(stmts) => {
+            for stmt in stmts {
+                match stmt {
+                    BlockStmt::Def(Def::Var(name, body)) => {
+                        if expr_contains_var(body, target) { return true; }
+                        if name == target { return false; } // shadowed from here on
+                    }
+                    BlockStmt::Def(Def::Func(name, ps, body)) => {
+                        if name == target { return false; } // shadowed from here on
+                        if !ps.iter().any(|p| p == target) && expr_contains_var(body, target) { return true; }
+                    }
+                    BlockStmt::Expr(e) => if expr_contains_var(e, target) { return true; },
+                }
+            }
+            false
+        }
+        Expr::TensorLit(rows) => rows.iter().any(|row| row.iter().any(|e| expr_contains_var(e, target))),
+        Expr::Range(lo, hi)  => expr_contains_var(lo, target) || expr_contains_var(hi, target),
+        Expr::Slice(lo, hi)  => lo.as_ref().map_or(false, |e| expr_contains_var(e, target))
+                             || hi.as_ref().map_or(false, |e| expr_contains_var(e, target)),
+    }
+}
+
+struct Compiler<'a> {
+    params:   &'a [String],
+    captured: &'a HashMap<String, Val>,
+    code:     Vec<Instruction>,
+    locals:   Vec<String>,
+}
+
+impl<'a> Compiler<'a> {
+    fn param_index(&self, name: &str) -> Option<usize> {
+        self.params.iter().position(|p| p == name)
+    }
+    fn local_index(&self, name: &str) -> Option<usize> {
+        self.locals.iter().position(|l| l == name)
+    }
+
+    fn compile(&mut self, expr: &Expr) -> Result<(), ()> {
+        match expr {
+            Expr::Num(n)     => self.code.push(Instruction::PushNum(*n)),
+            Expr::ImagLit(n) => self.code.push(Instruction::PushComplex(0.0, *n)),
+
+            Expr::Var(name) => {
+                if let Some(i) = self.param_index(name) {
+                    self.code.push(Instruction::LoadParam(i));
+                } else if let Some(i) = self.local_index(name) {
+                    self.code.push(Instruction::LoadLocal(i));
+                } else if let Some(v) = self.captured.get(name.as_str()) {
+                    match v {
+                        // Inline scalar constants — avoids a HashMap lookup on every call.
+                        Val::Num(x)        => self.code.push(Instruction::PushNum(*x)),
+                        Val::Complex(a, b) => self.code.push(Instruction::PushComplex(*a, *b)),
+                        // Cells must be loaded live; their inner value can change.
+                        // Everything else (Builtin, Fn, Tensor, Tuple) is also loaded live
+                        // so the VM uses the current binding, not a stale snapshot.
+                        _                  => self.code.push(Instruction::LoadCaptured(name.clone())),
+                    }
+                } else {
+                    return Err(());
+                }
+            }
+
+            Expr::BinOp(l, op, r) => {
+                self.compile(l)?;
+                self.compile(r)?;
+                self.code.push(Instruction::BinOp(op.clone()));
+            }
+
+            Expr::Neg(e) => { self.compile(e)?; self.code.push(Instruction::Neg); }
+
+            Expr::Apply(f_expr, arg_exprs) => {
+                if let Expr::Var(name) = f_expr.as_ref() {
+                    match name.as_str() {
+                        // if → conditional jump pair
+                        "if" => {
+                            if arg_exprs.len() != 3 { return Err(()); }
+                            self.compile(&arg_exprs[0])?;
+                            let jf_pos = self.code.len();
+                            self.code.push(Instruction::JumpIfFalse(0)); // patched below
+                            self.compile(&arg_exprs[1])?;
+                            let jmp_pos = self.code.len();
+                            self.code.push(Instruction::Jump(0));         // patched below
+                            let else_pc = self.code.len();
+                            self.compile(&arg_exprs[2])?;
+                            let end_pc  = self.code.len();
+                            self.code[jf_pos]  = Instruction::JumpIfFalse(else_pc);
+                            self.code[jmp_pos]  = Instruction::Jump(end_pc);
+                            return Ok(());
+                        }
+                        // Special forms that require unevaluated Expr args — unsupported.
+                        "sum" | "prod" | "integral" | "deriv"
+                        | "graph" | "animate2D" | "animate2D_raw"
+                        | "map"   | "filter"    | "reduce" => return Err(()),
+                        _ => {}
+                    }
+                    // Treat as builtin when not shadowed by a param/local.
+                    // Use the *actual* builtin name from captured, not the variable name —
+                    // compose/partial alias builtins as __f__, __g__, __b__ etc.
+                    let builtin_name = if self.param_index(name).is_none()
+                        && self.local_index(name).is_none()
+                    {
+                        if let Some(Val::Builtin(bname)) = self.captured.get(name.as_str()) {
+                            Some(bname.clone())
+                        } else { None }
+                    } else { None };
+                    if let Some(bname) = builtin_name {
+                        for a in arg_exprs { self.compile(a)?; }
+                        self.code.push(Instruction::CallBuiltin(bname, arg_exprs.len()));
+                    } else {
+                        // Computed callable (user fn stored in a captured var or local).
+                        self.compile(f_expr)?;
+                        for a in arg_exprs { self.compile(a)?; }
+                        self.code.push(Instruction::CallVal(arg_exprs.len()));
+                    }
+                } else {
+                    // Non-name callee (e.g. result of an expression).
+                    self.compile(f_expr)?;
+                    for a in arg_exprs { self.compile(a)?; }
+                    self.code.push(Instruction::CallVal(arg_exprs.len()));
+                }
+            }
+
+            Expr::Tuple(exprs) => {
+                for e in exprs { self.compile(e)?; }
+                self.code.push(Instruction::MakeTuple(exprs.len()));
+            }
+
+            Expr::Array(exprs) => {
+                for e in exprs { self.compile(e)?; }
+                self.code.push(Instruction::MakeArray(exprs.len()));
+            }
+
+            Expr::Block(stmts) => {
+                let n = stmts.len();
+                for (i, stmt) in stmts.iter().enumerate() {
+                    let is_last = i + 1 == n;
+                    match stmt {
+                        BlockStmt::Def(Def::Var(name, body)) => {
+                            self.compile(body)?;
+                            let slot = self.locals.len();
+                            self.locals.push(name.clone());
+                            self.code.push(Instruction::StoreLocal(slot));
+                        }
+                        // Non-recursive Def::Func compiles as a lambda stored in a local.
+                        // Recursive functions (body references own name) fall back to the
+                        // tree-walk evaluator, which sets up the self-reference correctly.
+                        BlockStmt::Def(Def::Func(name, params, body)) => {
+                            if expr_contains_var(body, name) { return Err(()); }
+                            self.compile(&Expr::Lambda(params.clone(), Box::new(body.clone())))?;
+                            let slot = self.locals.len();
+                            self.locals.push(name.clone());
+                            self.code.push(Instruction::StoreLocal(slot));
+                        }
+                        BlockStmt::Expr(e) => {
+                            self.compile(e)?;
+                            if !is_last { self.code.push(Instruction::Pop); }
+                        }
+                    }
+                }
+            }
+
+            Expr::Index(base, idx) => {
+                if has_slice(idx) { return Err(()); }
+                self.compile(base)?;
+                self.compile(idx)?;
+                self.code.push(Instruction::Index);
+            }
+
+            Expr::Lambda(inner_params, inner_body) => {
+                let free_vars = collect_free_vars(
+                    inner_body,
+                    inner_params,
+                    self.params,
+                    &self.locals,
+                    self.captured,
+                );
+                for name in &free_vars {
+                    if let Some(i) = self.param_index(name) {
+                        self.code.push(Instruction::LoadParam(i));
+                    } else if let Some(i) = self.local_index(name) {
+                        self.code.push(Instruction::LoadLocal(i));
+                    } else {
+                        return Err(());
+                    }
+                }
+                // Build a captured hint for the inner compiler: real outer-captured values
+                // (so scalars get inlined), plus a non-inlinable placeholder for each free var
+                // (so the inner compiler emits LoadCaptured rather than a stale literal).
+                let mut hint = self.captured.clone();
+                for name in &free_vars {
+                    hint.insert(name.clone(), Val::Tuple(vec![]));
+                }
+                let hint_arc = Arc::new(hint);
+                let inner_code = compile_fn(inner_params, inner_body, &hint_arc)
+                    .map(Arc::new)
+                    .unwrap_or_else(|| Arc::new(vec![]));
+                self.code.push(Instruction::MakeClosure {
+                    params: inner_params.clone(),
+                    body:   Arc::new(*inner_body.clone()),
+                    code:   inner_code,
+                    free_vars,
+                });
+            }
+
+            // Unsupported: ranges, slices, tensor literals.
+            _ => return Err(()),
+        }
+        Ok(())
+    }
+}
+
+/// Compile a function body to bytecode.  Returns None if any node is unsupported;
+/// the caller falls back to the tree-walk evaluator.
+fn compile_fn(
+    params:   &[String],
+    body:     &Expr,
+    captured: &Arc<HashMap<String, Val>>,
+) -> Option<Vec<Instruction>> {
+    let mut c = Compiler { params, captured, code: vec![], locals: vec![] };
+    c.compile(body).ok()?;
+    c.code.push(Instruction::Return);
+    Some(c.code)
+}
+
+// ── Bytecode VM helpers ────────────────────────────────────────────────────────
+
+fn vm_tensor_index(data: &[f64], shape: &[usize], idx: &Val) -> Result<Val, String> {
+    let indices: Vec<i64> = match idx {
+        Val::Num(f) => vec![*f as i64],
+        Val::Tensor { data: id, shape: is_ } if is_.len() == 1 => id.iter().map(|&f| f as i64).collect(),
+        Val::Tuple(items) => items.iter().map(|v| match v {
+            Val::Num(f) => Ok(*f as i64),
+            _ => Err("vm []: multi-index must contain numbers".to_string()),
+        }).collect::<Result<_, _>>()?,
+        _ => return Err("vm []: invalid index type".into()),
+    };
+    if indices.len() == 1 {
+        let raw  = indices[0];
+        let dim0 = shape[0] as i64;
+        let i    = if raw < 0 { (dim0 + raw).max(0) as usize } else { raw as usize };
+        if i >= shape[0] { return Err(format!("tensor index {raw} out of range (size={})", shape[0])); }
+        if shape.len() == 1 {
+            Ok(Val::Num(data[i]))
+        } else {
+            let sub: usize = shape[1..].iter().product();
+            Ok(Val::Tensor { data: TData::new(data[i*sub..(i+1)*sub].to_vec()), shape: shape[1..].to_vec() })
+        }
+    } else {
+        if indices.len() != shape.len() {
+            return Err(format!("tensor: expected {} indices, got {}", shape.len(), indices.len()));
+        }
+        let mut linear = 0usize;
+        let mut stride = 1usize;
+        for (&raw, &dim) in indices.iter().rev().zip(shape.iter().rev()) {
+            let i = if raw < 0 { (dim as i64 + raw).max(0) as usize } else { raw as usize };
+            if i >= dim { return Err(format!("tensor index {raw} out of range (size={})", dim)); }
+            linear += i * stride;
+            stride *= dim;
+        }
+        Ok(Val::Num(data[linear]))
+    }
+}
+
+fn vm_complex_tensor_index(re: &[f64], im: &[f64], shape: &[usize], idx: &Val) -> Result<Val, String> {
+    let indices: Vec<i64> = match idx {
+        Val::Num(f) => vec![*f as i64],
+        Val::Tensor { data: id, shape: is_ } if is_.len() == 1 => id.iter().map(|&f| f as i64).collect(),
+        Val::Tuple(items) => items.iter().map(|v| match v {
+            Val::Num(f) => Ok(*f as i64),
+            _ => Err("vm []: multi-index must contain numbers".to_string()),
+        }).collect::<Result<_, _>>()?,
+        _ => return Err("vm []: invalid index type".into()),
+    };
+    if indices.len() == 1 {
+        let raw  = indices[0];
+        let dim0 = shape[0] as i64;
+        let i    = if raw < 0 { (dim0 + raw).max(0) as usize } else { raw as usize };
+        if i >= shape[0] { return Err(format!("tensor index {raw} out of range (size={})", shape[0])); }
+        if shape.len() == 1 {
+            Ok(make_complex(re[i], im[i]))
+        } else {
+            let sub: usize = shape[1..].iter().product();
+            let s = i * sub;
+            Ok(maybe_real(re[s..s+sub].to_vec(), im[s..s+sub].to_vec(), shape[1..].to_vec()))
+        }
+    } else {
+        if indices.len() != shape.len() {
+            return Err(format!("tensor: expected {} indices, got {}", shape.len(), indices.len()));
+        }
+        let mut linear = 0usize;
+        let mut stride = 1usize;
+        for (&raw, &dim) in indices.iter().rev().zip(shape.iter().rev()) {
+            let i = if raw < 0 { (dim as i64 + raw).max(0) as usize } else { raw as usize };
+            if i >= dim { return Err(format!("tensor index {raw} out of range (size={})", dim)); }
+            linear += i * stride;
+            stride *= dim;
+        }
+        Ok(make_complex(re[linear], im[linear]))
+    }
+}
+
+// ── Bytecode VM ───────────────────────────────────────────────────────────────
+
+fn run_vm(
+    code:     &[Instruction],
+    args:     &[Val],
+    captured: &Arc<HashMap<String, Val>>,
+    env:      &Env,
+) -> Result<Val, String> {
+    let mut stack:  Vec<Val> = Vec::with_capacity(16);
+    let mut locals: Vec<Val> = Vec::new();
+    let mut pc = 0usize;
+
+    loop {
+        match &code[pc] {
+            Instruction::PushNum(n)         => stack.push(Val::Num(*n)),
+            Instruction::PushComplex(a, b)  => stack.push(make_complex(*a, *b)),
+            Instruction::LoadParam(i)       => stack.push(args[*i].clone()),
+            Instruction::LoadCaptured(name) => {
+                let v = captured.get(name.as_str())
+                    .or_else(|| env.vars.get(name.as_str()))
+                    .cloned()
+                    .ok_or_else(|| format!("vm: undefined: {name}"))?;
+                stack.push(v);
+            }
+            Instruction::BinOp(op) => {
+                let rv = stack.pop().unwrap();
+                let lv = stack.pop().unwrap();
+                let result = if matches!((&lv, &rv),
+                    (Val::Tensor { .. }, _) | (_, Val::Tensor { .. }) |
+                    (Val::ComplexTensor { .. }, _) | (_, Val::ComplexTensor { .. }))
+                {
+                    binop_tensor(lv, op, rv)
+                } else if matches!(op, Op::Eq | Op::Ne) {
+                    if let (Val::Tuple(ls), Val::Tuple(rs)) = (&lv, &rv) {
+                        let eq = ls.len() == rs.len()
+                            && ls.iter().zip(rs.iter()).all(|(a, b)|
+                                matches!((a, b), (Val::Num(x), Val::Num(y)) if x == y));
+                        Ok(Val::Num(if matches!(op, Op::Eq) == eq { 1.0 } else { 0.0 }))
+                    } else if matches!((&lv, &rv), (Val::Tuple(_), _) | (_, Val::Tuple(_))) {
+                        binop_tuple(lv, op, rv, env)
+                    } else {
+                        scalar_binop(lv, op, rv)
+                    }
+                } else if matches!((&lv, &rv), (Val::Tuple(_), _) | (_, Val::Tuple(_))) {
+                    binop_tuple(lv, op, rv, env)
+                } else {
+                    scalar_binop(lv, op, rv)
+                }?;
+                stack.push(result);
+            }
+            Instruction::Neg => {
+                let v = stack.pop().unwrap();
+                let result = match v {
+                    Val::Num(n)       => Val::Num(-n),
+                    Val::Complex(a,b) => make_complex(-a, -b),
+                    Val::Tensor { data, shape } => Val::Tensor {
+                        data: TData::new(data.into_iter().map(|x| -x).collect()),
+                        shape,
+                    },
+                    Val::ComplexTensor { re, im, shape } => maybe_real(
+                        re.into_iter().map(|x| -x).collect(),
+                        im.into_iter().map(|x| -x).collect(),
+                        shape,
+                    ),
+                    other => return Err(format!("vm neg: expected number, got {}", fmt_val(&other))),
+                };
+                stack.push(result);
+            }
+            Instruction::CallBuiltin(name, argc) => {
+                let start = stack.len() - argc;
+                let call_args: Vec<Val> = stack.drain(start..).collect();
+                stack.push(eval_builtin(name, call_args, env)?);
+            }
+            Instruction::CallVal(argc) => {
+                let start  = stack.len() - argc;
+                let call_args: Vec<Val> = stack.drain(start..).collect();
+                let callee = stack.pop().unwrap();
+                stack.push(apply_val(callee, call_args, env)?);
+            }
+            Instruction::MakeTuple(n) => {
+                let start = stack.len() - n;
+                let items: Vec<Val> = stack.drain(start..).collect();
+                let all_num = !items.is_empty() && items.iter().all(|v| matches!(v, Val::Num(_)));
+                let all_cx  = !items.is_empty() && items.iter().all(|v| matches!(v, Val::Num(_) | Val::Complex(..)));
+                let result = if all_num {
+                    let data: Vec<f64> = items.into_iter()
+                        .map(|v| match v { Val::Num(x) => x, _ => 0.0 }).collect();
+                    let nn = data.len();
+                    Val::Tensor { data: TData::new(data), shape: vec![nn] }
+                } else if all_cx {
+                    let mut re = Vec::with_capacity(*n);
+                    let mut im = Vec::with_capacity(*n);
+                    for v in items {
+                        match v {
+                            Val::Num(x)       => { re.push(x); im.push(0.0); }
+                            Val::Complex(a,b) => { re.push(a); im.push(b); }
+                            _ => {}
+                        }
+                    }
+                    let nn = re.len();
+                    maybe_real(re, im, vec![nn])
+                } else {
+                    Val::Tuple(items)
+                };
+                stack.push(result);
+            }
+            Instruction::MakeArray(n) => {
+                let start = stack.len() - n;
+                let items: Vec<Val> = stack.drain(start..).collect();
+                if items.is_empty() {
+                    stack.push(Val::Tensor { data: TData::new(vec![]), shape: vec![0] });
+                } else {
+                    let mut data: Vec<f64> = Vec::with_capacity(*n);
+                    let mut re_d: Vec<f64> = Vec::with_capacity(*n);
+                    let mut im_d: Vec<f64> = Vec::with_capacity(*n);
+                    let mut has_cx = false;
+                    for v in items {
+                        match v {
+                            Val::Num(x)       => { data.push(x); re_d.push(x); im_d.push(0.0); }
+                            Val::Complex(a,b) => { has_cx = true; re_d.push(a); im_d.push(b); data.push(a); }
+                            other => return Err(format!(
+                                "vm []: requires numeric elements, got {}", fmt_val(&other)
+                            )),
+                        }
+                    }
+                    let nn = re_d.len();
+                    stack.push(if has_cx {
+                        maybe_real(re_d, im_d, vec![nn])
+                    } else {
+                        Val::Tensor { data: TData::new(data), shape: vec![nn] }
+                    });
+                }
+            }
+            Instruction::JumpIfFalse(target) => {
+                let cond = stack.pop().unwrap().num("vm if")?;
+                if cond == 0.0 { pc = *target; continue; }
+            }
+            Instruction::Jump(target)      => { pc = *target; continue; }
+            Instruction::StoreLocal(slot)  => {
+                let v = stack.pop().unwrap();
+                if *slot == locals.len() { locals.push(v); } else { locals[*slot] = v; }
+            }
+            Instruction::LoadLocal(slot)   => stack.push(locals[*slot].clone()),
+            Instruction::Pop               => { stack.pop(); }
+            Instruction::Return            => break,
+            Instruction::Index => {
+                let idx_val = stack.pop().unwrap();
+                let base    = stack.pop().unwrap();
+                let result = match &base {
+                    Val::Tensor { data, shape } => vm_tensor_index(data, shape, &idx_val),
+                    Val::ComplexTensor { re, im, shape } => vm_complex_tensor_index(re, im, shape, &idx_val),
+                    Val::Tuple(items) => {
+                        let raw = idx_val.num("vm []")? as i64;
+                        let n = items.len() as i64;
+                        let i = if raw < 0 { (n + raw).max(0) as usize } else { raw as usize };
+                        if i >= items.len() {
+                            return Err(format!("tuple index {raw} out of range (size={})", items.len()));
+                        }
+                        Ok(items[i].clone())
+                    }
+                    other => Err(format!("vm []: cannot index {}", fmt_val(other))),
+                }?;
+                stack.push(result);
+            }
+            Instruction::MakeClosure { params, body, code, free_vars } => {
+                let start = stack.len() - free_vars.len();
+                let vals: Vec<Val> = stack.drain(start..).collect();
+                let mut new_captured = (**captured).clone();
+                for (name, val) in free_vars.iter().zip(vals) {
+                    new_captured.insert(name.clone(), val);
+                }
+                let new_cap = Arc::new(new_captured);
+                let fn_val = if code.is_empty() {
+                    Val::make_fn(params.clone(), (**body).clone(), new_cap)
+                } else {
+                    Val::make_fn_compiled(params.clone(), (**body).clone(), new_cap, (**code).clone())
+                };
+                stack.push(fn_val);
+            }
+        }
+        pc += 1;
+    }
+
+    stack.pop().ok_or_else(|| "vm: empty stack".into())
+}
+
 // ── Value application ─────────────────────────────────────────────────────────
+
+/// Run a user function: try bytecode VM first (compile on first call), fall back
+/// to the tree-walk evaluator for any body the compiler cannot handle.
+fn apply_fn_direct(
+    params:   &[String],
+    body:     &Expr,
+    captured: &Arc<HashMap<String, Val>>,
+    cache:    &Arc<OnceLock<Option<Vec<Instruction>>>>,
+    args:     Vec<Val>,
+    env:      &Env,
+) -> Result<Val, String> {
+    let code = cache.get_or_init(|| compile_fn(params, body, captured));
+    match code {
+        Some(code) => run_vm(code, &args, captured, env),
+        None => {
+            let mut local = make_local(env, captured);
+            for (p, v) in params.iter().zip(args) { local.define(p.clone(), v); }
+            eval(body, &local)
+        }
+    }
+}
 
 pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
     match f {
         Val::Builtin(ref name) => eval_builtin(name, args, env),
-        Val::Fn(ref params, ref body, ref captured) => {
+        Val::Fn(ref params, ref body, ref captured, ref cache) => {
             let n = params.len();
             let k = args.len();
             // All args are Fn → compose (only single arg supported)
             if k == 1 {
-                if let Val::Fn(_, _, _) = &args[0] {
+                if let Val::Fn(..) = &args[0] {
                     let g = args.into_iter().next().unwrap();
                     return Ok(compose_fns(f, g));
                 }
@@ -2552,26 +3221,18 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                     _ => None,
                 };
                 if let Some(items) = destructured {
-                    let mut local = make_local(env, captured);
-                    for (p, v) in params.iter().zip(items) {
-                        local.define(p.clone(), v);
-                    }
-                    return eval(body, &local);
+                    return apply_fn_direct(params, body, captured, cache, items, env);
                 }
                 // Single scalar/complex arg with 1-param fn → direct apply
                 if n == 1 {
-                    let mut local = make_local(env, captured);
-                    local.define(params[0].clone(), args.into_iter().next().unwrap());
-                    return eval(body, &local);
+                    return apply_fn_direct(params, body, captured, cache, args, env);
                 }
                 return Err(format!("function expects {n} args, got 1"));
             }
             // k == n: direct apply (catches the zero-arg case k==n==0 before the
             // vacuous all_n_seqs branch below would produce an empty tensor).
             if k == n {
-                let mut local = make_local(env, captured);
-                for (p, v) in params.iter().zip(args) { local.define(p.clone(), v); }
-                return eval(body, &local);
+                return apply_fn_direct(params, body, captured, cache, args, env);
             }
             // k args, all n-element sequences → map with destructuring
             // Sequences can be n-Tuples or 1-D Tensors of size n
@@ -2587,9 +3248,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                         Val::Tensor { data, .. } => data.into_iter().map(Val::Num).collect(),
                         _ => unreachable!(),
                     };
-                    let mut local = make_local(env, captured);
-                    for (p, v) in params.iter().zip(items) { local.define(p.clone(), v); }
-                    eval(body, &local)
+                    apply_fn_direct(params, body, captured, cache, items, env)
                 }).collect();
                 // Promote result to Tensor if all-numeric
                 let res = results?;
@@ -2611,11 +3270,9 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
             }
             // k scalar args, 1-param fn → map → Tensor if all-numeric
             if n == 1 {
-                let results: Result<Vec<Val>, _> = args.into_iter().map(|a| {
-                    let mut local = make_local(env, captured);
-                    local.define(params[0].clone(), a);
-                    eval(body, &local)
-                }).collect();
+                let results: Result<Vec<Val>, _> = args.into_iter()
+                    .map(|a| apply_fn_direct(params, body, captured, cache, vec![a], env))
+                    .collect();
                 let res = results?;
                 let all_num = res.iter().all(|v| matches!(v, Val::Num(_)));
                 let all_cx  = res.iter().all(|v| matches!(v, Val::Num(_) | Val::Complex(_, _)));
@@ -2638,7 +3295,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
         Val::Num(s) => {
             if args.len() == 1 {
                 match &args[0] {
-                    Val::Fn(_, _, _) => {
+                    Val::Fn(..) => {
                         return Ok(scale_fn(s, args.into_iter().next().unwrap()));
                     }
                     Val::Num(n) => return Ok(Val::Num(s * n)),
@@ -2705,7 +3362,7 @@ fn compose_fns(f: Val, g: Val) -> Val {
             vec![Expr::Var("__z__".into())],
         )],
     );
-    Val::Fn(vec!["__z__".into()], body, Arc::new(captured))
+    Val::make_fn(vec!["__z__".into()], body, Arc::new(captured))
 }
 
 fn scale_fn(s: f64, g: Val) -> Val {
@@ -2719,7 +3376,7 @@ fn scale_fn(s: f64, g: Val) -> Val {
             vec![Expr::Var("__z__".into())],
         )),
     );
-    Val::Fn(vec!["__z__".into()], body, Arc::new(captured))
+    Val::make_fn(vec!["__z__".into()], body, Arc::new(captured))
 }
 
 fn binop_tuple(lv: Val, op: &Op, rv: Val, _env: &Env) -> Result<Val, String> {
@@ -2795,7 +3452,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
     match expr {
         Expr::Num(n)      => Ok(Val::Num(*n)),
         Expr::ImagLit(n)  => Ok(if *n == 0.0 { Val::Num(0.0) } else { Val::Complex(0.0, *n) }),
-        Expr::Lambda(p, b) => Ok(Val::Fn(p.clone(), *b.clone(), Arc::clone(&env.vars))),
+        Expr::Lambda(p, b) => Ok(Val::make_fn(p.clone(), *b.clone(), Arc::clone(&env.vars))),
         Expr::Tuple(exprs) => {
             let vals: Result<Vec<Val>, _> = exprs.iter().map(|e| eval(e, env)).collect();
             let vals = vals?;
@@ -2912,9 +3569,9 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                                 return Err(format!("cannot redefine built-in '{name}'"));
                             }
                             let mut captured = (*child.vars).clone();
-                            let fn_val = Val::Fn(params.clone(), body.clone(), Arc::new(captured.clone()));
+                            let fn_val = Val::make_fn(params.clone(), body.clone(), Arc::new(captured.clone()));
                             captured.insert(name.clone(), fn_val);
-                            child.define(name.clone(), Val::Fn(params.clone(), body.clone(), Arc::new(captured)));
+                            child.define(name.clone(), Val::make_fn(params.clone(), body.clone(), Arc::new(captured)));
                         }
                     },
                     BlockStmt::Expr(e) => { last_val = eval(e, &child)?; }
@@ -2945,21 +3602,22 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                         if arg_exprs.len() != 2 {
                             return Err("map(f, tuple) expects 2 args".into());
                         }
+                        // Evaluate f once so the bytecode cache is shared across all calls.
+                        let f_val  = eval(&arg_exprs[0], env)?;
                         let second = eval(&arg_exprs[1], env)?;
                         return match second {
                             Val::Tuple(items) => {
                                 let results: Result<Vec<Val>, _> = items.into_iter()
-                                    .map(|item| call_fn1(&arg_exprs[0], item, env))
+                                    .map(|item| apply_val(f_val.clone(), vec![item], env))
                                     .collect();
                                 Ok(Val::Tuple(results?))
                             }
                             Val::Tensor { data, shape } => {
-                                // map over a real tensor — result may become ComplexTensor
                                 let mut re_out = Vec::with_capacity(data.len());
                                 let mut im_out = Vec::with_capacity(data.len());
                                 let mut has_complex = false;
                                 for x in data {
-                                    let v = call_fn1(&arg_exprs[0], Val::Num(x), env)?;
+                                    let v = apply_val(f_val.clone(), vec![Val::Num(x)], env)?;
                                     match v {
                                         Val::Num(n)        => { re_out.push(n); im_out.push(0.0); }
                                         Val::Complex(a, b) => { re_out.push(a); im_out.push(b); has_complex = true; }
@@ -2973,8 +3631,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                                 }
                             }
                             Val::ComplexTensor { re, im, shape } => {
-                                // map over a complex tensor — f receives Complex values
-                                broadcast1(Val::ComplexTensor { re, im, shape }, |v| call_fn1(&arg_exprs[0], v, env))
+                                broadcast1(Val::ComplexTensor { re, im, shape }, |v| apply_val(f_val.clone(), vec![v], env))
                             }
                             other => Err(format!("map: second arg must be a tuple or tensor, got {}", fmt_val(&other))),
                         };
@@ -2983,11 +3640,12 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                         if arg_exprs.len() != 2 {
                             return Err("filter(f, seq) expects 2 args".into());
                         }
+                        let f_val = eval(&arg_exprs[0], env)?;
                         return match eval(&arg_exprs[1], env)? {
                             Val::Tensor { data, .. } => {
                                 let mut out = vec![];
                                 for x in data {
-                                    let keep = call_fn1(&arg_exprs[0], Val::Num(x), env)?.num("filter")?;
+                                    let keep = apply_val(f_val.clone(), vec![Val::Num(x)], env)?.num("filter")?;
                                     if keep != 0.0 { out.push(x); }
                                 }
                                 let n = out.len();
@@ -2996,7 +3654,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                             Val::Tuple(items) => {
                                 let mut out = vec![];
                                 for item in items {
-                                    let keep = call_fn1(&arg_exprs[0], item.clone(), env)?.num("filter")?;
+                                    let keep = apply_val(f_val.clone(), vec![item.clone()], env)?.num("filter")?;
                                     if keep != 0.0 { out.push(item); }
                                 }
                                 Ok(Val::Tuple(out))
@@ -3505,13 +4163,15 @@ pub fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> 
     if args.len() != 3 {
         return Err(format!("{label} expects {label}(T), {label}(T,axis), {label}(f,n), or {label}(f,lo,hi)"));
     }
+    // Evaluate f once so the bytecode cache is shared across the summation loop.
+    let f_val = eval(&args[0], env)?;
     let start = eval(&args[1], env)?.num("start")? as i64;
     let stop  = eval(&args[2], env)?.num("stop")?  as i64;
     let (init_re, init_im) = if product { (1.0, 0.0) } else { (0.0, 0.0) };
     let mut acc_re = init_re;
     let mut acc_im = init_im;
     for k in start..=stop {
-        let v = call_fn1(&args[0], Val::Num(k as f64), env)?;
+        let v = apply_val(f_val.clone(), vec![Val::Num(k as f64)], env)?;
         let (r, i) = to_complex(v).map_err(|_| format!("{label}: f must return a number or complex"))?;
         accum(&mut acc_re, &mut acc_im, r, i, product);
     }
@@ -3523,18 +4183,17 @@ pub fn eval_integral(args: &[Expr], env: &Env) -> Result<Val, String> {
     if args.len() < 3 || args.len() > 4 {
         return Err("integral(f, a, b) or integral(f, a, b, n)".into());
     }
+    // Evaluate f once so the bytecode cache is shared across ~1000 calls.
+    let f_val = eval(&args[0], env)?;
+    let call  = |x: f64| apply_val(f_val.clone(), vec![Val::Num(x)], env).and_then(|v| v.num("f"));
     let a = eval(&args[1], env)?.num("a")?;
     let b = eval(&args[2], env)?.num("b")?;
     let n = if args.len() == 4 { eval(&args[3], env)?.num("n")? as usize } else { 1000 };
     let n = n + n % 2;
     let h = (b - a) / n as f64;
-    let fa = call_fn1(&args[0], Val::Num(a), env)?.num("f")?;
-    let fb = call_fn1(&args[0], Val::Num(b), env)?.num("f")?;
-    let mut s = fa + fb;
+    let mut s = call(a)? + call(b)?;
     for i in 1..n {
-        let x  = a + i as f64 * h;
-        let fx = call_fn1(&args[0], Val::Num(x), env)?.num("f")?;
-        s += fx * if i % 2 == 1 { 4.0 } else { 2.0 };
+        s += call(a + i as f64 * h)? * if i % 2 == 1 { 4.0 } else { 2.0 };
     }
     Ok(Val::Num(s * h / 3.0))
 }
@@ -3554,35 +4213,6 @@ pub fn eval_deriv(args: &[Expr], env: &Env) -> Result<Val, String> {
 
 // Apply a 1-arg function expression to a value.
 pub fn call_fn1(f_expr: &Expr, x: Val, env: &Env) -> Result<Val, String> {
-    match f_expr {
-        Expr::Lambda(params, body) => {
-            if params.len() != 1 {
-                return Err("lambda must take exactly 1 argument here".into());
-            }
-            let mut local = env.clone();
-            local.define(params[0].clone(), x);
-            eval(body, &local)
-        }
-        Expr::Var(name) => {
-            if let Some(Val::Fn(params, body, captured)) = env.vars.get(name).cloned() {
-                if params.len() != 1 {
-                    return Err(format!("{name} must be a 1-arg function"));
-                }
-                let mut local = make_local(env, &captured);
-                local.define(params[0].clone(), x);
-                return eval(&body, &local);
-            }
-            if let Some(Val::Builtin(bname)) = env.vars.get(name).cloned() {
-                match eval_builtin(&bname, vec![x], env) {
-                    Err(e) if e.contains("expects 0") => return eval_builtin(&bname, vec![], env),
-                    other => return other,
-                }
-            }
-            Err(format!("undefined function: {name}"))
-        }
-        _ => {
-            let f_val = eval(f_expr, env)?;
-            apply_val(f_val, vec![x], env)
-        }
-    }
+    let f_val = eval(f_expr, env)?;
+    apply_val(f_val, vec![x], env)
 }

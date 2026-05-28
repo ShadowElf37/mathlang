@@ -1,4 +1,6 @@
-1. we should have a discussion about pushing the AST of lambdas into bytecode, or bytecode compilation in general
+1. [DONE] bytecode VM for user-defined functions: lazy OnceLock compilation, stack-based
+   interpreter, tensor indexing, nested lambdas (MakeClosure), non-recursive Def::Func
+   in blocks. Recursive functions and slices fall back transparently to tree-walk eval.
 
 2. gpu (in progress, see CONSIDERATIONS.md)
 
@@ -17,3 +19,5 @@
 7. [DONE] unify REPL and file evaluation — !commands now work in .math files (import_file routes !-prefixed lines to bang_command)
 
 7.1 [DONE] refactor README to be file/REPL-focused + added philosophy section
+
+8. type hinting (enforced by the interpreter)

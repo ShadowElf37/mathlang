@@ -13,7 +13,7 @@ pub const BUILTIN_FNS: &[&str] = &[
     "sec", "csc", "cot",
     "sqrt", "cbrt", "abs", "sign", "signum",
     "floor", "ceil", "round", "trunc", "frac",
-    "step",
+    "heaviside",
     "deg", "rad",
     "len", "length",
     "linspace", "range",
@@ -231,9 +231,9 @@ pub fn eval_line(line: &str, env: &mut Env, repl: bool) -> bool {
                     return false;
                 }
                 let mut captured = (*env.vars).clone();
-                let fn_val = Val::Fn(params.clone(), body.clone(), std::sync::Arc::new(captured.clone()));
+                let fn_val = Val::make_fn(params.clone(), body.clone(), std::sync::Arc::new(captured.clone()));
                 captured.insert(name.clone(), fn_val);
-                env.define(name.clone(), Val::Fn(params.clone(), body.clone(), std::sync::Arc::new(captured)));
+                env.define(name.clone(), Val::make_fn(params.clone(), body.clone(), std::sync::Arc::new(captured)));
             }
         }
     }
@@ -264,7 +264,7 @@ pub fn show_defs(env: &Env) {
     for (k, v) in env.vars.iter() {
         if BUILTIN_CONSTS.contains(&k.as_str()) || BUILTIN_FNS.contains(&k.as_str()) || k == "result" { continue; }
         let display = match v {
-            Val::Fn(params, _, _) => format!("fn({}) = …", params.join(", ")),
+            Val::Fn(params, ..) => format!("fn({}) = …", params.join(", ")),
             _ => fmt_val(&v),
         };
         items.push((k.clone(), display));
@@ -529,7 +529,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "Grapher:   graph(f[,a,b])  saves graph_N.png to cwd\n\n",
             "Trig:      sin cos tan  asin acos atan atan2\n",
             "           sinh cosh tanh  sec csc cot\n",
-            "Algebra:   sqrt cbrt abs sign step  floor ceil round(x[,n]) trunc frac\n",
+            "Algebra:   sqrt cbrt abs sign heaviside  floor ceil round(x[,n]) trunc frac\n",
             "           ln log(x[,base]) log2 log10 exp expm1  pow hypot\n",
             "           min max  gcd lcm  fact  n!\n",
             "Angle:     deg rad\n",
