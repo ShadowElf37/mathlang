@@ -1,4 +1,6 @@
-1. we should have a discussion about pushing the AST of lambdas into bytecode, or bytecode compilation in general
+1. [DONE] bytecode VM for user-defined functions: lazy OnceLock compilation, stack-based
+   interpreter, tensor indexing, nested lambdas (MakeClosure), non-recursive Def::Func
+   in blocks. Recursive functions and slices fall back transparently to tree-walk eval.
 
 2. gpu (in progress, see CONSIDERATIONS.md)
 

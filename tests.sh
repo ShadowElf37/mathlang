@@ -1135,6 +1135,14 @@ run "vm.closure.tensor"    "add(x) = y -> x + y; tensor((i)->add(i)(i*2), 4)" "[
 run "vm.closure.filter"    "above(n) = x -> x > n; filter(above(3), [1,2,3,4,5])"  "[4, 5]"
 run "vm.closure.localstep" "f(n) = { k = n + 1; x -> x * k }; map(f(2), [1,2,3])" "[3, 6, 9]"
 
+# ── VM: Def::Func in block (non-recursive compiles; recursive falls back) ────
+section "vm.deffunc"
+run "vm.deffunc.simple"   "f(n) = { h(x) = x*2; h(n) + h(n+1) }; f(3)"        "14"
+run "vm.deffunc.capture"  "f(n) = { h(x) = x + n; h(3) + h(4) }; f(10)"       "27"
+run "vm.deffunc.maplocal" "f(n) = { h(x) = x*n; map(h, [1,2,3]) }; f(5)"      "[5, 10, 15]"
+run "vm.deffunc.chain"    "f(n) = { a(x) = x+1; b(x) = a(x)*n; b(2) }; f(4)"  "12"
+run "vm.deffunc.rec"      "f(n) = { g(x) = if(x<=0,0,x+g(x-1)); g(n) }; f(4)" "10"
+
 # ── HDF5 (skipped unless built with --features hdf5) ─────────────────────────
 section "HDF5"
 _H5F=$(mktemp /tmp/mlt_test_XXXXXX.h5)

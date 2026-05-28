@@ -2674,6 +2674,41 @@ fn cfv(
     }
 }
 
+/// Returns true if `target` appears as a free variable anywhere in `expr`
+/// (accounting for shadowing by inner params/locals).
+fn expr_contains_var(expr: &Expr, target: &str) -> bool {
+    match expr {
+        Expr::Var(name)      => name == target,
+        Expr::Num(_) | Expr::ImagLit(_) => false,
+        Expr::BinOp(l, _, r) => expr_contains_var(l, target) || expr_contains_var(r, target),
+        Expr::Neg(e)         => expr_contains_var(e, target),
+        Expr::Apply(f, args) => expr_contains_var(f, target) || args.iter().any(|a| expr_contains_var(a, target)),
+        Expr::Tuple(es) | Expr::Array(es) => es.iter().any(|e| expr_contains_var(e, target)),
+        Expr::Index(b, i)    => expr_contains_var(b, target) || expr_contains_var(i, target),
+        Expr::Lambda(ps, body) => !ps.iter().any(|p| p == target) && expr_contains_var(body, target),
+        Expr::Block(stmts) => {
+            for stmt in stmts {
+                match stmt {
+                    BlockStmt::Def(Def::Var(name, body)) => {
+                        if expr_contains_var(body, target) { return true; }
+                        if name == target { return false; } // shadowed from here on
+                    }
+                    BlockStmt::Def(Def::Func(name, ps, body)) => {
+                        if name == target { return false; } // shadowed from here on
+                        if !ps.iter().any(|p| p == target) && expr_contains_var(body, target) { return true; }
+                    }
+                    BlockStmt::Expr(e) => if expr_contains_var(e, target) { return true; },
+                }
+            }
+            false
+        }
+        Expr::TensorLit(rows) => rows.iter().any(|row| row.iter().any(|e| expr_contains_var(e, target))),
+        Expr::Range(lo, hi)  => expr_contains_var(lo, target) || expr_contains_var(hi, target),
+        Expr::Slice(lo, hi)  => lo.as_ref().map_or(false, |e| expr_contains_var(e, target))
+                             || hi.as_ref().map_or(false, |e| expr_contains_var(e, target)),
+    }
+}
+
 struct Compiler<'a> {
     params:   &'a [String],
     captured: &'a HashMap<String, Val>,
@@ -2795,8 +2830,16 @@ impl<'a> Compiler<'a> {
                             self.locals.push(name.clone());
                             self.code.push(Instruction::StoreLocal(slot));
                         }
-                        // Function defs inside blocks need recursive capture — skip for now.
-                        BlockStmt::Def(Def::Func(..)) => return Err(()),
+                        // Non-recursive Def::Func compiles as a lambda stored in a local.
+                        // Recursive functions (body references own name) fall back to the
+                        // tree-walk evaluator, which sets up the self-reference correctly.
+                        BlockStmt::Def(Def::Func(name, params, body)) => {
+                            if expr_contains_var(body, name) { return Err(()); }
+                            self.compile(&Expr::Lambda(params.clone(), Box::new(body.clone())))?;
+                            let slot = self.locals.len();
+                            self.locals.push(name.clone());
+                            self.code.push(Instruction::StoreLocal(slot));
+                        }
                         BlockStmt::Expr(e) => {
                             self.compile(e)?;
                             if !is_last { self.code.push(Instruction::Pop); }
