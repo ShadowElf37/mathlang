@@ -1,29 +1,13 @@
-1. [DONE] eigenvalues and eigenvectors — eig, eigvals, eig_top, eig_bot, qr, diagonalize
+1. we should have a discussion about pushing the AST of lambdas into bytecode, or bytecode compilation in general
 
-1.5. [OBSOLETE] matrix exp(M) — expressible as V @ diag(map(exp, eigvals(A))) @ V_inv
-     via diagonalize; no dedicated builtin needed, and exp stays elementwise as expected
+2. gpu (in progress, see CONSIDERATIONS.md)
 
-2. [DONE] accept [] for tensor literals — [a,b,c] and [1,2;3,4] now parsed same as (…)
+3. `!savetensor <var> <fp>` to save in some serialized format (should be simple, just for tensors)
 
-3. [DONE] ctrl+d — ConditionalEventHandler: Ctrl+D always exits regardless of buffer content
+3.1. `!loadtensor <fp>` loads serialized tensor
 
-4. [DISCUSSED] GPU backend using wgpu compute — see CONSIDERATIONS.md for full design.
-   Syntax: GPU(vars){ code }. Separate src/gpu/ directory; only 6 small seams into
-   main codebase. Two-phase eval (record ops → single submit). Shader-per-builtin.
-   f64→f32 on upload. Do NOT wait for bytecode first.
+3.5. `!savehdf5 <var> <fp>` saves a tensor in hdf5 format
 
-5. we should have a discussion about pushing the AST of lambdas into bytecode, or bytecode compilation in general
+4. consider removing : syntax for final evaluated expression in a block and the cli, as it's synonymous with ; for the final expression, and the comma separation after : could be simplified to a tuple put in by the user
 
-6. [DONE] the heat solver, when animated, recomputes from T_0 every call. to avoid this, it would need some way to store its state after each call. this necessitates some kind of mutable data structure, pointers, global variables, or something like this. it may be a necessary feature. this language is already not 100% functional because there are variables and functions you can define procedurally -- we just need like a "mutable variable", maybe with functions get() and set() to maintain the aesthetic
-
-7. [DONE] dont print giant tensors — 1D tensors > 20 elements truncated in REPL
-
-8. [DONE] help text discrepancy — fftn/ifftn now show identical signatures; added shift/roll/lerp/clamp/animate2D
-
-9. [DONE] animator colorbar is on top of part of the rendered grid, and its background is blue and not transparent - transparent background colorbar would be fine
-
-10. [DONE] O(n²) memory from env cloning: every function definition does env.vars.clone(),
-    which deep-copies all Val::Tensor data (Vec<f64>) into the captured env.
-    With n functions and large tensors, this is O(n) copies of each tensor.
-    Fix: TData newtype wrapping Arc<Vec<f64>> (O(1) clone); Env.vars: Arc<HashMap<String,Val>>
-    (O(1) env clone; CoW on mutation via Arc::make_mut). All 643 tests pass.
+5. Claude Opus exhaustive ergonomics and bug check
