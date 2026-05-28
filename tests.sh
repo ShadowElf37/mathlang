@@ -339,9 +339,9 @@ run "alg.pow_int"   "pow(2,10)"         "1024"
 run "alg.min2"      "min(3,7)"          "3"
 run "alg.max2"      "max(3,7)"          "7"
 run "alg.hypot"     "hypot(3,4)"        "5"
-run "alg.step_neg"  "step(-1)"          "0"
-run "alg.step_pos"  "step(1)"           "1"
-run "alg.step_zero" "step(0)"           "0.5"
+run "alg.heaviside_neg"  "heaviside(-1)"  "0"
+run "alg.heaviside_pos"  "heaviside(1)"   "1"
+run "alg.heaviside_zero" "heaviside(0)"   "0.5"
 run "alg.expm1"     "expm1(0)"          "0"
 run_match "alg.expm1_1" "expm1(1)"      "1.71828"
 
@@ -1110,6 +1110,30 @@ _repl_check "print.tensor"      "!print {(1,2,3)}"                 "\[1, 2, 3\]"
 _repl_check "print.err"         "!print {nosuchvar}"               "<error:"
 _file_check  "print.in_file"    "n = 5
 !print sum = {sum(x -> x, 1, n)}"                                  "sum = 15"
+
+# ── VM: tensor indexing in lambda bodies ─────────────────────────────────────
+section "vm.index"
+run "vm.index.1d.0"     "f(v) = v[0]; f([3,7,9])"                              "3"
+run "vm.index.1d.1"     "f(v) = v[1]; f([3,7,9])"                              "7"
+run "vm.index.1d.neg"   "f(v) = v[-1]; f([3,7,9])"                             "9"
+run "vm.index.param"    "f(v,i) = v[i]; f([10,20,30], 2)"                      "30"
+run "vm.index.2d"       "f(M,i,j) = M[i,j]; M = tensor((i,j)->i*10+j, 3, 4); f(M,1,2)" "12"
+run "vm.index.2d.sum"   "f(M) = M[0,0] + M[1,1]; M = tensor((i,j)->i*10+j, 3, 4); f(M)" "11"
+run "vm.index.expr"     "f(v,n) = v[n-1]; f([5,6,7], 3)"                      "7"
+run "vm.index.tensor.1" "v = [10,20,30,40]; tensor((i)->v[i], 4)"             "[10, 20, 30, 40]"
+run "vm.index.tensor.2" "M = tensor((i,j)->i*3+j, 2,3); sum(tensor((i,j)->M[i,j]*2, 2, 3))" "30"
+
+# ── VM: nested lambdas (MakeClosure) ─────────────────────────────────────────
+section "vm.closure"
+run "vm.closure.curry"     "add(x) = y -> x + y; add(3)(4)"                   "7"
+run "vm.closure.store"     "add(x) = y -> x + y; f = add(10); f(5)"           "15"
+run "vm.closure.mul"       "mul(x) = y -> x * y; mul(6)(7)"                   "42"
+run "vm.closure.two"       "f(a,b) = x -> a*x + b; g = f(2,3); g(5)"         "13"
+run "vm.closure.local"     "f(n) = { k = n*2; x -> x + k }; f(5)(3)"         "13"
+run "vm.closure.map"       "adder(n) = x -> x + n; map(adder(10), [1,2,3])"  "[11, 12, 13]"
+run "vm.closure.tensor"    "add(x) = y -> x + y; tensor((i)->add(i)(i*2), 4)" "[0, 3, 6, 9]"
+run "vm.closure.filter"    "above(n) = x -> x > n; filter(above(3), [1,2,3,4,5])"  "[4, 5]"
+run "vm.closure.localstep" "f(n) = { k = n + 1; x -> x * k }; map(f(2), [1,2,3])" "[3, 6, 9]"
 
 # ── HDF5 (skipped unless built with --features hdf5) ─────────────────────────
 section "HDF5"

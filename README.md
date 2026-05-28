@@ -641,7 +641,7 @@ result = 3  4
 
 **Trig:** `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2(y,x)`, `sinh`, `cosh`, `tanh`, `sec`, `csc`, `cot`
 
-**Algebra:** `sqrt`, `cbrt`, `abs`, `sign`, `step`, `floor`, `ceil`, `round`, `round(x,n)`, `trunc`, `frac`, `exp`, `ln`, `log`/`log10`, `log(x,base)`, `log2`, `pow(x,y)`, `min`, `max`, `hypot(a,b)`
+**Algebra:** `sqrt`, `cbrt`, `abs`, `sign`, `heaviside`, `floor`, `ceil`, `round`, `round(x,n)`, `trunc`, `frac`, `exp`, `ln`, `log`/`log10`, `log(x,base)`, `log2`, `pow(x,y)`, `min`, `max`, `hypot(a,b)`
 
 **Angle:** `deg(x)` (radians→degrees), `rad(x)` (degrees→radians)
 
@@ -685,7 +685,7 @@ result = 3  4
 > and(12, 10)     # 8
 > not(0)          # -1  (bitwise NOT, two's complement)
 > delta(0)        # 1   (1 if x == 0, else 0)
-> step(-1)        # 0   (Heaviside: 0 / 0.5 / 1)
+> heaviside(-1)   # 0   (Heaviside: 0 / 0.5 / 1)
 ```
 
 ---

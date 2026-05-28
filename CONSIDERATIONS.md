@@ -730,9 +730,10 @@ GpuOp::TensorFromLambda {
 }
 ```
 
-If `is_gpu_safe` returns false: fall back to CPU `tensor()` construction, then
-upload the result as a `GpuOp::Upload`. This is the safe default — GPU lambda
-lowering is an optimization, not a hard requirement.
+If `is_gpu_safe` returns false: **hard error**. The user wrote a GPU lambda
+expecting GPU execution; silently falling back to CPU inside a `GPU{...}` block
+masks performance bugs. Fix the lambda to use only GPU-safe operations (see table
+above) or move the computation outside the `GPU{...}` block.
 
 ### Note on `T[i,j]` inside GPU lambdas
 
