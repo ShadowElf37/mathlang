@@ -10,7 +10,7 @@
 
 5. we should have a discussion about pushing the AST of lambdas into bytecode, or bytecode compilation in general
 
-6. the heat solver, when animated, recomputes from T_0 every call. to avoid this, it would need some way to store its state after each call. this necessitates some kind of mutable data structure, pointers, global variables, or something like this. it may be a necessary feature. this language is already not 100% functional because there are variables and functions you can define procedurally -- we just need like a "mutable variable", maybe with functions get() and set() to maintain the aesthetic
+6. [DONE] the heat solver, when animated, recomputes from T_0 every call. to avoid this, it would need some way to store its state after each call. this necessitates some kind of mutable data structure, pointers, global variables, or something like this. it may be a necessary feature. this language is already not 100% functional because there are variables and functions you can define procedurally -- we just need like a "mutable variable", maybe with functions get() and set() to maintain the aesthetic
 
 7. [DONE] dont print giant tensors — 1D tensors > 20 elements truncated in REPL
 

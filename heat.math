@@ -1,27 +1,31 @@
-# heat.math — 2D heat equation solver (pure mathlang)
+# heat.math — 2D heat equation solver (stateful, cell-based)
 #
 # Solves  ∂T/∂t = ∇·(α ∇T)
 # using an explicit forward-Euler finite-difference scheme on a uniform grid.
 #
-# Boundary conditions: Neumann (no-flux) — ghost cells mirror edge cells.
-# The divergence form ∇·(α∇T) conserves total heat even when α is spatially varying.
+# Boundary conditions: Neumann (no-flux) via edge-replicating shift().
+# Divergence form ∇·(α∇T) conserves total heat for spatially varying α.
 #
 # Stability condition (CFL): dt ≤ dx² / (4 · max(α))
 #
 # Usage:
 #   !include heat.math
 #   solver = heatSolver(T0, alpha, dx, dt)
-#   solver(t)   # returns NxN temperature grid at physical time t
+#   animate2D(solver, n_frames)        — n_frames calls, each advances by dt
+#   animate2D(solver, n_frames, fps)   — same, with custom fps
 #
-# The returned function recomputes from T0 on each call (no caching).
-# For performance, keep N ≤ 30 and limit t/dt (number of steps) ≤ 200.
+# Each call to solver() returns the temperature field BEFORE advancing, so
+# frame 0 = T0, frame 1 = T(dt), frame 2 = T(2·dt), …
+# The argument passed by animate2D is ignored.
+# O(1) per frame — state is carried forward in a cell, no recomputation from T0.
+# To reset: create a new solver with heatSolver(T0, …).
+#
+# For point-in-time queries (without animation), use heatAt(T0, alpha, dx, dt, t).
 
 # ── Core operators ────────────────────────────────────────────────────────────
 
-# Divergence-form operator: ∇·(α∇T)
-# shift(T, n, axis): n>0 pushes content toward higher indices, edge-replicating.
-# shift(T,  1, 0) = _shiftDown,  shift(T, -1, 0) = _shiftUp
-# shift(T,  1, 1) = _shiftRight, shift(T, -1, 1) = _shiftLeft
+# Divergence-form Laplacian: ∇·(α∇T) with arithmetic-mean interface diffusivities.
+# shift(T, n, axis): n>0 pushes content toward higher indices, replicating edge.
 heatOp(T, alpha) = {
   Tu = shift(T,-1,0);  Td = shift(T,1,0);
   Tl = shift(T,-1,1);  Tr = shift(T,1,1);
@@ -32,34 +36,38 @@ heatOp(T, alpha) = {
   ae*(Tr-T) - aw*(T-Tl) + as*(Td-T) - an*(T-Tu)
 }
 
-# One explicit Euler time step
+# One explicit Euler step
 heatStep(T, alpha, r) = T + r * heatOp(T, alpha)
 
-# Evolve for n discrete time steps (tail-recursive)
+# ── Stateless helper: evolve n steps (for testing / point-in-time queries) ───
 heatEvolve(T, alpha, r, n) = if(n <= 0, T, heatEvolve(heatStep(T, alpha, r), alpha, r, n-1))
+
+# heatAt(T0, alpha, dx, dt, t) — temperature at physical time t (recomputes from T0)
+heatAt(T0, alpha, dx, dt, t) = heatEvolve(T0, alpha, dt/dx^2, round(t/dt))
 
 # ── Main API ──────────────────────────────────────────────────────────────────
 
-# heatSolver(T0, alpha, dx, dt)
-#   T0    : NxM initial temperature tensor
-#   alpha : NxM diffusivity field (same shape as T0)
-#   dx    : spatial grid spacing (same in x and y)
-#   dt    : time step — must satisfy dt <= dx^2 / (4*max(alpha))
+# heatSolver(T0, alpha, dx, dt) → stateful step function
 #
-# Returns a function  t -> T(t)  where t is physical time.
-heatSolver(T0, alpha, dx, dt) = t -> heatEvolve(T0, alpha, dt/dx^2, round(t/dt))
+# Returns a closure over a cell.  Each call:
+#   1. Returns the current temperature field (T0 on first call).
+#   2. Advances the simulation by one dt.
+# The argument is ignored — pass anything (animate2D supplies the frame index).
+heatSolver(T0, alpha, dx, dt) = {
+  state = cell(T0);
+  r = dt / dx^2;
+  _ -> { T = get(state); set(state, heatStep(T, alpha, r)); T }
+}
 
 # ── Convenience constructors ──────────────────────────────────────────────────
 
-# Disk mask: 1 inside disk of radius r_frac*N centred at (cx_frac, cy_frac),
-# 0 outside.  Fractions are in [0,1] relative to grid size N.
+# diskMask: 1 inside disk of radius r_frac*N centred at (cx_frac, cy_frac), 0 outside
 diskMask(N, cx_frac, cy_frac, r_frac) = {
   cx = cx_frac * N;  cy = cy_frac * N;  R = r_frac * N;
   tensor((i,j) -> if((i-cx)^2 + (j-cy)^2 <= R^2, 1.0, 0.0), N, N)
 }
 
-# heatSolverDisk(N, dx, dt, T_disk, T_air, a_disk, a_air)
-#   Build T0 and alpha for a centred cold disk in hot air, then return solver.
+# heatSolverDisk: cold disk in hot air, returns a stateful solver
 heatSolverDisk(N, dx, dt, T_disk, T_air, a_disk, a_air) = {
   mask  = diskMask(N, 0.5, 0.5, 0.25);
   T0    = lerp(T_air, T_disk, mask);
@@ -67,20 +75,16 @@ heatSolverDisk(N, dx, dt, T_disk, T_air, a_disk, a_air) = {
   heatSolver(T0, alpha, dx, dt)
 }
 
-# ── Demo configuration ────────────────────────────────────────────────────────
+# ── Demo ──────────────────────────────────────────────────────────────────────
 #
-# Cold disk (250 K, high diffusivity) in hot air (500 K, low diffusivity).
-# Grid: 20×20, spatial step dx = 1.0 (non-dimensional).
-# Diffusivities: disk α=1.0, air α=0.05.
-# CFL limit: dt ≤ dx²/(4·1.0) = 0.25  →  use dt=0.2.
+# Cold disk (250 K, α=1.0) in hot air (500 K, α=0.05).
+# Grid: 20×20, dx=1.0, dt=0.2.  CFL limit: dt ≤ dx²/(4·1.0) = 0.25 ✓
 #
-# Load this file, then:
-#   solver_demo(0)    # initial condition
-#   solver_demo(2)    # t=2 (10 steps)
-#   solver_demo(10)   # t=10 (50 steps, ~0.4 s)
-#   solver_demo(20)   # t=20 (100 steps, ~0.8 s) — mostly equilibrated
+# animate2D(solver_demo, 100)          — 100 frames at dt=0.2  (t = 0 … 20)
+# animate2D(solver_demo, 100, 15)      — same at 15 fps
+# mean(solver_demo())                  — advance one step, check mean ≈ 449.375
 
-N_demo   = 20
-dx_demo  = 1.0
-dt_demo  = 0.2
-solver_demo   = heatSolverDisk(N_demo, dx_demo, dt_demo, 250.0, 500.0, 1.0, 0.05)
+N_demo      = 20
+dx_demo     = 1.0
+dt_demo     = 0.2
+solver_demo = heatSolverDisk(N_demo, dx_demo, dt_demo, 250.0, 500.0, 1.0, 0.05)
