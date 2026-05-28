@@ -829,6 +829,34 @@ run "ffc.axes_tuple"    "shape(fftn(tensor((r,c)->r+c*i, 3, 4), (0,1)))" "[3, 4]
 run "ffc.real_input_ct" "T = tensor(k->k, 4); shape(fftn(T))"         "[4]"
 run "ffc.re_im_pair"    "Re = zeros(4); Im = tensor(k->k, 4); shape(fftn(Re, Im))" "[4]"
 
+# ── zero-arg lambdas ─────────────────────────────────────────────────────────
+section "ZERO-ARG LAMBDA"
+run "zl.call"           "f = () -> 42 : f()"                    "42"
+run "zl.inline"         "(() -> 99)()"                          "99"
+run "zl.tensor_ret"     "f = () -> [1,2,3] : f()"              "[1, 2, 3]"
+run "zl.side_effect"    "{n = cell(0); tick = () -> set(n, get(n)+1); tick(); get(n)}"  "1"
+
+# ── cell / get / set ──────────────────────────────────────────────────────────
+section "CELL"
+# Basic read/write
+run "cell.init"         "{c = cell(10); get(c)}"                "10"
+run "cell.set"          "{c = cell(10); set(c, 42); get(c)}"    "42"
+run "cell.set_ret"      "{c = cell(0); set(c, 99)}"             "99"
+# Shared identity: two names, one cell
+run "cell.shared"       "{c = cell(1); d = c; set(c, 2); get(d)}"  "2"
+# Tensor in a cell
+run "cell.tensor"       "{c = cell([1,2,3]); set(c, get(c)*2); get(c)}"  "[2, 4, 6]"
+# Stateful counter via zero-arg lambda
+run "cell.counter"      "{n = cell(0); f = () -> set(n, get(n)+1); f(); f(); f(); get(n)}"  "3"
+# Step-based accumulation
+run "cell.step_vec"     "{s = cell([0,0,0]); bump = () -> set(s, get(s)+1); bump(); bump(); get(s)}"  "[2, 2, 2]"
+# Display format
+run "cell.display_num"  "cell(42)"                              "cell(42)"
+run "cell.display_vec"  "cell([1,2,3])"                         "cell([1, 2, 3])"
+# Errors
+run_err "cell.err_get"  "get(5)"
+run_err "cell.err_set"  "set(5, 10)"
+
 # ── [] array literals (Expr::Array) ──────────────────────────────────────────
 section "ARRAY LITERALS"
 # Basic construction

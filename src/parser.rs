@@ -408,6 +408,14 @@ impl Parser {
                     if !had_rparen { self.eat(&Token::RParen)?; }
                     Ok(Expr::Lambda(params, body.into()))
                 } else {
+                    // () -> expr  — zero-arg lambda
+                    if *self.peek() == Token::RParen
+                        && matches!(self.toks.get(self.pos + 1), Some(Token::Arrow))
+                    {
+                        self.bump(); // consume )
+                        self.bump(); // consume ->
+                        return Ok(Expr::Lambda(vec![], self.expr()?.into()));
+                    }
                     // Empty parens → empty tuple
                     if *self.peek() == Token::RParen {
                         self.bump();

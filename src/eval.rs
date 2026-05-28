@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::cell::RefCell;
 use crate::ast::{Expr, BlockStmt, Op, Def};
 
 // ── Values ────────────────────────────────────────────────────────────────────
@@ -18,6 +19,10 @@ pub enum Val {
     Tensor { data: Vec<f64>, shape: Vec<usize> },
     /// Complex tensor: two parallel real arrays (re, im) with identical shape.
     ComplexTensor { re: Vec<f64>, im: Vec<f64>, shape: Vec<usize> },
+    /// Mutable cell — a shared, reference-counted mutable container.
+    /// Cloning a Cell shares the same RefCell (identity semantics).
+    /// Created with cell(v); read with get(c); written with set(c, v).
+    Cell(Arc<RefCell<Val>>),
 }
 
 impl Val {
@@ -30,6 +35,7 @@ impl Val {
             Val::Tuple(..)            => Err(format!("{ctx}: expected a number, got a tuple")),
             Val::Tensor { .. }        => Err(format!("{ctx}: expected a number, got a tensor")),
             Val::ComplexTensor { .. } => Err(format!("{ctx}: expected a number, got a complex tensor")),
+            Val::Cell(..)             => Err(format!("{ctx}: expected a number, got a cell (use get())")),
         }
     }
 }
@@ -77,6 +83,7 @@ impl Env {
             "if",
             "fft", "ifft",
             "sum", "prod", "integral", "deriv", "map", "graph", "animate2D", "animate2D_raw",
+            "cell", "get", "set",
             // Tensor ops
             "tensor", "matrix", "zeros", "ones", "eye", "diag",
             "shape", "rows", "cols", "transpose", "trace", "norm",
@@ -123,6 +130,7 @@ pub fn is_protected(name: &str) -> bool {
         | "if"
         | "fft" | "ifft"
         | "sum" | "prod" | "integral" | "deriv" | "map" | "graph" | "animate2D" | "animate2D_raw"
+        | "cell" | "get" | "set"
         | "tensor" | "matrix" | "zeros" | "ones" | "eye" | "diag"
         | "shape" | "rows" | "cols" | "transpose" | "trace" | "norm"
         | "row" | "col" | "matmul" | "outer"
@@ -195,6 +203,7 @@ pub fn fmt_val(v: &Val) -> String {
         }
         Val::Fn(params, _, _) => format!("<fn({}) = …>", params.join(", ")),
         Val::Builtin(name) => format!("<builtin {name}>"),
+        Val::Cell(c) => format!("cell({})", fmt_val(&c.borrow())),
         Val::Tuple(items) => format!("({})", items.iter().map(fmt_val).collect::<Vec<_>>().join(", ")),
         Val::Tensor { data, shape } => {
             if shape.is_empty() || data.is_empty() { return "[]".into(); }
@@ -274,6 +283,7 @@ fn to_complex(v: Val) -> Result<(f64, f64), String> {
         Val::Tuple(..)            => Err("expected a number, got a tuple".into()),
         Val::Tensor { .. }        => Err("expected a number, got a tensor".into()),
         Val::ComplexTensor { .. } => Err("expected a number, got a complex tensor".into()),
+        Val::Cell(..)             => Err("expected a number, got a cell (use get())".into()),
     }
 }
 
@@ -1047,6 +1057,35 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
         }
 
         // ── Function combinators ──────────────────────────────────────────────
+        // ── Mutable cells ─────────────────────────────────────────────────────
+        // cell(v)    — create a new mutable cell holding v
+        // get(c)     — read the current value of cell c
+        // set(c, v)  — write v into c; returns v (so set can be used inline)
+        "cell" => {
+            arity("cell", 1, vals.len())?;
+            let v = vals.into_iter().next().unwrap();
+            Ok(Val::Cell(Arc::new(RefCell::new(v))))
+        }
+        "get" => {
+            arity("get", 1, vals.len())?;
+            match vals.into_iter().next().unwrap() {
+                Val::Cell(c) => Ok(c.borrow().clone()),
+                other => Err(format!("get: expected a cell, got {}", fmt_val(&other))),
+            }
+        }
+        "set" => {
+            arity("set", 2, vals.len())?;
+            let mut it = vals.into_iter();
+            match it.next().unwrap() {
+                Val::Cell(c) => {
+                    let v = it.next().unwrap();
+                    *c.borrow_mut() = v.clone();
+                    Ok(v)
+                }
+                other => Err(format!("set: first arg must be a cell, got {}", fmt_val(&other))),
+            }
+        }
+
         "compose" => {
             arity("compose", 2, vals.len())?;
             let mut it = vals.into_iter();
@@ -2264,9 +2303,16 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                 }
                 return Err(format!("function expects {n} args, got 1"));
             }
+            // k == n: direct apply (catches the zero-arg case k==n==0 before the
+            // vacuous all_n_seqs branch below would produce an empty tensor).
+            if k == n {
+                let mut local = make_local(env, captured);
+                for (p, v) in params.iter().zip(args) { local.vars.insert(p.clone(), v); }
+                return eval(body, &local);
+            }
             // k args, all n-element sequences → map with destructuring
             // Sequences can be n-Tuples or 1-D Tensors of size n
-            let all_n_seqs = args.iter().all(|a| match a {
+            let all_n_seqs = k > 0 && args.iter().all(|a| match a {
                 Val::Tuple(v) => v.len() == n,
                 Val::Tensor { data, shape } => shape.len() == 1 && data.len() == n,
                 _ => false,
@@ -2324,12 +2370,6 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                     Ok(Val::Tuple(res))
                 };
             }
-            // k == n scalar args → direct apply
-            if k == n {
-                let mut local = make_local(env, captured);
-                for (p, v) in params.iter().zip(args) { local.vars.insert(p.clone(), v); }
-                return eval(body, &local);
-            }
             Err(format!("function expects {n} args, got {k}"))
         }
         Val::Num(s) => {
@@ -2357,6 +2397,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                         return Ok(maybe_real(re_scaled, im_scaled, shape.clone()));
                     }
                     Val::Builtin(_) => return Err("cannot scale a builtin function".into()),
+                    Val::Cell(..) => return Err("cannot scale a cell (use get/set)".into()),
                 }
             }
             let nums: Result<Vec<f64>, _> = args.into_iter().map(|v| v.num("scalar-apply")).collect();
@@ -2378,6 +2419,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
         }
         Val::Tensor { .. } => Err("tensors are not callable".into()),
         Val::ComplexTensor { .. } => Err("complex tensors are not callable".into()),
+        Val::Cell(..) => Err("cells are not callable (use get/set)".into()),
     }
 }
 
@@ -2765,7 +2807,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                               im.into_iter().map(|x| -x).collect(),
                               shape))
             }
-            Val::Fn(..) | Val::Builtin(_) => Err("unary minus: expected a number".into()),
+            Val::Fn(..) | Val::Builtin(_) | Val::Cell(..) => Err("unary minus: expected a number".into()),
         },
         Expr::BinOp(l, op, r) => {
             let lv = eval(l, env)?;
