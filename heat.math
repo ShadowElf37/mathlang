@@ -75,12 +75,12 @@ heatSolverDisk(N, dx, dt, T_disk, T_air, a_disk, a_air) = {
 # CFL limit: dt ≤ dx²/(4·1.0) = 0.25  →  use dt=0.2.
 #
 # Load this file, then:
-#   solver(0)    # initial condition
-#   solver(2)    # t=2 (10 steps)
-#   solver(10)   # t=10 (50 steps, ~0.4 s)
-#   solver(20)   # t=20 (100 steps, ~0.8 s) — mostly equilibrated
+#   solver_demo(0)    # initial condition
+#   solver_demo(2)    # t=2 (10 steps)
+#   solver_demo(10)   # t=10 (50 steps, ~0.4 s)
+#   solver_demo(20)   # t=20 (100 steps, ~0.8 s) — mostly equilibrated
 
 N_demo   = 20
 dx_demo  = 1.0
 dt_demo  = 0.2
-solver   = heatSolverDisk(N_demo, dx_demo, dt_demo, 250.0, 500.0, 1.0, 0.05)
+solver_demo   = heatSolverDisk(N_demo, dx_demo, dt_demo, 250.0, 500.0, 1.0, 0.05)
