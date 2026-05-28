@@ -87,6 +87,8 @@ GPU(var1, var2, ...) {
 - Local bindings inside the block (e.g. `intermediate = ...`) are GPU-local and
   never visible on the CPU side.
 
+(N.B.: there may not be a need for the vars to be specified for movement, maybe you can analyze the code to find which vars need moving and only move them, automatically - then the block looks like `GPU{code}`)
+
 ### Parser addition (ast.rs + parser.rs):
 ```rust
 // ast.rs — new Expr variant:
