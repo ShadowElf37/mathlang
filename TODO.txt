@@ -16,4 +16,4 @@
 
 7. [DONE] unify REPL and file evaluation — !commands now work in .math files (import_file routes !-prefixed lines to bang_command)
 
-7.1 refactor README to be file/REPL-focused rather than cli-focused
+7.1 [DONE] refactor README to be file/REPL-focused + added philosophy section
