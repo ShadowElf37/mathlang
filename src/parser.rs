@@ -453,15 +453,16 @@ impl Parser {
                     }
                 }
             }
-            // [] tensor literals — same semantics as () but with square brackets.
-            // [a, b, c] → Tuple (auto-promotes to Tensor when all-numeric).
-            // [1,2;3,4] → TensorLit (matrix).
-            // []        → empty Tuple.
+            // [] tensor literals — always produce a numeric tensor; error if elements are not numbers.
+            // [a, b, c]  → Expr::Array (1-D tensor; all elements must evaluate to numbers)
+            // [1,2;3,4]  → Expr::TensorLit (2-D matrix; evaluated as before)
+            // []         → empty Expr::Array → empty 1-D tensor
+            // [x]        → Expr::Array([x]) — a length-1 tensor (unlike (x) which is just x)
             Token::LBracket => {
                 self.bump();
                 if *self.peek() == Token::RBracket {
                     self.bump();
-                    return Ok(Expr::Tuple(vec![]));
+                    return Ok(Expr::Array(vec![]));
                 }
                 let first = self.expr()?;
                 let mut row0 = vec![first];
@@ -471,6 +472,7 @@ impl Parser {
                     row0.push(self.expr()?);
                 }
                 if *self.peek() == Token::Semicolon {
+                    // Matrix literal [1,2;3,4]
                     let mut rows = vec![row0];
                     while *self.peek() == Token::Semicolon {
                         self.bump();
@@ -487,11 +489,7 @@ impl Parser {
                     return Ok(Expr::TensorLit(rows));
                 }
                 self.eat(&Token::RBracket)?;
-                if row0.len() == 1 {
-                    Ok(row0.into_iter().next().unwrap())
-                } else {
-                    Ok(Expr::Tuple(row0))
-                }
+                Ok(Expr::Array(row0))
             }
             Token::Minus => { self.bump(); Ok(Expr::Neg(self.primary()?.into())) }
             Token::Ident(name) => {

@@ -2520,6 +2520,44 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
             }
             Ok(Val::Tuple(vals))
         }
+        Expr::Array(exprs) => {
+            // [a, b, c] — explicit 1-D tensor literal.
+            // All elements must evaluate to numbers; non-numeric values are an error.
+            // Unlike (a,b,c) which auto-promotes, [] always means tensor.
+            // [x]  → length-1 tensor;  [] → empty tensor.
+            if exprs.is_empty() {
+                return Ok(Val::Tensor { data: vec![], shape: vec![0] });
+            }
+            let mut data = Vec::with_capacity(exprs.len());
+            let mut re_data: Vec<f64> = Vec::new();
+            let mut im_data: Vec<f64> = Vec::new();
+            let mut has_complex = false;
+            for expr in exprs {
+                match eval(expr, env)? {
+                    Val::Num(x) => {
+                        data.push(x);
+                        re_data.push(x);
+                        im_data.push(0.0);
+                    }
+                    Val::Complex(a, b) => {
+                        has_complex = true;
+                        re_data.push(a);
+                        im_data.push(b);
+                        data.push(a); // placeholder, unused if complex
+                    }
+                    other => return Err(format!(
+                        "[] requires numeric elements; got {}. Use () for tuples.",
+                        fmt_val(&other)
+                    )),
+                }
+            }
+            let n = re_data.len();
+            if has_complex {
+                Ok(maybe_real(re_data, im_data, vec![n]))
+            } else {
+                Ok(Val::Tensor { data, shape: vec![n] })
+            }
+        }
         Expr::TensorLit(rows) => {
             if rows.is_empty() { return Ok(Val::Tensor { data: vec![], shape: vec![0, 0] }); }
             let r = rows.len();

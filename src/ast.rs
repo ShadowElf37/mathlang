@@ -8,6 +8,7 @@ pub enum Expr {
     Lambda(Vec<String>, Box<Expr>),
     Tuple(Vec<Expr>),
     TensorLit(Vec<Vec<Expr>>),   // (1,2; 3,4) — rows separated by ;
+    Array(Vec<Expr>),            // [a,b,c]    — 1-D tensor literal; all elements must be numeric
     Index(Box<Expr>, Box<Expr>),
     Block(Vec<BlockStmt>),
     Apply(Box<Expr>, Vec<Expr>),
