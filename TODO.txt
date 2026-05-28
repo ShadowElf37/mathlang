@@ -1,23 +1,27 @@
-1. [DONE] bytecode VM for user-defined functions: lazy OnceLock compilation, stack-based
-   interpreter, tensor indexing, nested lambdas (MakeClosure), non-recursive Def::Func
-   in blocks. Recursive functions and slices fall back transparently to tree-walk eval.
+1. [DONE] bytecode VM — lazy OnceLock compilation, stack-based interpreter, tensor
+   indexing (Index), nested lambdas (MakeClosure), non-recursive Def::Func in blocks.
 
-2. gpu (in progress, see CONSIDERATIONS.md)
+   Still possible to add to the bytecode VM:
+   1a. Slices in compiled bodies: T[lo..hi] currently falls back; add a Slice instruction
+   1b. Ranges in compiled bodies: lo..hi currently falls back; produces a 1-D tensor
+   1c. Tensor literals: (1,2; 3,4) currently falls back; straightforward to compile
+   1d. Recursive local functions: needs MakeRecFn or a Cell-based two-pass trick
+   1e. Loop instruction: bounded iteration (sum(f, lo, hi) style) compiled to a flat
+       loop in the VM — also the only recursion-analogue that is GPU-safe
+   1f. Move Instruction enum to src/vm.rs so src/gpu/ can import it without pulling
+       in all of eval.rs (deferred until eval.rs is split, see item 9)
+   1g. LoadBuffer instruction: GPU-side tensor indexing for captured buffers inside
+       GPU lambda bodies (v2 GPU feature, see CONSIDERATIONS.md §15)
 
-3. [DONE] `!savetensor <var> <fp>` to save in some serialized binary format (should be simple, just for tensors, maybe a shape header and just bytes of data, one tensor per file)
+2. GPU backend (in progress, see CONSIDERATIONS.md)
 
-3.1. [DONE] `!loadtensor <fp>` loads serialized tensor
-
-3.5. [DONE] `!savehdf5 <var> <fp>` saves a tensor in hdf5 format
-
-4. consider removing : syntax for final evaluated expression in a block and the cli, as it's synonymous with ; for the final expression, and the comma separation after : could be simplified to a tuple put in by the user
+4. Consider removing : syntax for the final expression in blocks and the CLI — it is
+   synonymous with ; for the last expression, and tuple separation after : could just
+   be written explicitly by the user.
 
 5. Claude Opus exhaustive ergonomics and bug check
 
-6. [DONE] !print [text with {expr} interpolation]
+8. Type hinting enforced by the interpreter (fn, scalar, tensor, complex?)
 
-7. [DONE] unify REPL and file evaluation — !commands now work in .math files (import_file routes !-prefixed lines to bang_command)
-
-7.1 [DONE] refactor README to be file/REPL-focused + added philosophy section
-
-8. type hinting (enforced by the interpreter)
+9. Split eval.rs — it is too large; defer until the GPU eval path (gpu_eval.rs) is
+   designed, so the split boundary is clear.
