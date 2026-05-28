@@ -17,3 +17,9 @@
 8. [DONE] help text discrepancy — fftn/ifftn now show identical signatures; added shift/roll/lerp/clamp/animate2D
 
 9. animator colorbar is on top of part of the rendered grid, and its background is blue and not transparent - transparent background colorbar would be fine
+
+10. O(n²) memory from env cloning: every function definition does env.vars.clone(),
+    which deep-copies all Val::Tensor data (Vec<f64>) into the captured env.
+    With n functions and large tensors, this is O(n) copies of each tensor.
+    Fix: wrap env.vars in Arc<HashMap<String,Val>> with copy-on-write on mutation,
+    so cloning the env is O(1) and only modified entries allocate. Non-trivial refactor.
