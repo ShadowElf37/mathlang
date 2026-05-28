@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::lexer::Lexer;
 use crate::ast::Def;
 use crate::parser::Parser;
-use crate::eval::{Val, Env, eval, fmt_val, is_protected};
+use crate::eval::{Val, Env, TData, eval, fmt_val, is_protected};
 
 pub const BUILTIN_FNS: &[&str] = &[
     "id", "fact", "factorial", "delta",
@@ -39,6 +39,8 @@ pub const BUILTIN_FNS: &[&str] = &[
     "shape", "rows", "cols", "transpose", "trace", "norm",
     "row", "col", "matmul", "outer",
     "det", "inv", "solve",
+    "eig", "eigvals", "eig_top", "eig_bot",
+    "qr", "diagonalize",
     "hstack", "vstack", "tomat",
     "lerp", "clamp", "shift", "roll",
     "lingrid",
@@ -143,7 +145,7 @@ impl rustyline::completion::Completer for MathHelper {
         -> rustyline::Result<(usize, Vec<String>)>
     {
         if line.starts_with('!') {
-            let cmds = ["!clear", "!defs", "!help", "!include ", "!version"];
+            let cmds = ["!clear", "!defs", "!help", "!include ", "!loadtensor ", "!savetensor ", "!version"];
             return Ok((0, cmds.iter().filter(|&&c| c.starts_with(line)).map(|s| s.to_string()).collect()));
         }
         let start = line[..pos].rfind(|c: char| !c.is_alphanumeric() && c != '_').map_or(0, |i| i+1);
@@ -310,11 +312,47 @@ pub fn import_file(path: &str, display: &str, env: &mut Env, verbose: bool) {
     }
 }
 
+// ── Tensor serialization ──────────────────────────────────────────────────────
+
+const TENSOR_MAGIC: &[u8; 8] = b"MLTENSOR";
+
+fn save_tensor(path: &str, data: &[f64], shape: &[usize]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    f.write_all(TENSOR_MAGIC)?;
+    f.write_all(&(shape.len() as u64).to_le_bytes())?;
+    for &dim in shape { f.write_all(&(dim as u64).to_le_bytes())?; }
+    for &x in data   { f.write_all(&x.to_le_bytes())?; }
+    Ok(())
+}
+
+fn load_tensor(path: &str) -> Result<(Vec<f64>, Vec<usize>), String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    if bytes.len() < 16 { return Err("file too short".into()); }
+    if &bytes[..8] != TENSOR_MAGIC { return Err("not a mathlang tensor file".into()); }
+    let ndim = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
+    let header_end = 16 + ndim * 8;
+    if bytes.len() < header_end { return Err("truncated header".into()); }
+    let shape: Vec<usize> = (0..ndim)
+        .map(|i| u64::from_le_bytes(bytes[16+i*8..16+(i+1)*8].try_into().unwrap()) as usize)
+        .collect();
+    let nelem: usize = shape.iter().product();
+    if bytes.len() < header_end + nelem * 8 {
+        return Err(format!("truncated data: need {nelem} f64s"));
+    }
+    let data: Vec<f64> = (0..nelem)
+        .map(|i| f64::from_le_bytes(bytes[header_end+i*8..header_end+(i+1)*8].try_into().unwrap()))
+        .collect();
+    Ok((data, shape))
+}
+
 fn bang_command(cmd: &str, env: &mut Env) {
     let (name, arg) = cmd.split_once(' ').map_or((cmd, ""), |(a, b)| (a, b.trim()));
     match name.trim() {
         "help" => print!(concat!(
             "Commands:  !help  !include <file>  !defs  !clear  !version\n",
+            "           !savetensor <var> <file>  — save tensor to binary .mlt file\n",
+            "           !loadtensor <var> <file>  — load tensor from .mlt file\n",
             "Init file: ~/.mathlangrc (auto-imported on start; override with $MATHLANG_INIT)\n",
             "Exit:      quit / exit / Ctrl-D\n\n",
             "Syntax:    x = 3              variable\n",
@@ -391,6 +429,39 @@ fn bang_command(cmd: &str, env: &mut Env) {
             }
         }
         "version" => println!("mathlang v{}", env!("CARGO_PKG_VERSION")),
+        "savetensor" => {
+            let mut it = arg.splitn(2, ' ');
+            let (var, fp) = (it.next().unwrap_or("").trim(), it.next().unwrap_or("").trim());
+            if var.is_empty() || fp.is_empty() {
+                eprintln!("usage: !savetensor <var> <file>"); return;
+            }
+            match env.vars.get(var) {
+                Some(Val::Tensor { data, shape }) => {
+                    let (d, s) = (data.to_vec(), shape.clone());
+                    match save_tensor(&expand_path(fp), &d, &s) {
+                        Ok(()) => println!("saved {var} ({} elements) to {fp}", d.len()),
+                        Err(e) => eprintln!("savetensor: {e}"),
+                    }
+                }
+                Some(_) => eprintln!("savetensor: {var} is not a tensor"),
+                None    => eprintln!("savetensor: {var} not defined"),
+            }
+        }
+        "loadtensor" => {
+            let mut it = arg.splitn(2, ' ');
+            let (var, fp) = (it.next().unwrap_or("").trim(), it.next().unwrap_or("").trim());
+            if var.is_empty() || fp.is_empty() {
+                eprintln!("usage: !loadtensor <var> <file>"); return;
+            }
+            match load_tensor(&expand_path(fp)) {
+                Ok((data, shape)) => {
+                    let n = data.len();
+                    env.define(var.to_string(), Val::Tensor { data: TData::new(data), shape });
+                    println!("loaded {var} ({n} elements) from {fp}");
+                }
+                Err(e) => eprintln!("loadtensor: {e}"),
+            }
+        }
         "defs" | "vars" | "fns" => show_defs(env),
         "clear" => {
             let n = env.vars.iter().filter(|(k,_)| {

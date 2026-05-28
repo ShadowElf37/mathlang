@@ -990,6 +990,51 @@ run "clamp.vec_lo"      "clamp([-5,-3,-1], -2, 0)"             "[-2, -2, -1]"
 run "clamp.negrange"    "clamp(-1.5, -2, -1)"                  "-1.5"
 run_err "clamp.bad_range"   "clamp(1, 5, 0)"
 
+# ── !savetensor / !loadtensor ─────────────────────────────────────────────────
+section "SAVETENSOR / LOADTENSOR"
+_TMLT=$(mktemp /tmp/mlt_test_XXXXXX.mlt)
+
+_repl_check() {
+    local label="$1" script="$2" pat="$3"
+    local out
+    out=$(printf '%s\n' "$script" | "$M" 2>&1)
+    if echo "$out" | grep -qE "$pat"; then
+        PASS=$((PASS+1))
+    else
+        FAIL=$((FAIL+1))
+        FAILS+=("$label | pat='$pat' | got='$(norm "$out")'")
+    fi
+}
+
+_repl_check "mlt.roundtrip.val"   "T=(1.5,2.5,3.5)
+!savetensor T $_TMLT
+!loadtensor U $_TMLT
+U[1]"                                      "2\.5"
+
+_repl_check "mlt.roundtrip.shape" "M=(1,2;3,4)
+!savetensor M $_TMLT
+!loadtensor N $_TMLT
+shape(N)"                                  "\[2, 2\]"
+
+_repl_check "mlt.roundtrip.3d"    "C=ones(2,3,4)
+!savetensor C $_TMLT
+!loadtensor D $_TMLT
+shape(D)"                                  "\[2, 3, 4\]"
+
+_repl_check "mlt.save_confirms"   "V=eye(3)
+!savetensor V $_TMLT"                      "saved V"
+
+_repl_check "mlt.load_confirms"   "!loadtensor W $_TMLT" "loaded W"
+
+_repl_check "mlt.err_undef"       "!savetensor nosuchvar /tmp/x.mlt" \
+                                   "not defined"
+_repl_check "mlt.err_nonten"      "x=42
+!savetensor x /tmp/x.mlt"                 "not a tensor"
+_repl_check "mlt.err_nofile"      "!loadtensor Z /tmp/mlt_no_such_file_xyz.mlt" \
+                                   "loadtensor:"
+
+rm -f "$_TMLT"
+
 # ── print summary ─────────────────────────────────────────────────────────────
 echo
 echo "================================"
