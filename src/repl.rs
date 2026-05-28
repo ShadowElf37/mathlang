@@ -30,7 +30,7 @@ pub const BUILTIN_FNS: &[&str] = &[
     "fft", "ifft",
     "sum", "prod", "integral", "deriv", "map",
     "sinc", "sech", "csch", "erf", "erfc", "j0", "j1", "jinc",
-    "graph",
+    "graph", "animate2D", "animate2D_raw",
     // Tensor ops
     "tensor", "matrix", "zeros", "ones", "eye", "diag",
     "shape", "rows", "cols", "transpose", "trace", "norm",
