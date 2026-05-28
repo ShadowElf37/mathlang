@@ -417,7 +417,7 @@ m 're(3 + 4i), im(3 + 4i)'   # 3  4
 
 **Tensor reduce:** `sum(T)`, `prod(T)`, `sum(T,axis)`, `prod(T,axis)`, `norm(T)`, `trace(T)`, `mean(T)`, `std(T)`, `var(T)`
 
-**Linear algebra:** `matmul(A,B)` / `A @ B`, `det(A)`, `inv(A)`, `solve(A,b)`, `row(T,i)`, `col(T,j)`
+**Linear algebra:** `matmul(A,B)` / `A @ B`, `det(A)`, `inv(A)`, `solve(A,b)`, `row(T,i)`, `col(T,j)`, `eig(A)` → `(eigenvalues, V)`, `eigvals(A)`, `eig_top(A)` → `(λ, v)`, `eig_bot(A)` → `(λ, v)`, `qr(A)` → `(Q, R)`, `diagonalize(A)` → `(V, D, V⁻¹)`
 
 **Grid:** `lingrid(start,end,counts,f)` — n-D uniform grid; `f` may return a scalar, tuple, or tensor
 

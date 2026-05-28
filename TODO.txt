@@ -1,6 +1,7 @@
-1. eigenvalues and eigenvectors
+1. [DONE] eigenvalues and eigenvectors — eig, eigvals, eig_top, eig_bot, qr, diagonalize
 
-1.5. matrix exp(M) (but exp would no longer broadcast, which is unintuitive - maybe separate matrix_exp())
+1.5. [OBSOLETE] matrix exp(M) — expressible as V @ diag(map(exp, eigvals(A))) @ V_inv
+     via diagonalize; no dedicated builtin needed, and exp stays elementwise as expected
 
 2. [DONE] accept [] for tensor literals — [a,b,c] and [1,2;3,4] now parsed same as (…)
 
@@ -19,7 +20,7 @@
 
 8. [DONE] help text discrepancy — fftn/ifftn now show identical signatures; added shift/roll/lerp/clamp/animate2D
 
-9. animator colorbar is on top of part of the rendered grid, and its background is blue and not transparent - transparent background colorbar would be fine
+9. [DONE] animator colorbar is on top of part of the rendered grid, and its background is blue and not transparent - transparent background colorbar would be fine
 
 10. [DONE] O(n²) memory from env cloning: every function definition does env.vars.clone(),
     which deep-copies all Val::Tensor data (Vec<f64>) into the captured env.

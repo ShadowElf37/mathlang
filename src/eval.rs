@@ -150,6 +150,8 @@ impl Env {
             "shape", "rows", "cols", "transpose", "trace", "norm",
             "row", "col", "matmul", "outer",
             "det", "inv", "solve",
+            "eig", "eigvals", "eig_top", "eig_bot",
+            "qr", "diagonalize",
             "hstack", "vstack", "tomat",
             "lerp", "clamp", "shift", "roll",
             "lingrid",
@@ -196,6 +198,8 @@ pub fn is_protected(name: &str) -> bool {
         | "shape" | "rows" | "cols" | "transpose" | "trace" | "norm"
         | "row" | "col" | "matmul" | "outer"
         | "det" | "inv" | "solve"
+        | "eig" | "eigvals" | "eig_top" | "eig_bot"
+        | "qr" | "diagonalize"
         | "hstack" | "vstack" | "tomat"
         | "lerp" | "clamp" | "shift" | "roll"
         | "lingrid"
@@ -609,6 +613,106 @@ fn solve_nxn(a: &[f64], b: &[f64], n: usize) -> Result<Vec<f64>, String> {
         }
     }
     Ok((0..n).map(|i| aug[i*w+n]).collect())
+}
+
+fn eye_n(n: usize) -> Vec<f64> {
+    let mut e = vec![0.0f64; n * n];
+    for i in 0..n { e[i*n+i] = 1.0; }
+    e
+}
+
+fn matmul_nn(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
+    let mut c = vec![0.0f64; n * n];
+    for i in 0..n {
+        for k in 0..n {
+            let aik = a[i*n+k];
+            for j in 0..n { c[i*n+j] += aik * b[k*n+j]; }
+        }
+    }
+    c
+}
+
+/// Full QR via Householder reflections. Returns (Q: m×m, R: m×n).
+fn qr_householder(a: &[f64], m: usize, n: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut r = a.to_vec();   // m×n row-major
+    let mut q = eye_n(m);     // m×m
+    for k in 0..n.min(m.saturating_sub(1)) {
+        let len = m - k;
+        let x: Vec<f64> = (k..m).map(|i| r[i*n+k]).collect();
+        let norm_x: f64 = x.iter().map(|v| v*v).sum::<f64>().sqrt();
+        if norm_x < 1e-14 { continue; }
+        let mut hv = x;
+        let sign = if hv[0] >= 0.0 { 1.0 } else { -1.0 };
+        hv[0] += sign * norm_x;
+        let norm_hv: f64 = hv.iter().map(|v| v*v).sum::<f64>().sqrt();
+        if norm_hv < 1e-14 { continue; }
+        for v in &mut hv { *v /= norm_hv; }
+        for j in k..n {
+            let dot: f64 = (0..len).map(|i| hv[i] * r[(i+k)*n+j]).sum();
+            for i in 0..len { r[(i+k)*n+j] -= 2.0 * hv[i] * dot; }
+        }
+        for i in 0..m {
+            let dot: f64 = (0..len).map(|j| q[i*m+(j+k)] * hv[j]).sum();
+            for j in 0..len { q[i*m+(j+k)] -= 2.0 * hv[j] * dot; }
+        }
+    }
+    (q, r)
+}
+
+fn eig_qr_impl(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut ak = a.to_vec();
+    let mut eigvecs = eye_n(n);
+    for _ in 0..2000 {
+        let (q, r) = qr_householder(&ak, n, n);
+        ak = matmul_nn(&r, &q, n);
+        eigvecs = matmul_nn(&eigvecs, &q, n);
+        let off: f64 = (0..n).flat_map(|i| (0..i).map(move |j| (i, j)))
+            .map(|(i, j)| ak[i*n+j] * ak[i*n+j])
+            .sum::<f64>()
+            .sqrt();
+        if off < 1e-12 { break; }
+    }
+    let eigenvalues: Vec<f64> = (0..n).map(|i| ak[i*n+i]).collect();
+    (eigenvalues, eigvecs)
+}
+
+fn power_iter(a: &[f64], n: usize) -> (f64, Vec<f64>) {
+    let init = (n as f64).sqrt().recip();
+    let mut b: Vec<f64> = vec![init; n];
+    for _ in 0..1000 {
+        let mut b_new = vec![0.0f64; n];
+        for i in 0..n { for j in 0..n { b_new[i] += a[i*n+j] * b[j]; } }
+        let norm: f64 = b_new.iter().map(|v| v*v).sum::<f64>().sqrt();
+        if norm < 1e-14 { break; }
+        let b_norm: Vec<f64> = b_new.iter().map(|v| v / norm).collect();
+        let diff: f64 = b.iter().zip(b_norm.iter()).map(|(x, y)| (x-y).abs()).sum();
+        let diff2: f64 = b.iter().zip(b_norm.iter()).map(|(x, y)| (x+y).abs()).sum();
+        b = b_norm;
+        if diff < 1e-10 || diff2 < 1e-10 { break; }
+    }
+    let mut ab = vec![0.0f64; n];
+    for i in 0..n { for j in 0..n { ab[i] += a[i*n+j] * b[j]; } }
+    let lam: f64 = b.iter().zip(ab.iter()).map(|(x, y)| x * y).sum();
+    (lam, b)
+}
+
+fn inv_power_iter(a: &[f64], n: usize) -> Result<(f64, Vec<f64>), String> {
+    let init = (n as f64).sqrt().recip();
+    let mut b: Vec<f64> = vec![init; n];
+    for _ in 0..1000 {
+        let b_new = solve_nxn(a, &b, n)?;
+        let norm: f64 = b_new.iter().map(|v| v*v).sum::<f64>().sqrt();
+        if norm < 1e-14 { break; }
+        let b_norm: Vec<f64> = b_new.iter().map(|v| v / norm).collect();
+        let diff: f64 = b.iter().zip(b_norm.iter()).map(|(x, y)| (x-y).abs()).sum();
+        let diff2: f64 = b.iter().zip(b_norm.iter()).map(|(x, y)| (x+y).abs()).sum();
+        b = b_norm;
+        if diff < 1e-10 || diff2 < 1e-10 { break; }
+    }
+    let mut ab = vec![0.0f64; n];
+    for i in 0..n { for j in 0..n { ab[i] += a[i*n+j] * b[j]; } }
+    let lam: f64 = b.iter().zip(ab.iter()).map(|(x, y)| x * y).sum();
+    Ok((lam, b))
 }
 
 // ── Tensor axis utilities ─────────────────────────────────────────────────────
@@ -1943,6 +2047,104 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                     Ok(Val::Tensor { data: TData::new(x), shape: vec![n] })
                 }
                 _ => Err("solve(A, b): A must be a 2D tensor, b must be a tuple or 1D tensor".into()),
+            }
+        }
+
+        "eig" => {
+            arity("eig", 1, vals.len())?;
+            match vals.into_iter().next().unwrap() {
+                Val::Tensor { data, shape } if shape.len() == 2 => {
+                    let (r, c) = (shape[0], shape[1]);
+                    if r != c { return Err(format!("eig: matrix must be square ({r}×{c})")); }
+                    let (lams, evecs) = eig_qr_impl(&data, r);
+                    Ok(Val::Tuple(vec![
+                        Val::Tensor { data: TData::new(lams), shape: vec![r] },
+                        Val::Tensor { data: TData::new(evecs), shape: vec![r, r] },
+                    ]))
+                }
+                Val::Tensor { .. } => Err("eig: argument must be a 2D tensor".into()),
+                _ => Err("eig: argument must be a square matrix".into()),
+            }
+        }
+        "eigvals" => {
+            arity("eigvals", 1, vals.len())?;
+            match vals.into_iter().next().unwrap() {
+                Val::Tensor { data, shape } if shape.len() == 2 => {
+                    let (r, c) = (shape[0], shape[1]);
+                    if r != c { return Err(format!("eigvals: matrix must be square ({r}×{c})")); }
+                    let (lams, _) = eig_qr_impl(&data, r);
+                    Ok(Val::Tensor { data: TData::new(lams), shape: vec![r] })
+                }
+                Val::Tensor { .. } => Err("eigvals: argument must be a 2D tensor".into()),
+                _ => Err("eigvals: argument must be a square matrix".into()),
+            }
+        }
+        "eig_top" => {
+            arity("eig_top", 1, vals.len())?;
+            match vals.into_iter().next().unwrap() {
+                Val::Tensor { data, shape } if shape.len() == 2 => {
+                    let (r, c) = (shape[0], shape[1]);
+                    if r != c { return Err(format!("eig_top: matrix must be square ({r}×{c})")); }
+                    let (lam, evec) = power_iter(&data, r);
+                    Ok(Val::Tuple(vec![
+                        Val::Num(lam),
+                        Val::Tensor { data: TData::new(evec), shape: vec![r] },
+                    ]))
+                }
+                Val::Tensor { .. } => Err("eig_top: argument must be a 2D tensor".into()),
+                _ => Err("eig_top: argument must be a square matrix".into()),
+            }
+        }
+        "eig_bot" => {
+            arity("eig_bot", 1, vals.len())?;
+            match vals.into_iter().next().unwrap() {
+                Val::Tensor { data, shape } if shape.len() == 2 => {
+                    let (r, c) = (shape[0], shape[1]);
+                    if r != c { return Err(format!("eig_bot: matrix must be square ({r}×{c})")); }
+                    let (lam, evec) = inv_power_iter(&data, r)?;
+                    Ok(Val::Tuple(vec![
+                        Val::Num(lam),
+                        Val::Tensor { data: TData::new(evec), shape: vec![r] },
+                    ]))
+                }
+                Val::Tensor { .. } => Err("eig_bot: argument must be a 2D tensor".into()),
+                _ => Err("eig_bot: argument must be a square matrix".into()),
+            }
+        }
+        "qr" => {
+            arity("qr", 1, vals.len())?;
+            match vals.into_iter().next().unwrap() {
+                Val::Tensor { data, shape } if shape.len() == 2 => {
+                    let (m, n) = (shape[0], shape[1]);
+                    if m < n { return Err(format!("qr: need m ≥ n (got {m}×{n})")); }
+                    let (q, r) = qr_householder(&data, m, n);
+                    Ok(Val::Tuple(vec![
+                        Val::Tensor { data: TData::new(q), shape: vec![m, m] },
+                        Val::Tensor { data: TData::new(r), shape: vec![m, n] },
+                    ]))
+                }
+                Val::Tensor { .. } => Err("qr: argument must be a 2D tensor".into()),
+                _ => Err("qr: argument must be a matrix".into()),
+            }
+        }
+        "diagonalize" => {
+            arity("diagonalize", 1, vals.len())?;
+            match vals.into_iter().next().unwrap() {
+                Val::Tensor { data, shape } if shape.len() == 2 => {
+                    let (r, c) = (shape[0], shape[1]);
+                    if r != c { return Err(format!("diagonalize: matrix must be square ({r}×{c})")); }
+                    let (lams, evecs) = eig_qr_impl(&data, r);
+                    let mut d = vec![0.0f64; r * r];
+                    for i in 0..r { d[i*r+i] = lams[i]; }
+                    let v_inv = inv_nxn(&evecs, r)?;
+                    Ok(Val::Tuple(vec![
+                        Val::Tensor { data: TData::new(evecs), shape: vec![r, r] },
+                        Val::Tensor { data: TData::new(d), shape: vec![r, r] },
+                        Val::Tensor { data: TData::new(v_inv), shape: vec![r, r] },
+                    ]))
+                }
+                Val::Tensor { .. } => Err("diagonalize: argument must be a 2D tensor".into()),
+                _ => Err("diagonalize: argument must be a square matrix".into()),
             }
         }
 

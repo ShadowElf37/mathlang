@@ -362,6 +362,8 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "           outer(T1, T2)  tensordot(T1,T2,n)  tensordot(T1,T2,(a,b))\n",
             "           matmul(A,B)  row col\n",
             "           det inv solve(A,b)  hstack vstack tomat(t,r,c)\n",
+            "           eig(A) eigvals(A) eig_top(A) eig_bot(A)  — eigenvalues/eigenvectors\n",
+            "           qr(A) → (Q,R)   diagonalize(A) → (V,D,V⁻¹)\n",
             "           shift(T,n,axis)  — edge-replicating shift (Neumann BCs)\n",
             "           roll(T,n,axis)   — circular/periodic shift\n",
             "           lerp(a,b,t)      — linear interpolation: a*(1-t)+b*t (elementwise)\n",
@@ -388,7 +390,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
                 }
             }
         }
-        "version" => println!("mathlang v0.10"),
+        "version" => println!("mathlang v{}", env!("CARGO_PKG_VERSION")),
         "defs" | "vars" | "fns" => show_defs(env),
         "clear" => {
             let n = env.vars.iter().filter(|(k,_)| {
