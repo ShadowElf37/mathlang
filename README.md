@@ -336,6 +336,49 @@ m 'A @ B'                           # matmul: 2D×2D, 2D×1D, 1D×2D, 1D×1D (do
 m 'outer(ones(2), ones(3))'         # outer product → shape (2, 3)
 ```
 
+### Eigenvalues, QR, and diagonalization
+
+**Eigenvalues and eigenvectors** — all functions accept square real matrices:
+
+```zsh
+m 'eigvals((4,1; 1,3))'          # [4.618…, 2.381…]   — eigenvalues only
+m 'eig((4,1; 1,3))'              # (eigenvalues, V)    — V columns are eigenvectors
+m 'eig_top((4,1; 1,3))'          # (λ_max, v)          — largest eigenpair via power iteration
+m 'eig_bot((4,1; 1,3))'          # (λ_min, v)          — smallest eigenpair via inverse iteration
+```
+
+`eig_top` and `eig_bot` are much faster than the full `eig` when only one eigenpair is needed.
+
+Eigenvalue identities:
+
+```zsh
+m 'sum(eigvals(A))'    # equals trace(A)
+m 'prod(eigvals(A))'   # equals det(A)
+```
+
+**QR decomposition** — works for m×n matrices with m ≥ n; returns full Q (m×m) and R (m×n):
+
+```zsh
+m 'qr((3,1; 1,2))'               # (Q, R)  with Q orthogonal, R upper-triangular
+m 'qr((3,1; 1,2))[0]'            # Q only
+m 'shape(qr((1,2; 3,4; 5,6))[0])'  # [3, 3]  — Q is always square
+```
+
+Verify the decomposition: `Q @ R` should recover the original matrix, and `transpose(Q) @ Q` should equal `eye(m)`.
+
+**Diagonalization** — returns `(V, D, V_inv)` where `V @ D @ V_inv = A`:
+
+```zsh
+m 'diagonalize((4,1; 1,3))'      # (V, D, inv(V))
+```
+
+`D` is a full diagonal matrix (not a vector), so you can use it directly in expressions. This enables the **matrix exponential** without a dedicated builtin:
+
+```zsh
+# Matrix exponential: e^A = V @ diag(map(exp, eigvals(A))) @ inv(V)
+m 'res = diagonalize(A); res[0] @ diag(map(exp, eigvals(A))) @ res[2]'
+```
+
 ### Queries, statistics, and argmax/argmin
 
 ```zsh
@@ -473,7 +516,138 @@ result = 10
 | `!include <file>` | load a `.math` file into the current session |
 | `!clear` | clear all user definitions |
 | `!version` | show version |
+| `!savetensor <var> <file>` | save tensor to binary `.mlt` file (see [Tensor I/O](#tensor-io)) |
+| `!loadtensor <var> <file>` | load tensor from `.mlt` file |
+| `!savehdf5 <var> <file> …` | save tensor to HDF5 (requires `--features hdf5`) |
+| `!loadhdf5 <var> <file> …` | load tensor from HDF5 |
 | `q` / `exit` | quit |
+
+---
+
+## Tensor I/O
+
+Two serialization formats are available for saving and restoring tensors between sessions or exchanging data with other tools. Both handle real and complex tensors transparently.
+
+### Native format (`.mlt`) — `!savetensor` / `!loadtensor`
+
+`.mlt` is a compact binary format: 8-byte magic `MLTENSOR`, a type tag, ndim, shape, then raw `f64` data — all little-endian. One tensor per file. No dependencies; always available.
+
+```
+!savetensor <var> <file>
+!loadtensor <var> <file>
+```
+
+```
+> A = (1,2,3; 4,5,6)
+> !savetensor A /tmp/matrix.mlt
+saved A (6 elements, real) to /tmp/matrix.mlt
+> !loadtensor B /tmp/matrix.mlt
+loaded B (6 elements, real) from /tmp/matrix.mlt
+> shape(B)
+result = [2, 3]
+```
+
+Complex tensors (e.g. FFT output) are saved and restored automatically — the format stores real and imaginary blocks separately:
+
+```
+> C = fft([1, 1, 0, 0])
+> !savetensor C /tmp/fft.mlt
+saved C (4 elements, complex) to /tmp/fft.mlt
+> !loadtensor D /tmp/fft.mlt
+loaded D (4 elements, complex) from /tmp/fft.mlt
+> im(D[1])
+result = -1
+```
+
+### HDF5 format — `!savehdf5` / `!loadhdf5`
+
+HDF5 is the standard scientific data format, natively supported by NumPy (`h5py`), MATLAB, Julia, R, and most scientific toolchains. It supports multiple datasets per file, hierarchical groups, and optional compression.
+
+**Build requirement:** pass `--features hdf5` at build time (requires `libhdf5` to be installed; tested against HDF5 2.x):
+
+```zsh
+cargo build --release --features hdf5
+# Arch/Manjaro:  sudo pacman -S hdf5
+# Ubuntu/Debian: sudo apt install libhdf5-dev
+# macOS:         brew install hdf5
+```
+
+Without the feature, both commands print a helpful message and do nothing.
+
+#### Saving
+
+```
+!savehdf5 <var> <file> [/dataset] [--append] [--overwrite] [--gzip <0–9>]
+```
+
+| Option | Effect |
+|--------|--------|
+| `/dataset` | HDF5 path for the dataset (default: `/<varname>`). Supports nested groups: `/results/run1/temperature` — intermediate groups are created automatically. |
+| `--append` | Add to an existing file instead of truncating it. Without this flag a new file is always created. |
+| `--overwrite` | Replace an existing dataset at that path. Without this flag, writing to an occupied path is an error. |
+| `--gzip <n>` | Compress with gzip at level `n` (0 = none, 9 = max). Chunked storage is enabled automatically when compression is requested. |
+
+```
+> M = rand(100, 100)
+> !savehdf5 M results.h5
+saved M (10000 elements) → results.h5:/M
+
+> T = ones(10, 10)
+> !savehdf5 T results.h5 /run1/temperature --append --gzip 6
+saved T (100 elements) → results.h5:/run1/temperature
+```
+
+#### Loading
+
+```
+!loadhdf5 <var> <file> [/dataset] [--list]
+```
+
+| Option | Effect |
+|--------|--------|
+| `/dataset` | HDF5 path to load (default: `/<varname>`). |
+| `--list` | Print the dataset tree of the file instead of loading anything. Shows shapes and types recursively. The `<var>` argument is still required but ignored. |
+
+```
+> !loadhdf5 N results.h5 /M
+loaded N (10000 elements, real) ← results.h5:/M
+> shape(N)
+result = [100, 100]
+
+> !loadhdf5 _ results.h5 --list
+M  [100×100  f64]
+run1/
+  temperature  [10×10  f64]
+```
+
+#### Complex tensors in HDF5
+
+Complex tensors are stored as a group containing `re` and `im` datasets with an `mlt_complex` attribute. This layout is directly readable from Python:
+
+```python
+import h5py, numpy as np
+
+with h5py.File("data.h5") as f:
+    # real tensor — standard dataset
+    M = f["/M"][:]
+
+    # complex tensor saved from mathlang
+    re = f["/C/re"][:]
+    im = f["/C/im"][:]
+    C  = re + 1j * im
+```
+
+And from the REPL:
+
+```
+> C = fft([1, 1, 0, 0])
+> !savehdf5 C data.h5
+saved C (4 elements, complex) → data.h5:/C
+> !loadhdf5 D data.h5 /C
+loaded D (4 elements, complex) ← data.h5:/C
+> re(D[0]), im(D[1])
+result = 2  -1
+```
 
 ---
 
