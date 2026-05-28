@@ -829,6 +829,100 @@ run "ffc.axes_tuple"    "shape(fftn(tensor((r,c)->r+c*i, 3, 4), (0,1)))" "[3, 4]
 run "ffc.real_input_ct" "T = tensor(k->k, 4); shape(fftn(T))"         "[4]"
 run "ffc.re_im_pair"    "Re = zeros(4); Im = tensor(k->k, 4); shape(fftn(Re, Im))" "[4]"
 
+# ── [] array literals (Expr::Array) ──────────────────────────────────────────
+section "ARRAY LITERALS"
+# Basic construction
+run "arr.empty"         "[]"                                    "[]"
+run "arr.one"           "[1]"                                   "[1]"
+run "arr.three"         "[1, 2, 3]"                             "[1, 2, 3]"
+run "arr.float"         "[0.5, 1.5]"                            "[0.5, 1.5]"
+run "arr.expr"          "[1+1, 2*3, 4^2]"                      "[2, 6, 16]"
+run "arr.var"           "x=7 : [x, x+1, x+2]"                 "[7, 8, 9]"
+# [x] is a length-1 tensor, unlike (x) which is a scalar
+run "arr.one_vs_paren"  "len([42])"                             "1"
+run "arr.paren_scalar"  "(42)"                                  "42"
+# Complex elements are fine
+run "arr.complex"       "len([1+2i, 3+4i])"                    "2"
+# Matrix literal with []
+run "arr.matrix"        "rows([1,2;3,4])"                       "2"
+run "arr.matrix_val"    "[1,2;3,4][0,1]"                       "2"
+# Indexing works the same as tensor from ()
+run "arr.index"         "[10,20,30][1]"                         "20"
+run "arr.slice"         "[10,20,30][0..1]"                      "[10, 20]"
+# Arithmetic on [] tensors
+run "arr.add"           "[1,2,3] + [4,5,6]"                    "[5, 7, 9]"
+run "arr.scale"         "2 * [1,2,3]"                          "[2, 4, 6]"
+# Round-trip: output of a tensor can be typed back as input
+run "arr.roundtrip"     "x = [1,2,3] : x"                      "[1, 2, 3]"
+# Errors: non-numeric elements
+run_err "arr.err_tuple"   "[(1,2),(3,4)]"
+run_err "arr.err_fn"      "[x->x]"
+run_err "arr.err_nested"  "[[1,2],[3,4]]"
+
+# ── shift ─────────────────────────────────────────────────────────────────────
+section "SHIFT"
+# 1-D: positive n pushes content toward higher indices, replicates leading edge
+run "shift.right1"      "shift([1,2,3,4,5], 1, 0)"             "[1, 1, 2, 3, 4]"
+run "shift.right2"      "shift([1,2,3,4,5], 2, 0)"             "[1, 1, 1, 2, 3]"
+run "shift.left1"       "shift([1,2,3,4,5], -1, 0)"            "[2, 3, 4, 5, 5]"
+run "shift.left2"       "shift([1,2,3,4,5], -2, 0)"            "[3, 4, 5, 5, 5]"
+run "shift.zero"        "shift([1,2,3], 0, 0)"                 "[1, 2, 3]"
+# 2-D: axis 0 = rows, axis 1 = cols
+run "shift.2d_row_dn"   "shift([1,2;3,4], 1, 0)"               "⎡ 1  2 ⎤
+⎣ 1  2 ⎦"
+run "shift.2d_row_up"   "shift([1,2;3,4], -1, 0)"              "⎡ 3  4 ⎤
+⎣ 3  4 ⎦"
+run "shift.2d_col_rt"   "shift([1,2;3,4], 1, 1)"               "⎡ 1  1 ⎤
+⎣ 3  3 ⎦"
+run "shift.2d_col_lf"   "shift([1,2;3,4], -1, 1)"              "⎡ 2  2 ⎤
+⎣ 4  4 ⎦"
+# Edge values are replicated (Neumann BC), not zeros
+run "shift.edge_rep"    "shift([10,20,30], 5, 0)[0]"           "10"
+run "shift.edge_rep2"   "shift([10,20,30], -5, 0)[2]"          "30"
+
+# ── roll ──────────────────────────────────────────────────────────────────────
+section "ROLL"
+# Positive n: last element wraps to front
+run "roll.right1"       "roll([1,2,3,4,5], 1, 0)"              "[5, 1, 2, 3, 4]"
+run "roll.right2"       "roll([1,2,3,4,5], 2, 0)"              "[4, 5, 1, 2, 3]"
+run "roll.left1"        "roll([1,2,3,4,5], -1, 0)"             "[2, 3, 4, 5, 1]"
+run "roll.zero"         "roll([1,2,3], 0, 0)"                  "[1, 2, 3]"
+# Full wrap is identity
+run "roll.full_wrap"    "roll([1,2,3], 3, 0)"                  "[1, 2, 3]"
+# 2-D: axis 0 = rows
+run "roll.2d_row"       "roll([1,2;3,4], 1, 0)"                "⎡ 3  4 ⎤
+⎣ 1  2 ⎦"
+run "roll.2d_col"       "roll([1,2;3,4], 1, 1)"                "⎡ 2  1 ⎤
+⎣ 4  3 ⎦"
+# roll vs shift differ at boundaries
+run "roll.vs_shift"     "roll([1,2,3], 1, 0)[0]"               "3"
+
+# ── lerp ──────────────────────────────────────────────────────────────────────
+section "LERP"
+run "lerp.scalar_0"     "lerp(0, 10, 0)"                       "0"
+run "lerp.scalar_1"     "lerp(0, 10, 1)"                       "10"
+run "lerp.scalar_half"  "lerp(0, 10, 0.5)"                     "5"
+run "lerp.scalar_frac"  "lerp(2, 8, 0.25)"                     "3.5"
+run "lerp.vec_t"        "lerp(0, 10, [0, 0.5, 1])"             "[0, 5, 10]"
+run "lerp.vec_ab"       "lerp([0,0], [10,20], 0.5)"            "[5, 10]"
+run "lerp.all_vecs"     "lerp([1,2], [3,4], [0,1])"            "[1, 4]"
+run "lerp.mask_blend"   "lerp(500, 250, [0,0,1,1])"            "[500, 500, 250, 250]"
+# lerp(a,b,0)=a and lerp(a,b,1)=b for tensors too
+run "lerp.tensor_t0"    "lerp([1,2,3], [4,5,6], 0)"            "[1, 2, 3]"
+run "lerp.tensor_t1"    "lerp([1,2,3], [4,5,6], 1)"            "[4, 5, 6]"
+
+# ── clamp ─────────────────────────────────────────────────────────────────────
+section "CLAMP"
+run "clamp.above"       "clamp(5, 0, 3)"                       "3"
+run "clamp.below"       "clamp(-1, 0, 3)"                      "0"
+run "clamp.inside"      "clamp(2, 0, 3)"                       "2"
+run "clamp.at_lo"       "clamp(0, 0, 3)"                       "0"
+run "clamp.at_hi"       "clamp(3, 0, 3)"                       "3"
+run "clamp.vec"         "clamp([-1, 0.5, 2], 0, 1)"            "[0, 0.5, 1]"
+run "clamp.vec_lo"      "clamp([-5,-3,-1], -2, 0)"             "[-2, -2, -1]"
+run "clamp.negrange"    "clamp(-1.5, -2, -1)"                  "-1.5"
+run_err "clamp.bad_range"   "clamp(1, 5, 0)"
+
 # ── print summary ─────────────────────────────────────────────────────────────
 echo
 echo "================================"
