@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use crate::ast::{Expr, BlockStmt, Op, Def};
 
 // ── Values ────────────────────────────────────────────────────────────────────
@@ -7,7 +8,10 @@ use crate::ast::{Expr, BlockStmt, Op, Def};
 pub enum Val {
     Num(f64),
     Complex(f64, f64),
-    Fn(Vec<String>, Expr, HashMap<String, Val>),
+    /// Fn(params, body, captured_env)
+    /// `captured_env` is Arc-wrapped so cloning a closure is O(1) regardless
+    /// of how many functions are in scope.
+    Fn(Vec<String>, Expr, Arc<HashMap<String, Val>>),
     Builtin(String),
     Tuple(Vec<Val>),
     /// Real-valued tensor (row-major flat storage).
@@ -944,9 +948,13 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
         }
         "argmin" | "argmax" => {
             arity(name, 1, vals.len())?;
-            let nums: Vec<f64> = match vals.into_iter().next().unwrap() {
-                Val::Tensor { data, .. } => data,
-                Val::Tuple(v) => v.into_iter().map(|x| x.num(name)).collect::<Result<_, _>>()?,
+            let (nums, shape) = match vals.into_iter().next().unwrap() {
+                Val::Tensor { data, shape } => (data, shape),
+                Val::Tuple(v) => {
+                    let n = v.len();
+                    let data = v.into_iter().map(|x| x.num(name)).collect::<Result<Vec<_>, _>>()?;
+                    (data, vec![n])
+                }
                 _ => return Err(format!("{name}: argument must be a tensor or tuple")),
             };
             if nums.is_empty() { return Err(format!("{name}: empty")); }
@@ -956,7 +964,19 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                 if name == "argmin" { if n < best_v { best_v = n; best_i = i; } }
                 else                { if n > best_v { best_v = n; best_i = i; } }
             }
-            Ok(Val::Num(best_i as f64))
+            // For 1-D tensors return a scalar; for n-D return a 1-D index tensor
+            if shape.len() == 1 {
+                Ok(Val::Num(best_i as f64))
+            } else {
+                let ndim = shape.len();
+                let mut idx = vec![0usize; ndim];
+                let mut rem = best_i;
+                for k in (0..ndim).rev() {
+                    idx[k] = rem % shape[k];
+                    rem /= shape[k];
+                }
+                Ok(Val::Tensor { data: idx.into_iter().map(|x| x as f64).collect(), shape: vec![ndim] })
+            }
         }
 
         // ── Statistics ────────────────────────────────────────────────────────
@@ -1041,12 +1061,13 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             let f = it.next().unwrap();
             let a = it.next().unwrap();
             match f {
-                Val::Fn(params, body, mut captured) => {
+                Val::Fn(params, body, captured) => {
                     if params.is_empty() { return Err("partial: function has no parameters".into()); }
                     let first = params[0].clone();
                     let rest  = params[1..].to_vec();
-                    captured.insert(first, a);
-                    Ok(Val::Fn(rest, body, captured))
+                    let mut new_cap = (*captured).clone();
+                    new_cap.insert(first, a);
+                    Ok(Val::Fn(rest, body, Arc::new(new_cap)))
                 }
                 Val::Builtin(bname) => {
                     let mut cap = HashMap::new();
@@ -1056,7 +1077,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                         Box::new(Expr::Var("__b__".into())),
                         vec![Expr::Var("__a__".into()), Expr::Var("__z__".into())],
                     );
-                    Ok(Val::Fn(vec!["__z__".into()], body, cap))
+                    Ok(Val::Fn(vec!["__z__".into()], body, Arc::new(cap)))
                 }
                 _ => Err("partial: first argument must be a function".into()),
             }
@@ -2261,7 +2282,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
 
 // Three-layer env merge: global scope → closure's captured env → param bindings.
 // Global scope provides forward-declared names; captured env provides lexical closure.
-fn make_local(global: &Env, captured: &HashMap<String, Val>) -> Env {
+fn make_local(global: &Env, captured: &Arc<HashMap<String, Val>>) -> Env {
     let mut vars = global.vars.clone();
     vars.extend(captured.iter().map(|(k, v)| (k.clone(), v.clone())));
     Env { vars }
@@ -2278,7 +2299,7 @@ fn compose_fns(f: Val, g: Val) -> Val {
             vec![Expr::Var("__z__".into())],
         )],
     );
-    Val::Fn(vec!["__z__".into()], body, captured)
+    Val::Fn(vec!["__z__".into()], body, Arc::new(captured))
 }
 
 fn scale_fn(s: f64, g: Val) -> Val {
@@ -2292,7 +2313,7 @@ fn scale_fn(s: f64, g: Val) -> Val {
             vec![Expr::Var("__z__".into())],
         )),
     );
-    Val::Fn(vec!["__z__".into()], body, captured)
+    Val::Fn(vec!["__z__".into()], body, Arc::new(captured))
 }
 
 fn binop_tuple(lv: Val, op: &Op, rv: Val, _env: &Env) -> Result<Val, String> {
@@ -2368,7 +2389,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
     match expr {
         Expr::Num(n)      => Ok(Val::Num(*n)),
         Expr::ImagLit(n)  => Ok(if *n == 0.0 { Val::Num(0.0) } else { Val::Complex(0.0, *n) }),
-        Expr::Lambda(p, b) => Ok(Val::Fn(p.clone(), *b.clone(), env.vars.clone())),
+        Expr::Lambda(p, b) => Ok(Val::Fn(p.clone(), *b.clone(), Arc::new(env.vars.clone()))),
         Expr::Tuple(exprs) => {
             let vals: Result<Vec<Val>, _> = exprs.iter().map(|e| eval(e, env)).collect();
             let vals = vals?;
@@ -2447,9 +2468,9 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                                 return Err(format!("cannot redefine built-in '{name}'"));
                             }
                             let mut captured = child.vars.clone();
-                            let fn_val = Val::Fn(params.clone(), body.clone(), captured.clone());
+                            let fn_val = Val::Fn(params.clone(), body.clone(), Arc::new(captured.clone()));
                             captured.insert(name.clone(), fn_val);
-                            child.vars.insert(name.clone(), Val::Fn(params.clone(), body.clone(), captured));
+                            child.vars.insert(name.clone(), Val::Fn(params.clone(), body.clone(), Arc::new(captured)));
                         }
                     },
                     BlockStmt::Expr(e) => { last_val = eval(e, &child)?; }

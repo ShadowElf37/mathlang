@@ -70,6 +70,8 @@ m 'f(x) = x^2 : f(3), f(4)'   # 9  16
 m 'g(x,y) = x^2 + y^2 : g(3,4)' # 25
 ```
 
+Parameter names shadow globals — `f(pi) = pi+1; f(2)` → `3` (the parameter `pi` = 2, not 3.14…).
+
 ---
 
 ## Anonymous functions (lambdas)
@@ -90,32 +92,32 @@ m 'sum(x -> x^2, 1, 10)'  # 385
 
 ---
 
-## Tuples
+## Vectors (1-D tensors)
 
-Comma-separated values in parentheses form a tuple. Index with `[n]` (zero-based; negative indices count from the end).
+Comma-separated numeric values in parentheses produce a **1-D tensor** displayed as `[...]`. Index with `[n]` (zero-based; negative indices count from the end).
 
 ```zsh
+m '(1, 2, 3)'               # [1, 2, 3]
 m '(1, 2, 3)[1]'            # 2
 m '(1, 2, 3)[-1]'           # 3
-m 'x=3; y=4 : (x, y, x+y)' # (3, 4, 7)
 ```
 
-Arithmetic on tuples broadcasts element-wise:
+Arithmetic broadcasts element-wise:
 
 ```zsh
-m '(1, 2, 3) * 2'            # (2, 4, 6)
-m '(1, 2, 3) + (4, 5, 6)'    # (5, 7, 9)
-m '(10, 20, 30) / 10'        # (1, 2, 3)
+m '(1, 2, 3) * 2'            # [2, 4, 6]
+m '(1, 2, 3) + (4, 5, 6)'    # [5, 7, 9]
+m '(10, 20, 30) / 10'        # [1, 2, 3]
+m '(1, 2, 3) @ (1, 2, 3)'    # 14   (dot product)
 ```
 
-### Tuple indexing and slicing
+### Slicing
 
 ```zsh
-m '(1,2,3,4,5)[1..3]'       # (2, 3, 4)   — bounded range (inclusive)
-m '(1,2,3,4,5)[2..]'        # (3, 4, 5)   — from index 2 to end
-m '(1,2,3,4,5)[..2]'        # (1, 2, 3)   — from start to index 2 (inclusive)
-m '(1,2,3,4,5)[..]'         # (1, 2, 3, 4, 5)  — all elements
-m '(10,20,30,40)[0,2]'      # (10, 30)    — pick by index list
+m '(1,2,3,4,5)[1..3]'       # [2, 3, 4]   — bounded range (inclusive)
+m '(1,2,3,4,5)[2..]'        # [3, 4, 5]   — from index 2 to end
+m '(1,2,3,4,5)[..2]'        # [1, 2, 3]   — from start to index 2 (inclusive)
+m '(1,2,3,4,5)[..]'         # [1, 2, 3, 4, 5]  — all elements
 m 'len((1,2,3,4))'          # 4
 ```
 
@@ -195,7 +197,7 @@ m 'deriv(f, x, dx)'                    # custom step size
 m 'sum(x -> x, 1, 100)'        # 5050
 m 'sum(x -> x^2, 1, 10)'       # 385
 m 'prod(x -> x, 1, 10)'        # 3628800  (10!)
-m 'sum((1, 2, 3, 4))'          # 10       — sum over a tuple
+m 'sum((1, 2, 3, 4))'          # 10       — sum over a 1-D tensor
 m 'prod((1, 2, 3, 4))'         # 24
 ```
 
@@ -210,17 +212,17 @@ m 'sum(ones(2, 3), 1)'         # [3, 3]     — reduce along axis 1
 `map(f, t)` applies `f` to each element and preserves the container type:
 
 ```zsh
-m 'map(x -> x^2, (1,2,3,4))'  # (1, 4, 9, 16)   — tuple → tuple
+m 'map(x -> x^2, (1,2,3,4))'  # [1, 4, 9, 16]
 m 'map(x -> x*2, eye(3))'     # 3×3 matrix with 2s on diagonal
 ```
 
-`filter(f, tuple)` keeps elements where `f` returns nonzero:
+`filter(f, v)` keeps elements where `f` returns nonzero:
 
 ```zsh
-m 'filter(x -> x > 2, (1,2,3,4))'   # (3, 4)
+m 'filter(x -> x > 2, (1,2,3,4))'   # [3, 4]
 ```
 
-`reduce(f, t)` left-folds with a 2-arg function, on tuples or tensors:
+`reduce(f, t)` left-folds with a 2-arg function, on 1-D tensors or matrices:
 
 ```zsh
 m 'reduce((a,b) -> a+b, (1,2,3,4))'          # 10
@@ -239,7 +241,13 @@ Tensors are n-dimensional arrays of real numbers. A 1-D tensor displays as `[...
 m 'zeros(3, 4)'                       # 3×4 zero matrix
 m 'ones(2, 3, 4)'                     # 2×3×4 tensor of ones (any rank)
 m 'eye(3)'                            # 3×3 identity matrix
-m 'diag((1, 2, 3))'                   # diagonal matrix from tuple or 1-D tensor
+m 'diag((1, 2, 3))'                   # diagonal matrix from 1-D tensor
+m 'rand()'                            # scalar in [0, 1)
+m 'rand(n)'                           # 1-D random tensor of length n
+m 'rand(r, c)'                        # r×c random matrix
+m 'rand(n1, n2, n3)'                  # any-rank random tensor
+m 'linspace(0, 1, 5)'                 # [0, 0.25, 0.5, 0.75, 1]
+m 'range(0, 5)'                       # [0, 1, 2, 3, 4]  (exclusive end)
 m 'matrix((i,j) -> i*3+j, 2, 3)'     # 2×3 matrix filled by function (0-indexed)
 m 'tensor((i,j,k) -> i+j+k, 2,3,4)'  # arbitrary n-D tensor
 ```
@@ -256,7 +264,7 @@ m '(1,2; 3,4) + eye(2)'
 
 Single-index `T[i]` returns the i-th row (or element for 1-D). Multi-index `T[i, j, …]` selects an element. All indices are zero-based; negative indices count from the end.
 
-**Slice syntax** — works on tensors of any rank, and on tuples:
+**Slice syntax** — works on tensors of any rank:
 
 | Syntax | Meaning |
 |--------|---------|
@@ -291,7 +299,7 @@ m '(1,2; 3,4) @ (1,2; 3,4)'        # matrix multiply via @
 ### Shape operations
 
 ```zsh
-m 'shape(ones(2, 3, 4))'            # (2, 3, 4)
+m 'shape(ones(2, 3, 4))'            # [2, 3, 4]
 m 'rows(A)'                         # 3
 m 'cols(A)'                         # 3
 m 'reshape(ones(6), 2, 3)'          # reshape to 2×3
@@ -300,8 +308,8 @@ m 'flatten(eye(2))'                 # [1, 0, 0, 1]  — 1-D tensor
 m 'transpose(A)'                    # reverse all axes (classic 2-D transpose)
 m 'transpose(T, 0, 2)'              # swap axes 0 and 2
 m 'permute(T, 2, 0, 1)'            # reorder axes by permutation
-m 'squeeze(zeros(1, 3, 1))'        # remove size-1 dims → shape (3,)
-m 'unsqueeze(zeros(3), 0)'          # insert size-1 dim → shape (1, 3)
+m 'squeeze(zeros(1, 3, 1))'        # remove size-1 dims → shape [3]
+m 'unsqueeze(zeros(3), 0)'          # insert size-1 dim → shape [1, 3]
 ```
 
 ### Concatenation
@@ -321,20 +329,23 @@ m 'det((1,2; 3,4))'                 # -2
 m 'inv((1,2; 3,4))'                 # inverse
 m 'trace(eye(4))'                   # 4
 m 'norm(ones(3, 4))'                # Frobenius norm = sqrt(12)
-m 'solve((2,1; 1,3), (5,10))'       # solve Ax=b
-m 'row(A, 1)'                       # row 1 as tuple
-m 'col(A, 0)'                       # column 0 as tuple
+m 'solve((2,1; 1,3), (5,10))'       # solve Ax=b  →  1-D tensor
+m 'row(A, 1)'                       # row 1 as 1-D tensor
+m 'col(A, 0)'                       # column 0 as 1-D tensor
 m 'A @ B'                           # matmul: 2D×2D, 2D×1D, 1D×2D, 1D×1D (dot)
 m 'outer(ones(2), ones(3))'         # outer product → shape (2, 3)
 ```
 
-### Queries and statistics
+### Queries, statistics, and argmax/argmin
 
 ```zsh
 m 'mean(ones(3, 4))'    # 1
 m 'std(eye(3))'         # standard deviation over all elements
 m 'var(eye(3))'         # variance
 m 'norm(T)'             # Frobenius / Euclidean norm
+m 'argmax((3,1,4,1,5))' # 4         — index of max in 1-D tensor (scalar)
+m 'argmax((1,8; 8,1))'  # [0, 1]    — [row, col] index for 2-D tensor
+m 'argmin(T)'           # [i, j, …] — n-D index tensor for n-D input
 ```
 
 ### Grid construction (`lingrid`)
@@ -354,7 +365,7 @@ m 'G[.., .., 0]'     # x-component grid (20×20)
 m 'G[.., .., 1]'     # y-component grid (20×20)
 
 # f can return a tensor too — output shape = grid_shape ++ value_shape
-m 'shape(lingrid((0,0),(1,1),(3,3),(x,y)->eye(2)))'  # (3, 3, 2, 2)
+m 'shape(lingrid((0,0),(1,1),(3,3),(x,y)->eye(2)))'  # [3, 3, 2, 2]
 ```
 
 ---
@@ -392,11 +403,11 @@ m 're(3 + 4i), im(3 + 4i)'   # 3  4
 
 **Special:** `sinc`, `sech`, `csch`, `erf`, `erfc`, `j0`, `j1`, `jinc`, `gaussian(x,mu,sigma)`
 
-**Statistics** (tuples or tensors): `mean`, `median`, `mode`, `std`, `var`, `min`, `max`, `sum`, `prod`
+**Statistics** (1-D tensors or matrices): `mean`, `median`, `mode`, `std`, `var`, `min`, `max`, `sum`, `prod`
 
-**Tuple ops:** `len`, `sort`, `zip(a,b)`, `dot(a,b)`, `append(t,x)`, `concat(a,b)`, `flatten(t)`, `argmin(t)`, `argmax(t)`, `linspace(a,b,n)`, `range(a,b)`
+**Array ops:** `len`, `sort`, `zip(a,b)`, `dot(a,b)`, `append(t,x)`, `concat(a,b)`, `flatten(t)`, `argmin(t)`, `argmax(t)`, `linspace(a,b,n)`, `range(a,b)`
 
-**Tensor constructors:** `zeros(n1,n2,…)`, `ones(n1,n2,…)`, `eye(n)`, `diag(t)`, `matrix(f,r,c)`, `tensor(f,n1,n2,…)`
+**Tensor constructors:** `zeros(n1,n2,…)`, `ones(n1,n2,…)`, `eye(n)`, `diag(t)`, `matrix(f,r,c)`, `tensor(f,n1,n2,…)`, `rand()`, `rand(n1,n2,…)`
 
 **Tensor shape:** `shape(T)`, `rows(T)`, `cols(T)`, `reshape(T,n1,n2,…)`, `flatten(T)`, `squeeze(T)`, `unsqueeze(T,dim)`
 
@@ -414,9 +425,9 @@ m 're(3 + 4i), im(3 + 4i)'   # 3  4
 
 **Higher-order:** `map(f,t)`, `filter(f,t)`, `reduce(f,t)`, `compose(f,g)`, `partial(f,a)`
 
-**Spectral:** `fft(tuple)`, `ifft(tuple)` — forward/inverse DFT; output is a tuple of complex values
+**Spectral:** `fft(v)`, `ifft(v)` — 1-D FFT/IFFT on a 1-D tensor; `fftn(T)`, `ifftn(T)` — n-D FFT on tensors
 
-**Random:** `rand()`, `rand(a,b)`
+**Random:** `rand()`, `rand(n1,n2,…)` — scalar or shaped tensor
 
 **Bitwise** (operate on 64-bit integers):
 `and`, `or`, `xor`, `nand`, `nor`, `xnor`, `not`, `shl(x,n)`, `shr(x,n)`
@@ -466,6 +477,17 @@ result = 10
 
 ---
 
+## CLI file loading
+
+Use `-f` to load a `.math` file before evaluating an expression:
+
+```zsh
+m -f heat.math 'solver(10)'           # load heat.math, then evaluate
+m -f advanced.math 'solveCubic(1,0,-3,-2)'
+```
+
+---
+
 ## Init file and `.math` files
 
 Definitions in `~/.mathlangrc` are loaded automatically when the REPL starts.
@@ -486,11 +508,23 @@ cubicRoot(a,b,c,d)    — 1 real root  of ax³+… (Cardano, disc < 0)
 solveQuartic(a,b,c,d,e) — 4 real roots of ax⁴+… (Ferrari's method)
 ```
 
-Load it with `!include advanced.math` in the REPL (or set it as your init file).
+Load it with `!include advanced.math` in the REPL (or `m -f advanced.math 'expr'` from CLI).
 
 ### `physics.math`
 
-Physical constants in SI units (`c`, `g`, `G`, `k_B`, `N_A`, `R`, `h`, `hbar`, etc.) plus `oscillator`, `oscillatorMBK`, `heatKernel`, `heatSolutionBounded`.
+Physical constants in SI units (`c`, `g`, `G`, `k_B`, `N_A`, `R`, `h`, `hbar`, etc.) plus `oscillator`, `oscillatorMBK`, `heatKernel`, `heatSpectral` (1-D spectral heat solver).
+
+### `heat.math`
+
+2-D heat equation solver with spatially-varying diffusivity.
+
+```zsh
+m -f heat.math 'solver(0)'    # initial condition: 20×20 grid, cold disk in hot air
+m -f heat.math 'solver(10)'   # temperature after t=10 (50 steps)
+m -f heat.math 'solver(20)'   # mostly equilibrated (~100 ms)
+```
+
+`heatSolver(T0, alpha, dx, dt)` takes initial temperature grid, diffusivity field, and timestep; returns a function `t -> T(t)`. Uses energy-conserving divergence-form FD with Neumann BCs.
 
 ### `conversions.math`
 

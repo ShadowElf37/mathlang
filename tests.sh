@@ -212,6 +212,11 @@ run "tup.dot"           "dot((1,2,3),(4,5,6))"              "32"
 run "tup.sort"          "sort((3,1,4,1,5,9))"               "[1, 1, 3, 4, 5, 9]"
 run "tup.argmin"        "argmin((3,1,4,1,5))"               "1"
 run "tup.argmax"        "argmax((3,1,4,1,5))"               "4"
+# 2-D: argmax/argmin return [row, col]
+run "tup.argmax_2d"     "argmax((1,8; 8,1))"                "[0, 1]"
+run "tup.argmin_2d"     "argmin((1,8; 8,1))"                "[0, 0]"
+# 3-D: returns [i, j, k]
+run "tup.argmax_3d"     "argmax(tensor((i,j,k)->if(i+j+k==6,99,0), 2,3,4))"  "[1, 2, 3]"
 run "tup.matmul"        "(1,2,3) @ (1,2,3)"                 "14"
 
 # ── Aggregates on tuples ──────────────────────────────────────────────────────

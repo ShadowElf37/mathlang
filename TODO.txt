@@ -1,6 +1,36 @@
-1. you were in the middle of making n-D fftn and ifftn, and support for complex numbers inside tensors; continue
+1. [DONE v0.11] n-D fftn and ifftn, complex tensors inside Val::ComplexTensor
 
-2. write a skill file that you can read to make yourself faster and better at writing .math files
-3. write a heat.math with a heat solver. there should be a function of t that outputs 2D temperature grids once set up (maybe a heatSolver that outputs a lambda of t from initial conditions). initial conditions to test: a 2D disk of high conductance in "air" of low conductance, where the air is hot (lets say 500K) and the disk is cold (lets say 250K) at the beginning. this should be in pure mathlang. if you encounter trouble anywhere, or anything is really awkward, mark this as a new bug/feature.
-4. write an animate2D() that takes either f(t) or a 3D block, using the new realtime animation binary i will give you when it is time to approach this TODO item
+2. [DONE v0.12] skill file → MATHLANG_SKILL.md
+   also updated README to reflect tensor-first design
+
+3. [DONE v0.12] heat.math — 2D heat solver (pure mathlang)
+   - heatSolver(T0, alpha, dx, dt) returns t -> T(t)
+   - divergence-form ∇·(α∇T), energy-conserving, Neumann BCs
+   - demo: cold disk (250K) in hot air (500K), N=20 grid, ~0.3s for 100 steps
+   - tested via: m -f heat.math 'solver(20)'
+
+4. write an animate2D() that takes either f(t) or a 3D block, using the new
+   realtime animation binary i will give you when it is time to approach this
+   TODO item
+
 5. eigenvalues and eigenvectors
+
+--- BUGS FIXED (v0.12) ---
+
+BUG: Closure captured-env deep-clone caused exponential blowup.
+  Symptom: calling tensor() (or any function with a lambda in its body) hangs
+           when several user functions are defined in the same .math session,
+           especially after loading heat.math or similar multi-function files.
+  Root cause: Val::Fn stored HashMap<String, Val> for captured env.
+              Each lambda evaluated via Expr::Lambda did env.vars.clone(),
+              making a full deep copy of the entire env at that moment.
+              With n chained function definitions each capturing the previous,
+              clone cost was O(2^n).
+  Fix: Val::Fn now stores Arc<HashMap<String, Val>>.  Cloning a closure is O(1)
+       for the captured env (just increments Arc ref count).  All construction
+       sites updated in eval.rs and repl.rs.
+
+FEATURE: m -f <file.math> [expr]  — load a .math file from CLI without entering
+  the REPL.  import_file() made pub, main.rs handles -f flag.
+  (Previously awkward: the only way to use .math files from CLI was via
+   MATHLANG_INIT env var + REPL, which required interactive stdin.)

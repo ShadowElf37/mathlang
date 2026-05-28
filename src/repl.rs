@@ -218,9 +218,9 @@ pub fn eval_line(line: &str, env: &mut Env, repl: bool) -> bool {
                     return false;
                 }
                 let mut captured = env.vars.clone();
-                let fn_val = Val::Fn(params.clone(), body.clone(), captured.clone());
+                let fn_val = Val::Fn(params.clone(), body.clone(), std::sync::Arc::new(captured.clone()));
                 captured.insert(name.clone(), fn_val);
-                env.vars.insert(name.clone(), Val::Fn(params.clone(), body.clone(), captured));
+                env.vars.insert(name.clone(), Val::Fn(params.clone(), body.clone(), std::sync::Arc::new(captured)));
             }
         }
     }
@@ -269,7 +269,7 @@ fn expand_path(p: &str) -> String {
     }
 }
 
-fn import_file(path: &str, display: &str, env: &mut Env, verbose: bool) {
+pub fn import_file(path: &str, display: &str, env: &mut Env, verbose: bool) {
     match std::fs::read_to_string(path) {
         Ok(src) => {
             let mut n = 0;
