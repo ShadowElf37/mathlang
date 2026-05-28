@@ -18,21 +18,17 @@
 
 # ── Core operators ────────────────────────────────────────────────────────────
 
-# 2D Neumann shift helpers  (no-flux BCs: boundary ghost = edge cell)
-_shiftUp(T)    = {R=rows(T) : vstack(T[0..0,..],   T[0..R-2,..])}
-_shiftDown(T)  = {R=rows(T) : vstack(T[1..R-1,..], T[R-1..R-1,..])}
-_shiftLeft(T)  = {C=cols(T) : hstack(T[..,0..0],   T[..,0..C-2])}
-_shiftRight(T) = {C=cols(T) : hstack(T[..,1..C-1], T[..,C-1..C-1])}
-
 # Divergence-form operator: ∇·(α∇T)
-# Uses arithmetic-mean interface diffusivities — energy-conserving.
+# shift(T, n, axis): n>0 pushes content toward higher indices, edge-replicating.
+# shift(T,  1, 0) = _shiftDown,  shift(T, -1, 0) = _shiftUp
+# shift(T,  1, 1) = _shiftRight, shift(T, -1, 1) = _shiftLeft
 heatOp(T, alpha) = {
-  Tu = _shiftUp(T);    Td = _shiftDown(T);
-  Tl = _shiftLeft(T);  Tr = _shiftRight(T);
-  au = _shiftUp(alpha);    ad = _shiftDown(alpha);
-  al = _shiftLeft(alpha);  ar = _shiftRight(alpha);
-  an = (alpha + au) / 2;   as = (alpha + ad) / 2;
-  aw = (alpha + al) / 2;   ae = (alpha + ar) / 2;
+  Tu = shift(T,-1,0);  Td = shift(T,1,0);
+  Tl = shift(T,-1,1);  Tr = shift(T,1,1);
+  au = shift(alpha,-1,0);  ad = shift(alpha,1,0);
+  al = shift(alpha,-1,1);  ar = shift(alpha,1,1);
+  an = (alpha+au)/2;  as = (alpha+ad)/2;
+  aw = (alpha+al)/2;  ae = (alpha+ar)/2;
   ae*(Tr-T) - aw*(T-Tl) + as*(Td-T) - an*(T-Tu)
 }
 
@@ -66,8 +62,8 @@ diskMask(N, cx_frac, cy_frac, r_frac) = {
 #   Build T0 and alpha for a centred cold disk in hot air, then return solver.
 heatSolverDisk(N, dx, dt, T_disk, T_air, a_disk, a_air) = {
   mask  = diskMask(N, 0.5, 0.5, 0.25);
-  T0    = mask * T_disk + (1 - mask) * T_air;
-  alpha = mask * a_disk + (1 - mask) * a_air;
+  T0    = lerp(T_air, T_disk, mask);
+  alpha = lerp(a_air, a_disk, mask);
   heatSolver(T0, alpha, dx, dt)
 }
 

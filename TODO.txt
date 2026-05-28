@@ -1,55 +1,8 @@
-1. [DONE v0.11] n-D fftn and ifftn, complex tensors inside Val::ComplexTensor
+1. eigenvalues and eigenvectors
 
-2. [DONE v0.13] skill file → MATHLANG_SKILL.md
-   also updated README to reflect tensor-first design
+2. accept [] for tensor literals
+   > rand(2)
+   result = [0.272, 0.073]
+   > result = [0.272, 0.073]    ← this should work, currently errors on LBracket
 
-3. [DONE v0.13] heat.math — 2D heat solver (pure mathlang)
-   - heatSolver(T0, alpha, dx, dt) returns t -> T(t)
-   - divergence-form ∇·(α∇T), energy-conserving, Neumann BCs
-   - demo: cold disk (250K) in hot air (500K), N=20 grid, ~0.3s for 100 steps
-   - tested via: m -f heat.math 'solver(20)'
-
-4. [DONE v0.14] animate2D() — stream 2D tensor frames to wgpu_animator via MXFR protocol
-   - animate2D(T)             — T: 3-D Tensor [n_frames, H, W], streams instantly
-   - animate2D(f, t_vals)     — f: t→2D tensor, 1-D tensor of timestamps
-   - animate2D(f, t0, t1, n)  — f: t→2D tensor, n frames from t0 to t1
-   - animate2D(f, n)          — f: t→2D tensor, n frames at t=0,1,...,n-1
-   - animator binary: animator/target/release/wgpu_animator
-   - usage: m -f heat.math 'animate2D(solver, 0, 20, 50)' | ./animator/target/release/wgpu_animator --stdin --colormap heat --fps 15
-   - trailing "N\n" after binary frames is harmless (animator sees UnexpectedEof → clean break)
-
-5. eigenvalues and eigenvectors
-
-6. maybe accept [] for tensors
-> rand(2)
-result = [0.27252445409166737, 0.07343901272838527]
-> result = [0.27252445409166737, 0.07343901272838527]
-error: unexpected token: LBracket
->
-
---- NOTES ---
-
-LIMITATION: tensor(f, n1, n2, ...) requires f to return a scalar.
-  You cannot pre-build a 3-D block of 2-D frames with tensor() — the element
-  function must return a number.  Use animate2D(f, t_vals) instead.
-  Workaround if you really need a 3-D block: use cat() on individually computed slices.
-
---- BUGS FIXED (v0.13) ---
-
-BUG: Closure captured-env deep-clone caused exponential blowup.
-  Symptom: calling tensor() (or any function with a lambda in its body) hangs
-           when several user functions are defined in the same .math session,
-           especially after loading heat.math or similar multi-function files.
-  Root cause: Val::Fn stored HashMap<String, Val> for captured env.
-              Each lambda evaluated via Expr::Lambda did env.vars.clone(),
-              making a full deep copy of the entire env at that moment.
-              With n chained function definitions each capturing the previous,
-              clone cost was O(2^n).
-  Fix: Val::Fn now stores Arc<HashMap<String, Val>>.  Cloning a closure is O(1)
-       for the captured env (just increments Arc ref count).  All construction
-       sites updated in eval.rs and repl.rs.
-
-FEATURE: m -f <file.math> [expr]  — load a .math file from CLI without entering
-  the REPL.  import_file() made pub, main.rs handles -f flag.
-  (Previously awkward: the only way to use .math files from CLI was via
-   MATHLANG_INIT env var + REPL, which required interactive stdin.)
+3. ctrl+d still doesnt work when something is already typed in the stdin in the repl, only works when stdin is empty

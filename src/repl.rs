@@ -37,6 +37,7 @@ pub const BUILTIN_FNS: &[&str] = &[
     "row", "col", "matmul", "outer",
     "det", "inv", "solve",
     "hstack", "vstack", "tomat",
+    "lerp", "clamp", "shift", "roll",
     "lingrid",
     "reshape", "permute", "cat", "squeeze", "unsqueeze",
     "dim", "tensordot",

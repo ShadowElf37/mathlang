@@ -83,6 +83,7 @@ impl Env {
             "row", "col", "matmul", "outer",
             "det", "inv", "solve",
             "hstack", "vstack", "tomat",
+            "lerp", "clamp", "shift", "roll",
             "lingrid",
             "reshape", "permute", "cat", "squeeze", "unsqueeze",
             "dim", "tensordot",
@@ -127,6 +128,7 @@ pub fn is_protected(name: &str) -> bool {
         | "row" | "col" | "matmul" | "outer"
         | "det" | "inv" | "solve"
         | "hstack" | "vstack" | "tomat"
+        | "lerp" | "clamp" | "shift" | "roll"
         | "lingrid"
         | "reshape" | "permute" | "cat" | "squeeze" | "unsqueeze"
         | "dim" | "tensordot"
@@ -1896,6 +1898,105 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             }
             Ok(Val::Tensor { data, shape: vec![r, c] })
         }
+        // ── lerp(a, b, t) — linear interpolation: a*(1-t) + b*t, elementwise ──
+        "lerp" => {
+            arity("lerp", 3, vals.len())?;
+            let mut it = vals.into_iter();
+            let a = it.next().unwrap();
+            let b = it.next().unwrap();
+            let t = it.next().unwrap();
+            // Route each step through the right binop (scalar vs tensor).
+            fn vop(l: Val, op: &crate::ast::Op, r: Val) -> Result<Val, String> {
+                match (&l, &r) {
+                    (Val::Num(_), Val::Num(_)) => scalar_binop(l, op, r),
+                    _ => binop_tensor(l, op, r),
+                }
+            }
+            let ba  = vop(b, &crate::ast::Op::Sub, a.clone())?;
+            let tba = vop(t, &crate::ast::Op::Mul, ba)?;
+            vop(a, &crate::ast::Op::Add, tba)
+        }
+
+        // ── clamp(x, lo, hi) — elementwise clamp to [lo, hi] ────────────────
+        "clamp" => {
+            arity("clamp", 3, vals.len())?;
+            let mut it = vals.into_iter();
+            let x  = it.next().unwrap();
+            let lo = it.next().unwrap().num("clamp lo")?;
+            let hi = it.next().unwrap().num("clamp hi")?;
+            if lo > hi { return Err(format!("clamp: lo ({lo}) > hi ({hi})")); }
+            match x {
+                Val::Num(v) => Ok(Val::Num(v.clamp(lo, hi))),
+                Val::Tensor { data, shape } => Ok(Val::Tensor {
+                    data: data.into_iter().map(|v| v.clamp(lo, hi)).collect(),
+                    shape,
+                }),
+                other => Err(format!("clamp: expected number or tensor, got {}", fmt_val(&other))),
+            }
+        }
+
+        // ── shift(T, n, axis) — shift along axis with edge replication ───────
+        // Positive n: content moves toward higher indices (pad start with edge).
+        // Negative n: content moves toward lower  indices (pad end  with edge).
+        // Works on tensors of any rank.
+        "shift" => {
+            arity("shift", 3, vals.len())?;
+            let mut it = vals.into_iter();
+            let (data, shape) = match it.next().unwrap() {
+                Val::Tensor { data, shape } => (data, shape),
+                other => return Err(format!("shift: first arg must be a tensor, got {}", fmt_val(&other))),
+            };
+            let n    = it.next().unwrap().num("shift n")? as i64;
+            let axis = it.next().unwrap().num("shift axis")? as usize;
+            if axis >= shape.len() {
+                return Err(format!("shift: axis {axis} out of range for rank-{} tensor", shape.len()));
+            }
+            let total: usize = shape.iter().product();
+            // Compute stride for the shifted axis.
+            let stride: usize = shape[axis+1..].iter().product();
+            let dim_size = shape[axis] as i64;
+            let mut out = vec![0.0f64; total];
+            for out_flat in 0..total {
+                // Decode multi-index for shifted axis only.
+                let ax_idx = ((out_flat / stride) % shape[axis]) as i64;
+                // Where does this slot come from in the input?
+                let in_ax  = (ax_idx - n).clamp(0, dim_size - 1);
+                let in_flat = out_flat as i64
+                    + (in_ax - ax_idx) * stride as i64;
+                out[out_flat] = data[in_flat as usize];
+            }
+            Ok(Val::Tensor { data: out, shape })
+        }
+
+        // ── roll(T, n, axis) — circular shift along axis (periodic) ──────────
+        // Positive n: content moves toward higher indices (last wraps to front).
+        // Equivalent to numpy.roll(T, n, axis).
+        "roll" => {
+            arity("roll", 3, vals.len())?;
+            let mut it = vals.into_iter();
+            let (data, shape) = match it.next().unwrap() {
+                Val::Tensor { data, shape } => (data, shape),
+                other => return Err(format!("roll: first arg must be a tensor, got {}", fmt_val(&other))),
+            };
+            let n    = it.next().unwrap().num("roll n")? as i64;
+            let axis = it.next().unwrap().num("roll axis")? as usize;
+            if axis >= shape.len() {
+                return Err(format!("roll: axis {axis} out of range for rank-{} tensor", shape.len()));
+            }
+            let total: usize = shape.iter().product();
+            let stride: usize = shape[axis+1..].iter().product();
+            let dim_size = shape[axis] as i64;
+            let mut out = vec![0.0f64; total];
+            for out_flat in 0..total {
+                let ax_idx = ((out_flat / stride) % shape[axis]) as i64;
+                let in_ax  = (ax_idx - n).rem_euclid(dim_size);
+                let in_flat = out_flat as i64
+                    + (in_ax - ax_idx) * stride as i64;
+                out[out_flat] = data[in_flat as usize];
+            }
+            Ok(Val::Tensor { data: out, shape })
+        }
+
         "lingrid" => {
             // lingrid(start, end, counts, f)
             // start / end / counts can each be a scalar (1-D) or a k-tuple (k-D)
