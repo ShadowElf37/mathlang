@@ -24,13 +24,31 @@ Key source files:
 ```rust
 enum Val {
     Num(f64),
-    Complex(Complex<f64>),
-    Tensor { data: Vec<f64>, shape: Vec<usize> },
-    Lambda { params, body, captured_env },
+    Complex(f64, f64),
+    Tensor { data: TData, shape: Vec<usize> },          // TData = Arc<Vec<f64>>, O(1) clone
+    ComplexTensor { re: TData, im: TData, shape: Vec<usize> },
+    /// Fn(params, body, captured_env, bytecode_cache)
+    /// bytecode_cache is Arc<OnceLock<Option<Vec<Instruction>>>> — shared across clones,
+    /// compiled once on first call via apply_fn_direct(), None = fall back to tree-walk.
+    Fn(Vec<String>, Expr, Arc<HashMap<String, Val>>, Arc<OnceLock<Option<Vec<Instruction>>>>),
+    Builtin(String),
     Tuple(Vec<Val>),
-    Cell(Arc<RefCell<Val>>),   // mutable reference cell
+    Cell(Arc<RefCell<Val>>),   // mutable reference cell; identity semantics on clone
 }
 ```
+
+### Bytecode VM (`src/eval.rs`):
+
+mathlang now has a stack-based bytecode VM for user-defined function bodies.
+`compile_fn(params, body, captured)` compiles an `Expr` to `Vec<Instruction>` or
+returns `None` for unsupported nodes (nested lambdas, indexing, ranges). On first
+call, `apply_fn_direct()` uses `OnceLock::get_or_init()` to compile once and cache;
+all `Val::Fn` clones share the same `Arc<OnceLock>`.  Subsequent calls run the VM
+directly. `map`, `filter`, `integral`, `sum(f,lo,hi)` pre-evaluate `f` before their
+loops so the cache is shared across all N iterations.
+
+The `Instruction` enum is currently defined in `eval.rs`. It is also the natural IR
+for GPU lambda lowering — see section 15.
 
 ### Language features relevant to GPU:
 - Tensors are row-major flat `Vec<f64>`, any rank
@@ -111,34 +129,26 @@ etc.).
 
 ---
 
-## 4. Why Not Wait for Bytecode First?
+## 4. Bytecode and GPU: the Relationship
 
-The concern is "bouncing between GPU and line-by-line AST evaluation." This is a
-real issue, but the framing slightly misidentifies the problem.
+**The two-phase design does NOT require bytecode** — `gpu/eval.rs` walks the AST
+directly to build `Vec<GpuOp>`, then `dispatch.rs` submits once. This is still the
+right approach for the GPU block body.
 
-**The actual bottleneck:** multiple `queue.submit()` calls. Each submission
-triggers a CPU↔GPU synchronization barrier. N operations → N barriers → N×(~0.5ms
-overhead) even for trivial workloads.
+**What bytecode enables on top of the GPU block:**
 
-**The solution — two-phase eval — does NOT require bytecode:**
+1. **Operation fusion.** A bytecode pass can recognize `a*b + c` and emit a single
+   `FusedMAD` GpuOp instead of two. Optional optimization; not required for v1.
 
-| Phase | What happens |
-|-------|-------------|
-| **Phase 1: Record** | Walk the AST; allocate output buffers (shapes known via inference); record all commands into a single `wgpu::CommandEncoder`. No GPU execution yet. |
-| **Phase 2: Dispatch** | One `queue.submit([encoder.finish()])`. One `device.poll(Wait)`. Download the final result buffer. |
+2. **Lambda-to-WGSL lowering.** The bytecode VM's `Vec<Instruction>` is a flat,
+   typed IR that maps 1-to-1 to WGSL for the GPU-safe subset of operations. This
+   enables `tensor((i,j)->expr, m, n)` on the GPU (previously blocked, now
+   achievable — see section 15).
 
-This gives you exactly one synchronization point per GPU block, regardless of how
-many operations are inside it. This is the right wgpu idiom and is achievable with
-a direct AST walker.
-
-**What bytecode would add (later):** operation fusion — recognizing that `a*b + c`
-can be a single MAD kernel instead of two. This is a nice-to-have optimization.
-It is *not* required for correct or reasonably fast execution.
-
-**Recommendation: implement GPU now.** Design the `gpu_eval` internals around
-two-phase record/dispatch so the interface is bytecode-agnostic. If bytecode ever
-arrives, you swap the AST-walking recorder for a bytecode-to-GpuOp compiler;
-the dispatch and everything downstream stays the same.
+**Recommendation: implement GPU block now.** Design `gpu/eval.rs` as a direct AST
+walker. The bytecode layer plugs in later (a) as a fusion pass between Phase 1 and
+Phase 2, and (b) as the lambda-to-WGSL lowerer for index lambdas. Both additions
+are surgically local to `src/gpu/`.
 
 ---
 
@@ -452,24 +462,93 @@ intermediate tensors are computed.
 
 ---
 
-## 11. Interaction with TODO #5 (Bytecode)
+## 11. Bytecode VM — Current State and GPU Interface
 
-If bytecode compilation is eventually added to mathlang, the GPU backend benefits
-from it in one specific way: **operation fusion**. A bytecode pass could recognize
-patterns like `a * b + c` and emit a single `FusedMAD` GpuOp rather than two
-separate ones.
+The bytecode VM landed in the `bytecode-vm` branch. The full picture:
 
-However, this is an optimization pass, not a prerequisite. The current two-phase
-design (AST → Vec<GpuOp> → single submit) already gives you:
-- One CPU→GPU synchronization per GPU block
-- Zero intermediate downloads
-- Pipeline reuse across multiple GPU block executions (cached by `GpuContext`)
+### What exists
 
-When/if bytecode lands, you add a fusion pass between Phase 1 and Phase 2:
+- `Instruction` enum in `src/eval.rs`: stack-based — `PushNum`, `BinOp`, `CallBuiltin`,
+  `JumpIfFalse`/`Jump` (for `if`), `StoreLocal`/`LoadLocal` (for block-scoped vars),
+  `MakeTuple`, `MakeArray`, `Neg`, `Pop`, `Return`
+- `compile_fn(params, body, captured) -> Option<Vec<Instruction>>`: compiles lambda
+  bodies; returns `None` for unsupported nodes (nested lambdas, indexing, ranges,
+  special forms)
+- `run_vm(code, args, captured, env) -> Result<Val, String>`: flat loop, no recursion
+  into `eval()` for arithmetic
+- `apply_fn_direct()`: `OnceLock::get_or_init` → compile once, cache forever
+- `map`, `filter`, `integral`, `sum(f,lo,hi)`: pre-evaluate `f` before loops so the
+  cache is shared across all N calls — zero recompile overhead
+
+### Nested lambdas — the plan
+
+Currently `compile_fn` returns `None` for `Expr::Lambda` in a body (e.g., `x -> y -> x+y`).
+
+Planned addition: **`MakeClosure` instruction**
+
+```rust
+// New variant in the Instruction enum:
+MakeClosure(
+    Vec<String>,            // inner params
+    Box<Expr>,              // inner body expr (kept for tree-walk fallback)
+    Arc<Vec<Instruction>>,  // eagerly pre-compiled inner code; empty = lazy fallback
+    Vec<String>,            // free variables to pop from stack into inner captured env
+)
 ```
-AST → [gpu/eval.rs] → Vec<GpuOp> → [fusion pass, optional] → dispatch
+
+**Compile-time** (inside the `Compiler` for `Expr::Lambda(inner_params, inner_body)`):
+1. Walk `inner_body` with `collect_free_vars()` to find names not in `inner_params`
+   that ARE in the outer `params` or `locals` (outer `captured` vars pass through
+   automatically — they'll be in the clone of `captured` at runtime).
+2. For each free var, emit `LoadParam(i)` or `LoadLocal(i)` to push its value.
+3. Build an `inner_captured_hint` = outer `captured` + placeholder entries for the
+   free vars (any non-`Num`/`Complex` value so the inner compile emits `LoadCaptured`
+   rather than inlining the placeholder).
+4. Recursively call `compile_fn(inner_params, inner_body, &inner_captured_hint)`;
+   use `Arc::new(code)` if it succeeds, `Arc::new(vec![])` if it fails.
+5. Emit `MakeClosure(inner_params, inner_body, code_arc, free_var_names)`.
+
+**Runtime** (`run_vm` handling `MakeClosure`):
+1. Pop `free_vars.len()` values from the stack.
+2. Build `new_captured = (*outer_captured).clone()` + insert each `{name: val}`.
+3. If `inner_code` is non-empty: call `Val::make_fn_compiled(params, body, cap, code)`
+   — creates a `Val::Fn` with the OnceLock pre-filled (zero recompile on first call).
+4. If `inner_code` is empty: call `Val::make_fn(params, body, cap)` — lazy compile.
+5. Push the resulting `Val::Fn` onto the stack.
+
+New constructor needed:
+```rust
+pub fn make_fn_compiled(params, body, captured, code: Vec<Instruction>) -> Self {
+    let lock = OnceLock::new();
+    let _ = lock.set(Some(code));
+    Val::Fn(params, body, captured, Arc::new(lock))
+}
 ```
-The dispatch layer is unchanged.
+
+This handles common cases: curried functions (`x -> y -> x+y`), closures returned
+from functions, higher-order combinators. `collect_free_vars` is a simple recursive
+AST walk (~30 lines).
+
+### Pipeline with bytecode
+
+```
+AST → [gpu/eval.rs]  → Vec<GpuOp>  → [fusion pass, optional] → dispatch
+                   ↑
+             for lambda args:
+    compile_fn() → Vec<Instruction>
+         → gpu/vm_lower.rs → WGSL inline body
+         → GpuOp::TensorFromLambda { wgsl_body, ... }
+```
+
+The dispatch layer is unchanged by both the fusion pass and the lambda lowering.
+
+### Module placement note
+
+`Instruction` currently lives in `eval.rs`. When `eval.rs` is eventually split
+(planned but deferred), `Instruction` should move to `src/vm.rs` or `src/bytecode.rs`
+so `src/gpu/` can import it without depending on the entire evaluator. For now,
+`src/gpu/vm_lower.rs` can import `crate::eval::Instruction` directly — it compiles
+fine within a single crate.
 
 ---
 
@@ -528,9 +607,11 @@ expect_err 'GPU(){ no_such }' "undefined variable"
    the REPL thread, which is fine for now. If GPU blocks become long-running,
    consider spawning a thread.
 
-4. **`tensor((i,j)->expr, m, n)` on GPU:** Requires either (a) compiling the lambda
-   to WGSL (hard), or (b) evaluating the lambda on the CPU and uploading the
-   result (defeats the purpose). Defer to after bytecode.
+4. **`tensor((i,j)->expr, m, n)` on GPU:** Previously blocked; now achievable via
+   bytecode lowering (see section 15). The lambda body is compiled to
+   `Vec<Instruction>` by `compile_fn()`, then lowered to a WGSL inline function by
+   `gpu/vm_lower.rs`. The GPU dispatcher emits a `TensorFromLambda` kernel.
+   Implement in v2 (after the real-tensor GPU block works end-to-end).
 
 5. **Error propagation inside GPU blocks:** wgpu errors (buffer overflow, OOM)
    surface as panics or opaque errors. Add a `GpuError` type that wraps wgpu
@@ -549,3 +630,116 @@ expect_err 'GPU(){ no_such }' "undefined variable"
    **Do not attempt to add complex GPU support until the real-tensor backend is
    working end-to-end and bytecode compilation (TODO #1) is underway.** At that
    point the right representation will be much clearer.
+
+---
+
+## 15. Bytecode as GPU IR — Technical Spec
+
+This section specifies how the bytecode VM's `Instruction` enum serves as the IR
+bridge for GPU lambda lowering.
+
+### GPU-safe subset of Instructions
+
+Not all Instructions can be lowered to WGSL. The GPU-safe subset:
+
+| Instruction | WGSL | Notes |
+|---|---|---|
+| `PushNum(f)` | `f32(f)` literal | ✓ |
+| `PushComplex` | — | ✗ No complex on GPU |
+| `LoadParam(i)` | param variable | ✓ |
+| `LoadCaptured(name)` | uniform/constant | ✓ only if val is scalar or known-shape tensor |
+| `BinOp(Add\|Sub\|Mul\|Div)` | `+`, `-`, `*`, `/` | ✓ |
+| `BinOp(Pow)` | `pow(a, b)` | ✓ |
+| `BinOp(Lt\|Gt\|LtEq\|GtEq\|Eq\|Ne)` | comparison → `f32` 0/1 | ✓ |
+| `Neg` | unary `-` | ✓ |
+| `CallBuiltin("sin"\|"cos"\|"exp"\|"sqrt"\|"abs"\|"floor"\|"ceil"\|"round"\|"log", 1)` | WGSL builtin | ✓ |
+| `JumpIfFalse(t)` / `Jump(t)` | `if/else` block | ✓ |
+| `StoreLocal(s)` / `LoadLocal(s)` | `var x: f32 = ...;` | ✓ |
+| `Pop` | discard | ✓ |
+| `MakeTuple(n)` / `MakeArray(n)` | — | ✗ Runtime heap allocation |
+| `MakeClosure(...)` | — | ✗ No nested functions in WGSL |
+| `CallVal(...)` | — | ✗ Dynamic dispatch impossible |
+| `CallBuiltin(special form, ...)` | — | ✗ sum, map, etc. are not scalar |
+
+A lambda body is "GPU-safe" if its compiled `Vec<Instruction>` contains only
+instructions from the ✓ column. Check function:
+```rust
+pub fn is_gpu_safe(code: &[Instruction]) -> bool {
+    code.iter().all(|inst| matches!(inst,
+        Instruction::PushNum(_) | Instruction::LoadParam(_) |
+        Instruction::LoadCaptured(_) | Instruction::BinOp(_) | Instruction::Neg |
+        Instruction::JumpIfFalse(_) | Instruction::Jump(_) |
+        Instruction::StoreLocal(_) | Instruction::LoadLocal(_) |
+        Instruction::Pop | Instruction::Return |
+        Instruction::CallBuiltin(name, 1) if GPU_SAFE_UNARY.contains(name.as_str()) |
+        Instruction::CallBuiltin(name, 2) if GPU_SAFE_BINARY.contains(name.as_str())
+    ))
+}
+```
+
+### `gpu/vm_lower.rs` — lowering to WGSL
+
+```rust
+// src/gpu/vm_lower.rs
+pub fn lower_to_wgsl(
+    code:        &[Instruction],
+    param_names: &[&str],          // WGSL names for LoadParam(i)
+    n_locals:    usize,            // pre-declare this many f32 vars
+    captured:    &HashMap<String, GpuScalar>, // captured scalars → WGSL constants
+) -> Result<String, String>
+```
+
+The lowering is a second pass over the linear instruction sequence. Since the code
+is already in SSA-like form (stack), convert to a register-named form:
+- Each push to the stack produces a fresh `let t_N: f32 = ...;` WGSL statement
+- `StoreLocal(s)` emits `local_s = t_N;`
+- `JumpIfFalse` + `Jump` pairs become `if (t_N != 0.0) { ... } else { ... }`
+
+The result is an inline WGSL function body that can be embedded in a
+`TensorFromLambda` kernel.
+
+### `tensor((i,j)->expr, m, n)` on GPU — the full path
+
+```
+User writes:   GPU(T) { tensor((i,j) -> sin(T[i,j]) + i*j, rows(T), cols(T)) }
+                                                              ↑ T[i,j] — not GPU-safe in v1
+                                                              (indexing not compilable)
+
+Simpler form:  GPU(T) { tensor((i,j) -> i*j, 4, 4) }
+                                         ↑ GPU-safe: only LoadParam(0), LoadParam(1), BinOp(Mul)
+```
+
+Path for GPU-safe lambda:
+1. `gpu/eval.rs` hits `Expr::Apply(Var("tensor"), [Lambda(...), m, n])`
+2. Evaluate m, n → `GpuVal::Scalar`
+3. Extract lambda's `Val::Fn(params, body, captured, cache)`
+4. `cache.get_or_init(...)` → `Some(code)`; call `is_gpu_safe(code)`
+5. If safe: `gpu/vm_lower::lower_to_wgsl(code, &params, ...)` → WGSL body string
+6. Emit `GpuOp::TensorFromLambda { wgsl_body, m, n, dst }`
+7. Dispatch: compile a `tensor_from_lambda.wgsl` template with the body inlined;
+   dispatch `m*n` threads, each thread writes `out[i*n+j] = f(i, j)`
+
+Add to `ops.rs`:
+```rust
+GpuOp::TensorFromLambda {
+    wgsl_body: String,      // lowered from bytecode
+    params:    Vec<String>, // param names used in the body
+    m:         GpuArg,
+    n:         GpuArg,
+    dst:       BufId,
+}
+```
+
+If `is_gpu_safe` returns false: fall back to CPU `tensor()` construction, then
+upload the result as a `GpuOp::Upload`. This is the safe default — GPU lambda
+lowering is an optimization, not a hard requirement.
+
+### Note on `T[i,j]` inside GPU lambdas
+
+Tensor indexing (`Expr::Index`) is currently uncompilable by the bytecode VM. For
+GPU lambdas that need `T[i,j]`, the approach is:
+- Pass `T` as a captured `LoadCaptured("T")` which maps to a GPU buffer binding
+- Emit a `LOAD_BUFFER` instruction (future addition to Instruction enum) that reads
+  a specific element of a captured GPU buffer
+
+This is a v3 addition. For v2, restrict to lambdas with numeric-only captured vars.
