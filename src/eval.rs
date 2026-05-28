@@ -76,7 +76,7 @@ impl Env {
             "lt", "leq", "gt", "geq", "eq", "neq",
             "if",
             "fft", "ifft",
-            "sum", "prod", "integral", "deriv", "map", "graph",
+            "sum", "prod", "integral", "deriv", "map", "graph", "animate2D",
             // Tensor ops
             "tensor", "matrix", "zeros", "ones", "eye", "diag",
             "shape", "rows", "cols", "transpose", "trace", "norm",
@@ -121,7 +121,7 @@ pub fn is_protected(name: &str) -> bool {
         | "lt" | "leq" | "gt" | "geq" | "eq" | "neq"
         | "if"
         | "fft" | "ifft"
-        | "sum" | "prod" | "integral" | "deriv" | "map" | "graph"
+        | "sum" | "prod" | "integral" | "deriv" | "map" | "graph" | "animate2D"
         | "tensor" | "matrix" | "zeros" | "ones" | "eye" | "diag"
         | "shape" | "rows" | "cols" | "transpose" | "trace" | "norm"
         | "row" | "col" | "matmul" | "outer"
@@ -2494,7 +2494,8 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                     "prod"     => return eval_agg(arg_exprs, env, true),
                     "integral" => return eval_integral(arg_exprs, env),
                     "deriv"    => return eval_deriv(arg_exprs, env),
-                    "graph" => return crate::graph::eval_graph(arg_exprs, env),
+                    "graph"      => return crate::graph::eval_graph(arg_exprs, env),
+                    "animate2D"  => return crate::animate::eval_animate2d(arg_exprs, env),
                     "map" => {
                         if arg_exprs.len() != 2 {
                             return Err("map(f, tuple) expects 2 args".into());

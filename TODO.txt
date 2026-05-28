@@ -1,21 +1,40 @@
 1. [DONE v0.11] n-D fftn and ifftn, complex tensors inside Val::ComplexTensor
 
-2. [DONE v0.12] skill file → MATHLANG_SKILL.md
+2. [DONE v0.13] skill file → MATHLANG_SKILL.md
    also updated README to reflect tensor-first design
 
-3. [DONE v0.12] heat.math — 2D heat solver (pure mathlang)
+3. [DONE v0.13] heat.math — 2D heat solver (pure mathlang)
    - heatSolver(T0, alpha, dx, dt) returns t -> T(t)
    - divergence-form ∇·(α∇T), energy-conserving, Neumann BCs
    - demo: cold disk (250K) in hot air (500K), N=20 grid, ~0.3s for 100 steps
    - tested via: m -f heat.math 'solver(20)'
 
-4. write an animate2D() that takes either f(t) or a 3D block, using the new
-   realtime animation binary i will give you when it is time to approach this
-   TODO item
+4. [DONE v0.14] animate2D() — stream 2D tensor frames to wgpu_animator via MXFR protocol
+   - animate2D(T)             — T: 3-D Tensor [n_frames, H, W], streams instantly
+   - animate2D(f, t_vals)     — f: t→2D tensor, 1-D tensor of timestamps
+   - animate2D(f, t0, t1, n)  — f: t→2D tensor, n frames from t0 to t1
+   - animate2D(f, n)          — f: t→2D tensor, n frames at t=0,1,...,n-1
+   - animator binary: animator/target/release/wgpu_animator
+   - usage: m -f heat.math 'animate2D(solver, 0, 20, 50)' | ./animator/target/release/wgpu_animator --stdin --colormap heat --fps 15
+   - trailing "N\n" after binary frames is harmless (animator sees UnexpectedEof → clean break)
 
 5. eigenvalues and eigenvectors
 
---- BUGS FIXED (v0.12) ---
+6. maybe accept [] for tensors
+> rand(2)
+result = [0.27252445409166737, 0.07343901272838527]
+> result = [0.27252445409166737, 0.07343901272838527]
+error: unexpected token: LBracket
+>
+
+--- NOTES ---
+
+LIMITATION: tensor(f, n1, n2, ...) requires f to return a scalar.
+  You cannot pre-build a 3-D block of 2-D frames with tensor() — the element
+  function must return a number.  Use animate2D(f, t_vals) instead.
+  Workaround if you really need a 3-D block: use cat() on individually computed slices.
+
+--- BUGS FIXED (v0.13) ---
 
 BUG: Closure captured-env deep-clone caused exponential blowup.
   Symptom: calling tensor() (or any function with a lambda in its body) hangs

@@ -1,0 +1,3 @@
+[submodule "animator"]
+	path = animator
+	url = git@github.com:ShadowElf37/wgpu_2d_animator.git

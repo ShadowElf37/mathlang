@@ -4,6 +4,7 @@ mod parser;
 mod eval;
 mod repl;
 mod graph;
+mod animate;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
