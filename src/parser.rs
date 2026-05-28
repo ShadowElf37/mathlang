@@ -453,6 +453,46 @@ impl Parser {
                     }
                 }
             }
+            // [] tensor literals — same semantics as () but with square brackets.
+            // [a, b, c] → Tuple (auto-promotes to Tensor when all-numeric).
+            // [1,2;3,4] → TensorLit (matrix).
+            // []        → empty Tuple.
+            Token::LBracket => {
+                self.bump();
+                if *self.peek() == Token::RBracket {
+                    self.bump();
+                    return Ok(Expr::Tuple(vec![]));
+                }
+                let first = self.expr()?;
+                let mut row0 = vec![first];
+                while *self.peek() == Token::Comma {
+                    self.bump();
+                    if matches!(self.peek(), Token::RBracket | Token::Semicolon) { break; }
+                    row0.push(self.expr()?);
+                }
+                if *self.peek() == Token::Semicolon {
+                    let mut rows = vec![row0];
+                    while *self.peek() == Token::Semicolon {
+                        self.bump();
+                        if *self.peek() == Token::RBracket { break; }
+                        let mut row = vec![self.expr()?];
+                        while *self.peek() == Token::Comma {
+                            self.bump();
+                            if matches!(self.peek(), Token::RBracket | Token::Semicolon) { break; }
+                            row.push(self.expr()?);
+                        }
+                        rows.push(row);
+                    }
+                    self.eat(&Token::RBracket)?;
+                    return Ok(Expr::TensorLit(rows));
+                }
+                self.eat(&Token::RBracket)?;
+                if row0.len() == 1 {
+                    Ok(row0.into_iter().next().unwrap())
+                } else {
+                    Ok(Expr::Tuple(row0))
+                }
+            }
             Token::Minus => { self.bump(); Ok(Expr::Neg(self.primary()?.into())) }
             Token::Ident(name) => {
                 self.bump();

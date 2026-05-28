@@ -138,7 +138,7 @@ pub fn is_protected(name: &str) -> bool {
 
 // ── Output formatting ─────────────────────────────────────────────────────────
 
-fn fmt_f(n: f64) -> String {
+pub fn fmt_f(n: f64) -> String {
     if n.is_nan() { return "NaN".into(); }
     if n.is_infinite() { return if n > 0.0 { "inf".into() } else { "-inf".into() }; }
     if n.fract() == 0.0 && n.abs() < 1e15 { return format!("{}", n as i64); }

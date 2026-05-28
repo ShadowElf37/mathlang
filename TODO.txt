@@ -1,8 +1,19 @@
 1. eigenvalues and eigenvectors
 
-2. accept [] for tensor literals
-   > rand(2)
-   result = [0.272, 0.073]
-   > result = [0.272, 0.073]    ← this should work, currently errors on LBracket
+1.5. matrix exp(M) (but exp would no longer broadcast, which is unintuitive - maybe separate matrix_exp())
 
-3. ctrl+d still doesnt work when something is already typed in the stdin in the repl, only works when stdin is empty
+2. [DONE] accept [] for tensor literals — [a,b,c] and [1,2;3,4] now parsed same as (…)
+
+3. [DONE] ctrl+d — ConditionalEventHandler: Ctrl+D always exits regardless of buffer content
+
+4. we should have a discussion about a manually and selectively triggered GPU backend using wgpu compute for large operations
+
+5. we should have a discussion about pushing the AST of lambdas into bytecode, or bytecode compilation in general
+
+6. the heat solver, when animated, recomputes from T_0 every call. to avoid this, it would need some way to store its state after each call. this necessitates some kind of mutable data structure, pointers, global variables, or something like this. it may be a necessary feature. this language is already not 100% functional because there are variables and functions you can define procedurally -- we just need like a "mutable variable", maybe with functions get() and set() to maintain the aesthetic
+
+7. [DONE] dont print giant tensors — 1D tensors > 20 elements truncated in REPL
+
+8. [DONE] help text discrepancy — fftn/ifftn now show identical signatures; added shift/roll/lerp/clamp/animate2D
+
+9. animator colorbar is on top of part of the rendered grid, and its background is blue and not transparent - transparent background colorbar would be fine

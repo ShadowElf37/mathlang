@@ -1,4 +1,6 @@
 use std::cell::RefCell;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use crate::lexer::Lexer;
 use crate::ast::Def;
 use crate::parser::Parser;
@@ -179,14 +181,21 @@ impl rustyline::Helper for MathHelper {}
 
 // ── Evaluation and display ────────────────────────────────────────────────────
 
-const REPL_TUPLE_LIMIT: usize = 12;
+const REPL_TUPLE_LIMIT:   usize = 12;
 const REPL_TUPLE_PREVIEW: usize = 8;
+const REPL_VEC_LIMIT:     usize = 20;
+const REPL_VEC_PREVIEW:   usize = 10;
 
 fn fmt_repl(v: &Val) -> String {
     match v {
         Val::Tuple(items) if items.len() > REPL_TUPLE_LIMIT => {
             let preview: Vec<String> = items[..REPL_TUPLE_PREVIEW].iter().map(fmt_val).collect();
-            format!("({}, ... [{} items])", preview.join(", "), items.len())
+            format!("({}, … [{} items])", preview.join(", "), items.len())
+        }
+        Val::Tensor { data, shape } if shape.len() == 1 && data.len() > REPL_VEC_LIMIT => {
+            use crate::eval::fmt_f;
+            let preview: Vec<String> = data[..REPL_VEC_PREVIEW].iter().map(|x| fmt_f(*x)).collect();
+            format!("[{}, … ({} elements)]", preview.join(", "), data.len())
         }
         other => fmt_val(other),
     }
@@ -336,12 +345,14 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "HOF:       map(f,t)  filter(f,t)  reduce(f,t)  compose(f,g)  partial(f,a)\n",
             "Control:   if(cond,a,b)\n",
             "Spectral:  fft(t)  ifft(t)  — DFT / inverse DFT on a tuple of numbers\n",
-            "           fftn(T[,axes])  ifftn(Re,Im[,axes])  — n-D DFT on tensors → (Re,Im)\n",
+            "           fftn(T[,axes])  ifftn(T[,axes])  — n-D DFT on tensors\n",
+            "           fftn/ifftn also accept (Re,Im[,axes]) for explicit complex input\n",
             "Random:    rand()  rand(a,b)\n",
             "Bitwise:   and or xor nand nor xnor not shl shr\n",
             "Complex:   i  re im abs arg conj  (all operators work on complex numbers)\n",
             "Constants: pi e phi inf i\n",
-            "Tensors:   (1,2; 3,4)  — 2D literal;  A @ B  — matmul\n",
+            "Tensors:   (1,2; 3,4)  or  [1,2; 3,4]  — 2D literal;  A @ B  — matmul\n",
+            "           [a, b, c]  — tensor literal (same as (a,b,c) with auto-promotion)\n",
             "           zeros(n1,n2,…)  ones(n1,n2,…)  eye(n)  diag(t|T)\n",
             "           tensor(f, n1, n2, …)  matrix(f, r, c)\n",
             "           shape(T)  dim(T,axis)  rows cols  transpose([a,b])  trace norm\n",
@@ -350,11 +361,17 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "           outer(T1, T2)  tensordot(T1,T2,n)  tensordot(T1,T2,(a,b))\n",
             "           matmul(A,B)  row col\n",
             "           det inv solve(A,b)  hstack vstack tomat(t,r,c)\n",
+            "           shift(T,n,axis)  — edge-replicating shift (Neumann BCs)\n",
+            "           roll(T,n,axis)   — circular/periodic shift\n",
+            "           lerp(a,b,t)      — linear interpolation: a*(1-t)+b*t (elementwise)\n",
+            "           clamp(x,lo,hi)   — clamp value/tensor to [lo,hi]\n",
             "           lingrid(start,end,counts,f)  — supports any n-D via tuples\n",
             "           T[i,j,…]  T[i,a..b]  T[..,j]  T[i..,j]  T[..k,j]  — n-D slicing\n",
             "           T[..]  = all  T[n..]  = from n  T[..n]  = to n (tuples too)\n",
             "           sum(T,axis)  prod(T,axis)  mean std var on tensors\n",
             "           flatten(T)→1D  reduce(f,T)  map(f,T)  norm(T)\n",
+            "Animate:   animate2D(f,t0,t1,n[,fps])  animate2D(T[,fps])  — spawn animator\n",
+            "           animate2D_raw(…)  — write MXFR to stdout for manual piping\n",
         )),
         "include" | "import" => {
             if arg.is_empty() { eprintln!("usage: !include <file>"); return; }
@@ -396,9 +413,34 @@ pub fn run_repl() {
         }
     }
 
+    // Ctrl+D with content in the buffer: rustyline's default EndOfFile only fires
+    // on an empty line. We use a ConditionalEventHandler so Ctrl+D always exits.
+    let ctrl_d_pressed = Arc::new(AtomicBool::new(false));
+    struct CtrlDHandler(Arc<AtomicBool>);
+    impl rustyline::ConditionalEventHandler for CtrlDHandler {
+        fn handle(
+            &self,
+            _evt: &rustyline::Event,
+            _n: rustyline::RepeatCount,
+            _positive: bool,
+            ctx: &rustyline::EventContext,
+        ) -> Option<rustyline::Cmd> {
+            if ctx.line().is_empty() {
+                Some(rustyline::Cmd::EndOfFile)   // returns ReadlineError::Eof → break
+            } else {
+                self.0.store(true, Ordering::SeqCst);
+                Some(rustyline::Cmd::Interrupt)   // returns ReadlineError::Interrupted → check flag
+            }
+        }
+    }
+
     let mut rl = Editor::<MathHelper, DefaultHistory>::new().expect("failed to init editor");
     rl.set_helper(Some(MathHelper::new()));
-    rl.bind_sequence(rustyline::KeyEvent::ctrl('D'), rustyline::EventHandler::Simple(rustyline::Cmd::EndOfFile));
+    rl.bind_sequence(
+        rustyline::KeyEvent::ctrl('D'),
+        rustyline::EventHandler::Conditional(Box::new(CtrlDHandler(ctrl_d_pressed.clone()))),
+    );
+
     loop {
         match rl.readline("> ") {
             Ok(line) => {
@@ -413,8 +455,12 @@ pub fn run_repl() {
                 }
                 if let Some(h) = rl.helper() { h.update(&env); }
             }
-            Err(ReadlineError::Interrupted) => {}
-            Err(_) => break,
+            Err(ReadlineError::Interrupted) => {
+                // Ctrl+C (or Ctrl+D with content — check flag)
+                if ctrl_d_pressed.swap(false, Ordering::SeqCst) { break; }
+                // else Ctrl+C: do nothing (keeps current line-cancel behaviour)
+            }
+            Err(_) => break,  // Eof (Ctrl+D on empty line) or other error
         }
     }
 }
