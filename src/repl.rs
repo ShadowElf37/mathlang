@@ -313,37 +313,77 @@ pub fn import_file(path: &str, display: &str, env: &mut Env, verbose: bool) {
 }
 
 // ── Tensor serialization ──────────────────────────────────────────────────────
+// Format: [8] "MLTENSOR"  [1] type (0=real, 1=complex)  [8] ndim  [ndim*8] shape
+//         real:    [nelem*8] f64 data
+//         complex: [nelem*8] f64 re, then [nelem*8] f64 im  (all little-endian)
 
 const TENSOR_MAGIC: &[u8; 8] = b"MLTENSOR";
+const MLT_REAL:    u8 = 0x00;
+const MLT_COMPLEX: u8 = 0x01;
 
-fn save_tensor(path: &str, data: &[f64], shape: &[usize]) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
-    f.write_all(TENSOR_MAGIC)?;
-    f.write_all(&(shape.len() as u64).to_le_bytes())?;
-    for &dim in shape { f.write_all(&(dim as u64).to_le_bytes())?; }
-    for &x in data   { f.write_all(&x.to_le_bytes())?; }
+fn write_f64s(f: &mut impl std::io::Write, xs: &[f64]) -> std::io::Result<()> {
+    for &x in xs { f.write_all(&x.to_le_bytes())?; }
     Ok(())
 }
 
-fn load_tensor(path: &str) -> Result<(Vec<f64>, Vec<usize>), String> {
+fn save_tensor_val(path: &str, val: &Val) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    match val {
+        Val::Tensor { data, shape } => {
+            f.write_all(TENSOR_MAGIC)?;
+            f.write_all(&[MLT_REAL])?;
+            f.write_all(&(shape.len() as u64).to_le_bytes())?;
+            for &d in shape { f.write_all(&(d as u64).to_le_bytes())?; }
+            write_f64s(&mut f, data)?;
+        }
+        Val::ComplexTensor { re, im, shape } => {
+            f.write_all(TENSOR_MAGIC)?;
+            f.write_all(&[MLT_COMPLEX])?;
+            f.write_all(&(shape.len() as u64).to_le_bytes())?;
+            for &d in shape { f.write_all(&(d as u64).to_le_bytes())?; }
+            write_f64s(&mut f, re)?;
+            write_f64s(&mut f, im)?;
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
+fn load_tensor(path: &str) -> Result<Val, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    if bytes.len() < 16 { return Err("file too short".into()); }
+    if bytes.len() < 17 { return Err("file too short".into()); }
     if &bytes[..8] != TENSOR_MAGIC { return Err("not a mathlang tensor file".into()); }
-    let ndim = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
-    let header_end = 16 + ndim * 8;
-    if bytes.len() < header_end { return Err("truncated header".into()); }
+    let kind = bytes[8];
+    let ndim = u64::from_le_bytes(bytes[9..17].try_into().unwrap()) as usize;
+    let hdr = 17 + ndim * 8;
+    if bytes.len() < hdr { return Err("truncated header".into()); }
     let shape: Vec<usize> = (0..ndim)
-        .map(|i| u64::from_le_bytes(bytes[16+i*8..16+(i+1)*8].try_into().unwrap()) as usize)
+        .map(|i| u64::from_le_bytes(bytes[17+i*8..17+(i+1)*8].try_into().unwrap()) as usize)
         .collect();
     let nelem: usize = shape.iter().product();
-    if bytes.len() < header_end + nelem * 8 {
-        return Err(format!("truncated data: need {nelem} f64s"));
+    let read_f64s = |off: usize| -> Vec<f64> {
+        (0..nelem).map(|i| f64::from_le_bytes(bytes[off+i*8..off+(i+1)*8].try_into().unwrap())).collect()
+    };
+    match kind {
+        MLT_REAL => {
+            if bytes.len() < hdr + nelem * 8 {
+                return Err(format!("truncated data: need {nelem} f64s"));
+            }
+            Ok(Val::Tensor { data: TData::new(read_f64s(hdr)), shape })
+        }
+        MLT_COMPLEX => {
+            if bytes.len() < hdr + nelem * 16 {
+                return Err(format!("truncated complex data: need {nelem} complex f64 pairs"));
+            }
+            Ok(Val::ComplexTensor {
+                re: TData::new(read_f64s(hdr)),
+                im: TData::new(read_f64s(hdr + nelem * 8)),
+                shape,
+            })
+        }
+        _ => Err(format!("unknown tensor type byte: 0x{kind:02x}")),
     }
-    let data: Vec<f64> = (0..nelem)
-        .map(|i| f64::from_le_bytes(bytes[header_end+i*8..header_end+(i+1)*8].try_into().unwrap()))
-        .collect();
-    Ok((data, shape))
 }
 
 fn bang_command(cmd: &str, env: &mut Env) {
@@ -436,10 +476,17 @@ fn bang_command(cmd: &str, env: &mut Env) {
                 eprintln!("usage: !savetensor <var> <file>"); return;
             }
             match env.vars.get(var) {
-                Some(Val::Tensor { data, shape }) => {
-                    let (d, s) = (data.to_vec(), shape.clone());
-                    match save_tensor(&expand_path(fp), &d, &s) {
-                        Ok(()) => println!("saved {var} ({} elements) to {fp}", d.len()),
+                Some(v @ Val::Tensor { data, .. }) => {
+                    let (n, v) = (data.len(), v.clone());
+                    match save_tensor_val(&expand_path(fp), &v) {
+                        Ok(()) => println!("saved {var} ({n} elements, real) to {fp}"),
+                        Err(e) => eprintln!("savetensor: {e}"),
+                    }
+                }
+                Some(v @ Val::ComplexTensor { re, .. }) => {
+                    let (n, v) = (re.len(), v.clone());
+                    match save_tensor_val(&expand_path(fp), &v) {
+                        Ok(()) => println!("saved {var} ({n} elements, complex) to {fp}"),
                         Err(e) => eprintln!("savetensor: {e}"),
                     }
                 }
@@ -454,10 +501,14 @@ fn bang_command(cmd: &str, env: &mut Env) {
                 eprintln!("usage: !loadtensor <var> <file>"); return;
             }
             match load_tensor(&expand_path(fp)) {
-                Ok((data, shape)) => {
-                    let n = data.len();
-                    env.define(var.to_string(), Val::Tensor { data: TData::new(data), shape });
-                    println!("loaded {var} ({n} elements) from {fp}");
+                Ok(val) => {
+                    let desc = match &val {
+                        Val::Tensor { data, .. }        => format!("{} elements, real", data.len()),
+                        Val::ComplexTensor { re, .. }   => format!("{} elements, complex", re.len()),
+                        _ => unreachable!(),
+                    };
+                    env.define(var.to_string(), val);
+                    println!("loaded {var} ({desc}) from {fp}");
                 }
                 Err(e) => eprintln!("loadtensor: {e}"),
             }

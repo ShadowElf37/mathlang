@@ -998,7 +998,7 @@ _repl_check() {
     local label="$1" script="$2" pat="$3"
     local out
     out=$(printf '%s\n' "$script" | "$M" 2>&1)
-    if echo "$out" | grep -qE "$pat"; then
+    if echo "$out" | grep -qE -- "$pat"; then
         PASS=$((PASS+1))
     else
         FAIL=$((FAIL+1))
@@ -1032,6 +1032,22 @@ _repl_check "mlt.err_nonten"      "x=42
 !savetensor x /tmp/x.mlt"                 "not a tensor"
 _repl_check "mlt.err_nofile"      "!loadtensor Z /tmp/mlt_no_such_file_xyz.mlt" \
                                    "loadtensor:"
+
+# complex tensor roundtrip
+_repl_check "mlt.complex.roundtrip" "C = fft([1,1,0,0])
+!savetensor C $_TMLT
+!loadtensor D $_TMLT
+re(D[1])"                              "1"
+_repl_check "mlt.complex.im"        "C = fft([1,1,0,0])
+!savetensor C $_TMLT
+!loadtensor D $_TMLT
+im(D[1])"                              "-1"
+_repl_check "mlt.complex.confirms"  "C = fft([1,1,0,0])
+!savetensor C $_TMLT"                  "complex"
+_repl_check "mlt.complex.shape"     "C = fft([1,1,0,0])
+!savetensor C $_TMLT
+!loadtensor D $_TMLT
+shape(D)"                              "\[4\]"
 
 rm -f "$_TMLT"
 

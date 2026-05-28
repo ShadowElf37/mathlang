@@ -536,3 +536,16 @@ expect_err 'GPU(){ no_such }' "undefined variable"
    surface as panics or opaque errors. Add a `GpuError` type that wraps wgpu
    errors with source location from the AST span (requires adding spans to AST
    first — see `src/ast.rs`).
+
+6. **Complex tensor support on the GPU (NB):** The language has a first-class
+   `Val::ComplexTensor { re, im, shape }` type that is used transparently by FFT,
+   complex arithmetic, and now `!savetensor`/`!loadtensor`. The current GPU backend
+   design (sections 1–13) assumes only real `f64` (promoted to `f32`) tensors.
+   Supporting complex tensors on the GPU will require further design work — likely
+   one of: (a) representing complex numbers as `vec2<f32>` in WGSL and emitting
+   paired operations, or (b) splitting re/im into two real GPU buffers and
+   synthesising complex ops from real ones. Neither is trivial, and both require
+   the WGSL codegen layer to be aware of the `ComplexTensor` type distinction.
+   **Do not attempt to add complex GPU support until the real-tensor backend is
+   working end-to-end and bytecode compilation (TODO #1) is underway.** At that
+   point the right representation will be much clearer.
