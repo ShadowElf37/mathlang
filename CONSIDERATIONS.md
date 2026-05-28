@@ -621,25 +621,37 @@ Not all Instructions can be lowered to WGSL. The GPU-safe subset:
 | `JumpIfFalse(t)` / `Jump(t)` | `if/else` block | ✓ |
 | `StoreLocal(s)` / `LoadLocal(s)` | `var x: f32 = ...;` | ✓ |
 | `Pop` | discard | ✓ |
-| `Index` | — | ✗ Requires CPU tensor ref; use `LoadBuffer` (future) in GPU context |
+| `Index` (base is `LoadCaptured` of an uploaded tensor) | `buffer[linear_idx]` | ✓ captured tensor → GPU buffer binding; `lower_to_wgsl` needs a `name → scalar\|buffer` type map |
+| `Index` (base is a computed value) | — | ✗ mid-kernel tensors don't exist in WGSL |
 | `MakeTuple(n)` / `MakeArray(n)` | — | ✗ Runtime heap allocation |
 | `MakeClosure(...)` | — | ✗ No nested functions in WGSL; recursion impossible on GPU |
 | `CallVal(...)` | — | ✗ Dynamic dispatch impossible |
 | `CallBuiltin(special form, ...)` | — | ✗ sum, map, etc. are not scalar |
 
 A lambda body is "GPU-safe" if its compiled `Vec<Instruction>` contains only
-instructions from the ✓ column. Check function:
+instructions from the ✓ column. For `Index`, safety depends on whether the base
+is a `LoadCaptured` of an uploaded tensor, so the check needs the capture type map:
 ```rust
-pub fn is_gpu_safe(code: &[Instruction]) -> bool {
-    code.iter().all(|inst| matches!(inst,
-        Instruction::PushNum(_) | Instruction::LoadParam(_) |
-        Instruction::LoadCaptured(_) | Instruction::BinOp(_) | Instruction::Neg |
-        Instruction::JumpIfFalse(_) | Instruction::Jump(_) |
-        Instruction::StoreLocal(_) | Instruction::LoadLocal(_) |
-        Instruction::Pop | Instruction::Return |
-        Instruction::CallBuiltin(name, 1) if GPU_SAFE_UNARY.contains(name.as_str()) |
-        Instruction::CallBuiltin(name, 2) if GPU_SAFE_BINARY.contains(name.as_str())
-    ))
+pub fn is_gpu_safe(code: &[Instruction], tensor_captures: &HashSet<&str>) -> bool {
+    let mut i = 0;
+    while i < code.len() {
+        let ok = match &code[i] {
+            Instruction::PushNum(_) | Instruction::LoadParam(_)
+            | Instruction::LoadCaptured(_) | Instruction::BinOp(_) | Instruction::Neg
+            | Instruction::JumpIfFalse(_) | Instruction::Jump(_)
+            | Instruction::StoreLocal(_) | Instruction::LoadLocal(_)
+            | Instruction::Pop | Instruction::Return => true,
+            Instruction::CallBuiltin(name, 1) => GPU_SAFE_UNARY.contains(name.as_str()),
+            Instruction::CallBuiltin(name, 2) => GPU_SAFE_BINARY.contains(name.as_str()),
+            // Index is safe only when the base is a captured tensor buffer.
+            // Heuristic: scan backwards for the LoadCaptured that produced the base.
+            Instruction::Index => base_is_tensor_capture(&code[..i], tensor_captures),
+            _ => false,
+        };
+        if !ok { return false; }
+        i += 1;
+    }
+    true
 }
 ```
 
@@ -647,11 +659,13 @@ pub fn is_gpu_safe(code: &[Instruction]) -> bool {
 
 ```rust
 // src/gpu/vm_lower.rs
+pub enum CaptureKind { Scalar(f32), Buffer { binding: u32, shape: Vec<u32> } }
+
 pub fn lower_to_wgsl(
     code:        &[Instruction],
-    param_names: &[&str],          // WGSL names for LoadParam(i)
-    n_locals:    usize,            // pre-declare this many f32 vars
-    captured:    &HashMap<String, GpuScalar>, // captured scalars → WGSL constants
+    param_names: &[&str],                      // WGSL names for LoadParam(i)
+    n_locals:    usize,                        // pre-declare this many f32 vars
+    captures:    &HashMap<String, CaptureKind>, // scalars → constants; buffers → bindings
 ) -> Result<String, String>
 ```
 
@@ -667,12 +681,19 @@ The result is an inline WGSL function body that can be embedded in a
 ### `tensor((i,j)->expr, m, n)` on GPU — the full path
 
 ```
-User writes:   GPU { tensor((i,j) -> sin(T[i,j]) + i*j, rows(T), cols(T)) }
-                                                           ↑ T[i,j] — not GPU-safe in v1
-                                                           (Index instruction rejected by is_gpu_safe)
+GPU { tensor((i,j) -> sin(T[i,j]) + i*j, rows(T), cols(T)) }
+```
+`T` is a free variable → uploaded as a GPU buffer. `T[i,j]` compiles to
+`LoadCaptured("T"), LoadParam(0), LoadParam(1), MakeTuple(2), Index`.
+`is_gpu_safe` passes because the base of `Index` is `LoadCaptured("T")` and
+`T` is a known buffer. `lower_to_wgsl` emits `buffer_T[i * cols + j]`.
+This is GPU-safe in v2 (requires the `name → scalar|buffer` type map in
+`lower_to_wgsl`; trivially available from the uploaded captures set).
 
-Simpler form:  GPU { tensor((i,j) -> i*j, 4, 4) }
-                                    ↑ GPU-safe: only LoadParam(0), LoadParam(1), BinOp(Mul)
+Simpler form already GPU-safe in v1 (no indexing needed):
+```
+GPU { tensor((i,j) -> i*j, 4, 4) }
+     ↑ LoadParam(0), LoadParam(1), BinOp(Mul) — all in GPU-safe subset
 ```
 
 Path for GPU-safe lambda:
