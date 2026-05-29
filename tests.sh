@@ -858,15 +858,15 @@ run "ctms.sum_axis"     "sum(tensor((r,c)->r+c*i, 3, 3), 0)"          "[3, 3 + 3
 run "ctms.sum_fn_cx"    "sum(k->k*i, 4)"                              "6i"
 run "ctms.sum_lo_hi"    "sum(k->k*i, 0, 3)"                           "6i"
 
-# ── fftn / ifftn with ComplexTensor ──────────────────────────────────────────
-section "FFTN COMPLEX"
-run "ffc.shape_1d"      "shape(fftn(tensor(k->k+k*i, 8)))"            "[8]"
-run "ffc.shape_2d"      "shape(fftn(tensor((r,c)->r+c*i, 4, 4)))"     "[4, 4]"
-run "ffc.roundtrip"     "T = tensor(k->k+k*i, 4); sum(abs(ifftn(fftn(T)) - T))" "0"
-run "ffc.axis"          "shape(fftn(tensor((r,c)->r+c*i, 3, 4), 1))"  "[3, 4]"
-run "ffc.axes_tuple"    "shape(fftn(tensor((r,c)->r+c*i, 3, 4), (0,1)))" "[3, 4]"
-run "ffc.real_input_ct" "T = tensor(k->k, 4); shape(fftn(T))"         "[4]"
-run "ffc.re_im_pair"    "Re = zeros(4); Im = tensor(k->k, 4); shape(fftn(Re, Im))" "[4]"
+# ── fft / ifft with ComplexTensor (n-D) ──────────────────────────────────────
+section "FFT COMPLEX"
+run "ffc.shape_1d"      "shape(fft(tensor(k->k+k*i, 8)))"            "[8]"
+run "ffc.shape_2d"      "shape(fft(tensor((r,c)->r+c*i, 4, 4)))"     "[4, 4]"
+run "ffc.roundtrip"     "T = tensor(k->k+k*i, 4); sum(abs(ifft(fft(T)) - T))" "0"
+run "ffc.axis"          "shape(fft(tensor((r,c)->r+c*i, 3, 4), 1))"  "[3, 4]"
+run "ffc.axes_tuple"    "shape(fft(tensor((r,c)->r+c*i, 3, 4), (0,1)))" "[3, 4]"
+run "ffc.real_input_ct" "T = tensor(k->k, 4); shape(fft(T))"         "[4]"
+run "ffc.re_im_pair"    "Re = zeros(4); Im = tensor(k->k, 4); shape(fft(Re, Im))" "[4]"
 
 # ── zero-arg lambdas ─────────────────────────────────────────────────────────
 section "ZERO-ARG LAMBDA"

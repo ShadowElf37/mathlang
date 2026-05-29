@@ -46,7 +46,6 @@ pub const BUILTIN_FNS: &[&str] = &[
     "lingrid",
     "reshape", "permute", "cat", "squeeze", "unsqueeze",
     "dim", "tensordot",
-    "fftn", "ifftn",
 ];
 
 pub const BUILTIN_CONSTS: &[&str] = &["pi", "e", "phi", "inf", "i"];
@@ -145,7 +144,7 @@ impl rustyline::completion::Completer for MathHelper {
         -> rustyline::Result<(usize, Vec<String>)>
     {
         if line.starts_with('!') {
-            let cmds = ["!clear", "!defs", "!help", "!include ", "!loadhdf5 ", "!loadtensor ", "!print ", "!savehdf5 ", "!savetensor ", "!version"];
+            let cmds = ["!clear", "!defs", "!exit", "!help", "!include ", "!loadhdf5 ", "!loadtensor ", "!print ", "!q", "!quit", "!savehdf5 ", "!savetensor ", "!version"];
             return Ok((0, cmds.iter().filter(|&&c| c.starts_with(line)).map(|s| s.to_string()).collect()));
         }
         let start = line[..pos].rfind(|c: char| !c.is_alphanumeric() && c != '_').map_or(0, |i| i+1);
@@ -511,7 +510,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "           !savehdf5 <var> <file> [/ds] [--append] [--overwrite] [--gzip 0-9]\n",
             "           !loadhdf5 <var> <file> [/ds] [--list]\n",
             "Init file: ~/.mathlangrc (auto-imported on start; override with $MATHLANG_INIT)\n",
-            "Exit:      quit / exit / Ctrl-D\n\n",
+            "Exit:      !q / !quit / !exit / Ctrl-D\n\n",
             "Syntax:    x = 3              variable\n",
             "           f(x) = x^2         named function\n",
             "           f = x -> x^2       lambda (first-class)\n",
@@ -540,9 +539,8 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "Stats:     mean median mode  std var  (accept tuples or tensors)\n",
             "HOF:       map(f,t)  filter(f,t)  reduce(f,t)  compose(f,g)  partial(f,a)\n",
             "Control:   if(cond,a,b)\n",
-            "Spectral:  fft(t)  ifft(t)  — DFT / inverse DFT on a tuple of numbers\n",
-            "           fftn(T[,axes])  ifftn(T[,axes])  — n-D DFT on tensors\n",
-            "           fftn/ifftn also accept (Re,Im[,axes]) for explicit complex input\n",
+            "Spectral:  fft(T[,axes])  ifft(T[,axes])  — n-D DFT / inverse DFT on tensors\n",
+            "           fft/ifft also accept (Re,Im[,axes]) for explicit complex input\n",
             "Random:    rand()  rand(a,b)\n",
             "Bitwise:   and or xor nand nor xnor not shl shr\n",
             "Complex:   i  re im abs arg conj  (all operators work on complex numbers)\n",
@@ -817,9 +815,10 @@ pub fn run_repl() {
                 let line = line.trim().to_string();
                 if line.is_empty() { continue; }
                 let _ = rl.add_history_entry(&line);
-                if matches!(line.as_str(), "quit" | "exit") { break; }
                 if let Some(rest) = line.strip_prefix('!') {
-                    bang_command(rest.trim_start(), &mut env);
+                    let cmd = rest.trim_start();
+                    if matches!(cmd, "q" | "quit" | "exit") { break; }
+                    bang_command(cmd, &mut env);
                 } else {
                     eval_line(&line, &mut env, true);
                 }

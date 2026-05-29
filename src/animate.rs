@@ -54,10 +54,17 @@ fn call_for_frame(f: &Val, t: f64, env: &Env) -> Result<(Vec<f64>, usize, usize)
             let cols = data.len();
             Ok((data.into_vec(), 1, cols))
         }
-        other => Err(format!(
-            "animate2D: f(t) must return a 2-D tensor, got {}",
-            crate::eval::fmt_val(&other)
-        )),
+        other => {
+            let type_desc = match &other {
+                Val::Tensor { shape, .. } => format!("{}D tensor (shape {:?})", shape.len(), shape),
+                Val::ComplexTensor { shape, .. } =>
+                    format!("complex {}D tensor (shape {:?}) — check for NaN/division-by-zero", shape.len(), shape),
+                Val::Num(_)   => "scalar".into(),
+                Val::Tuple(v) => format!("tuple of {} elements", v.len()),
+                _             => "non-tensor value".into(),
+            };
+            Err(format!("animate2D: f(t) must return a 2-D tensor, got {type_desc}"))
+        }
     }
 }
 

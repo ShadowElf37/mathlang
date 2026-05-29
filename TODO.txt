@@ -15,13 +15,20 @@
 
 2. GPU backend (in progress, see CONSIDERATIONS.md)
 
+3. !savenpy !loadnpy
+
 4. Consider removing : syntax for the final expression in blocks and the CLI — it is
-   synonymous with ; for the last expression, and tuple separation after : could just
-   be written explicitly by the user.
+   synonymous with ; for the last expression, and tuple separation after : could jus
+   be written explicitly by the user. Maybe defer this change until we need : for something else.
 
 5. Claude Opus exhaustive ergonomics and bug check
 
-8. Type hinting enforced by the interpreter (fn, scalar, tensor, complex?)
+6. [DONE] animator error messages: show type+shape instead of full tensor dump; hint
+   about NaN/division-by-zero when a complex tensor is returned unexpectedly.
+
+7. [DONE] animator: spacebar to pause/resume; left/right arrows to step frames (also pause).
+
+8. Type hinting enforced by the interpreter (fn, tensor, real, complex?)
 
 9. Split eval.rs — it is too large; defer until the GPU eval path (gpu_eval.rs) is
    designed, so the split boundary is clear.
@@ -30,4 +37,11 @@
 
 11. aur package that puts animator and m executables in bin; hdf5 option?
 
-12. replace quit/exit commands with !q, !quit, !exit
+12. [DONE] replaced quit/exit with !q, !quit, !exit
+
+13. [DONE] matrix printing: 2D+ tensors inside tuples now get a newline prefix so
+    the matrix rows don't run into the surrounding text.
+
+14. [DONE] removed old 1D-tuple fft; renamed fftn/ifftn to fft/ifft (n-D tensor DFT).
+
+15. animator: allow specifying the plot title (where would it go? just on top of the plot in the top left corner?)

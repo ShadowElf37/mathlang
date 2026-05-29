@@ -204,7 +204,6 @@ impl Env {
             "lingrid",
             "reshape", "permute", "cat", "squeeze", "unsqueeze",
             "dim", "tensordot",
-            "fftn", "ifftn",
         ] {
             vars.insert(name.to_string(), Val::Builtin(name.to_string()));
         }
@@ -252,7 +251,6 @@ pub fn is_protected(name: &str) -> bool {
         | "lingrid"
         | "reshape" | "permute" | "cat" | "squeeze" | "unsqueeze"
         | "dim" | "tensordot"
-        | "fftn" | "ifftn"
     )
 }
 
@@ -316,7 +314,17 @@ pub fn fmt_val(v: &Val) -> String {
         Val::Fn(params, ..) => format!("<fn({}) = …>", params.join(", ")),
         Val::Builtin(name) => format!("<builtin {name}>"),
         Val::Cell(c) => format!("cell({})", fmt_val(&c.borrow())),
-        Val::Tuple(items) => format!("({})", items.iter().map(fmt_val).collect::<Vec<_>>().join(", ")),
+        Val::Tuple(items) => {
+            let parts: Vec<String> = items.iter().map(|item| {
+                let s = fmt_val(item);
+                match item {
+                    Val::Tensor { shape, .. } if shape.len() >= 2 => format!("\n{s}"),
+                    Val::ComplexTensor { shape, .. } if shape.len() >= 2 => format!("\n{s}"),
+                    _ => s,
+                }
+            }).collect();
+            format!("({})", parts.join(", "))
+        }
         Val::Tensor { data, shape } => {
             if shape.is_empty() || data.is_empty() { return "[]".into(); }
             if shape.len() == 1 {
@@ -1418,57 +1426,17 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             Ok(Val::Num(if (n - cycles) % 2 == 0 { 1.0 } else { -1.0 }))
         }
 
-        "fft" | "ifft" => {
-            arity(name, 1, vals.len())?;
-            // Accept a 1D tensor or a tuple of numbers
-            let (re_in, im_in): (Vec<f64>, Vec<f64>) = match vals.into_iter().next().unwrap() {
-                Val::Tensor { data, shape } if shape.len() == 1
-                    => { let n = data.len(); (data.into_vec(), vec![0.0; n]) }
-                Val::Tensor { data, .. } => { let n = data.len(); (data.into_vec(), vec![0.0; n]) }
-                Val::ComplexTensor { re, im, .. } => (re.into_vec(), im.into_vec()),
-                Val::Tuple(v) => {
-                    let mut re = Vec::with_capacity(v.len());
-                    let mut im = Vec::with_capacity(v.len());
-                    for item in v {
-                        match item {
-                            Val::Num(r)        => { re.push(r); im.push(0.0); }
-                            Val::Complex(r, i) => { re.push(r); im.push(i); }
-                            _ => return Err(format!("{name}: elements must be numbers")),
-                        }
-                    }
-                    (re, im)
-                }
-                _ => return Err(format!("{name}: argument must be a 1D tensor")),
-            };
-            let n = re_in.len();
-            if n == 0 { return Err(format!("{name}: empty input")); }
-            use rustfft::num_complex::Complex64;
-            let mut buf: Vec<Complex64> = re_in.into_iter().zip(im_in)
-                .map(|(r, i)| Complex64::new(r, i)).collect();
-            let mut planner = rustfft::FftPlanner::new();
-            if name == "fft" {
-                planner.plan_fft_forward(n).process(&mut buf);
-            } else {
-                planner.plan_fft_inverse(n).process(&mut buf);
-                let scale = 1.0 / n as f64;
-                for c in &mut buf { *c *= scale; }
-            }
-            let re: Vec<f64> = buf.iter().map(|c| c.re).collect();
-            let im: Vec<f64> = buf.iter().map(|c| c.im).collect();
-            Ok(maybe_real(re, im, vec![n]))
-        }
-
-        // fftn / ifftn — n-D DFT along any subset of axes.
-        // Returns (Re_tensor, Im_tensor) with the same shape as input.
+        // fft / ifft — n-D DFT along any subset of axes.
+        // Returns a ComplexTensor (or real Tensor if all imaginary parts collapse to zero).
         //
         // Signatures (T = real tensor, axes = scalar or tuple of axis indices):
-        //   fftn(T)             – forward DFT along all axes
-        //   fftn(T, axes)       – forward DFT along specified axes
-        //   fftn(Re, Im)        – forward DFT of complex tensor along all axes
-        //   fftn(Re, Im, axes)  – forward DFT of complex tensor along specified axes
-        // ifftn: same, inverse DFT (each axis divided by its size)
-        "fftn" | "ifftn" => {
-            let forward = name == "fftn";
+        //   fft(T)             – forward DFT along all axes
+        //   fft(T, axes)       – forward DFT along specified axes
+        //   fft(Re, Im)        – forward DFT of complex tensor along all axes
+        //   fft(Re, Im, axes)  – forward DFT of complex tensor along specified axes
+        // ifft: same, inverse DFT (each axis divided by its size)
+        "fft" | "ifft" => {
+            let forward = name == "fft";
 
             // Signatures:
             //   fftn(T)              – forward DFT on real tensor, all axes
