@@ -19,9 +19,8 @@
    Saves real tensors as float64, complex tensors as complex128.
    Loads f2/f4/f8, c8/c16, i/u 1/2/4/8 bytes, bool — converts all to f64.
 
-4. Consider removing : syntax for the final expression in blocks and the CLI — it is
-   synonymous with ; for the last expression, and tuple separation after : could jus
-   be written explicitly by the user. Maybe defer this change until we need : for something else.
+4. [DONE] Removed : separator syntax. : is now exclusively the type-annotation operator.
+   All test expressions updated to use ; instead of :.
 
 5. Claude Opus exhaustive ergonomics and bug check
 
@@ -30,7 +29,7 @@
 
 7. [DONE] animator: spacebar to pause/resume; left/right arrows to step frames (also pause).
 
-8. Type hinting enforced by the interpreter (fn, tensor, real, complex?)
+8. [DONE] Type hints on function params and return types. Vocabulary: real/complex/num/int/nat/tensor/real tensor/complex tensor/fn/cell/tuple/any. Coerces complex→real when |im|<eps. !type <name> shows signatures. See TYPEHINTS.md.
 
 9. Split eval.rs — it is too large; defer until the GPU eval path (gpu_eval.rs) is
    designed, so the split boundary is clear.

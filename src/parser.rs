@@ -1,5 +1,5 @@
 use crate::lexer::Token;
-use crate::ast::{Expr, BlockStmt, Op, Def};
+use crate::ast::{Expr, BlockStmt, Op, Def, TypeHint, Param};
 
 pub struct Parser { toks: Vec<Token>, pos: usize }
 
@@ -16,17 +16,42 @@ impl Parser {
         else { Err(format!("expected {:?}, got {:?}", expected, self.peek())) }
     }
 
+    // Skip a type identifier (1 or 2 tokens: "real"/"complex" + optional "tensor")
+    fn skip_type_ident(toks: &[Token], pos: usize) -> usize {
+        match toks.get(pos) {
+            Some(Token::Ident(s)) => {
+                let is_prefixed = s == "real" || s == "complex";
+                let p = pos + 1;
+                if is_prefixed && matches!(toks.get(p), Some(Token::Ident(t)) if t == "tensor") {
+                    p + 1
+                } else {
+                    p
+                }
+            }
+            _ => pos,
+        }
+    }
+
+    // Skip ": type_hint" if present (colon + type identifier)
+    fn skip_colon_hint(toks: &[Token], pos: usize) -> usize {
+        if !matches!(toks.get(pos), Some(Token::Colon)) { return pos; }
+        Self::skip_type_ident(toks, pos + 1)
+    }
+
     // Ident (Comma Ident)+ Arrow — bare multi-arg lambda: n, r -> expr
+    // Also handles type hints: n: real, r: int -> expr
     fn is_multi_lambda(&self) -> bool {
         let mut p = self.pos;
         if !matches!(self.toks.get(p), Some(Token::Ident(_))) { return false; }
         p += 1;
+        p = Self::skip_colon_hint(&self.toks, p);
         let mut count = 0;
         loop {
             if !matches!(self.toks.get(p), Some(Token::Comma)) { break; }
             p += 1;
             if !matches!(self.toks.get(p), Some(Token::Ident(_))) { return false; }
             p += 1;
+            p = Self::skip_colon_hint(&self.toks, p);
             count += 1;
         }
         count > 0 && matches!(self.toks.get(p), Some(Token::Arrow))
@@ -38,6 +63,7 @@ impl Parser {
         let mut p = self.pos;
         if !matches!(self.toks.get(p), Some(Token::Ident(_))) { return false; }
         p += 1;
+        p = Self::skip_colon_hint(&self.toks, p);
         let mut count = 0;
         loop {
             match self.toks.get(p) {
@@ -47,6 +73,7 @@ impl Parser {
                     p += 1;
                     if !matches!(self.toks.get(p), Some(Token::Ident(_))) { return false; }
                     p += 1;
+                    p = Self::skip_colon_hint(&self.toks, p);
                     count += 1;
                 }
                 _ => return false,
@@ -57,58 +84,96 @@ impl Parser {
     fn parse_multi_lambda(&mut self) -> Result<Expr, String> {
         let mut params = vec![];
         loop {
-            match self.bump() {
-                Token::Ident(s) => params.push(s),
-                t => return Err(format!("expected param name, got {:?}", t)),
-            }
+            params.push(self.parse_param()?);
             if *self.peek() == Token::Comma { self.bump(); } else { break; }
         }
         self.eat(&Token::Arrow)?;
-        Ok(Expr::Lambda(params, self.expr()?.into()))
+        Ok(Expr::Lambda(params, None, self.expr()?.into()))
     }
 
-    // Ident '=' ...  or  Ident '(' params ')' '=' ...
+    // Ident '=' ...  or  Ident '(' params ')' ['-> type] '=' ...
     fn is_def_start(&self) -> bool {
         let p = self.pos;
         if !matches!(self.toks.get(p), Some(Token::Ident(_))) { return false; }
         if matches!(self.toks.get(p + 1), Some(Token::Eq)) { return true; }
-        if matches!(self.toks.get(p + 1), Some(Token::LParen)) {
-            let mut q = p + 2;
-            let mut depth = 1usize;
-            while q < self.toks.len() {
-                match &self.toks[q] {
-                    Token::LParen => depth += 1,
-                    Token::RParen => {
-                        depth -= 1;
-                        if depth == 0 {
-                            return matches!(self.toks.get(q + 1), Some(Token::Eq));
+        if !matches!(self.toks.get(p + 1), Some(Token::LParen)) { return false; }
+        let mut q = p + 2;
+        let mut depth = 1usize;
+        while q < self.toks.len() {
+            match &self.toks[q] {
+                Token::LParen => depth += 1,
+                Token::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let mut r = q + 1;
+                        // skip optional -> type_hint
+                        if matches!(self.toks.get(r), Some(Token::Arrow)) {
+                            r += 1;
+                            r = Self::skip_type_ident(&self.toks, r);
                         }
+                        return matches!(self.toks.get(r), Some(Token::Eq));
                     }
-                    Token::Eof => return false,
-                    _ => {}
                 }
-                q += 1;
+                Token::Eof => return false,
+                _ => {}
             }
+            q += 1;
         }
         false
     }
 
-    fn has_top_level_colon(&self) -> bool {
-        let mut depth = 0usize;
-        for t in &self.toks {
-            match t {
-                Token::LParen | Token::LBrace | Token::LBracket => depth += 1,
-                Token::RParen | Token::RBrace | Token::RBracket => { if depth > 0 { depth -= 1; } }
-                Token::Colon if depth == 0 => return true,
-                Token::Eof => break,
-                _ => {}
+    fn try_parse_type_hint(&mut self) -> Option<TypeHint> {
+        let s = match self.peek() {
+            Token::Ident(s) => s.clone(),
+            _ => return None,
+        };
+        match s.as_str() {
+            "real" => {
+                self.bump();
+                if let Token::Ident(s2) = self.peek() {
+                    if s2 == "tensor" { self.bump(); return Some(TypeHint::RealTensor); }
+                }
+                Some(TypeHint::Real)
             }
+            "complex" => {
+                self.bump();
+                if let Token::Ident(s2) = self.peek() {
+                    if s2 == "tensor" { self.bump(); return Some(TypeHint::ComplexTensor); }
+                }
+                Some(TypeHint::Complex)
+            }
+            "num"    => { self.bump(); Some(TypeHint::Num) }
+            "int"    => { self.bump(); Some(TypeHint::Int) }
+            "nat"    => { self.bump(); Some(TypeHint::Nat) }
+            "tensor" => { self.bump(); Some(TypeHint::Tensor) }
+            "fn"     => { self.bump(); Some(TypeHint::Fn) }
+            "cell"   => { self.bump(); Some(TypeHint::Cell) }
+            "tuple"  => { self.bump(); Some(TypeHint::Tuple) }
+            "any"    => { self.bump(); Some(TypeHint::Any) }
+            _ => None,
         }
-        false
+    }
+
+    fn parse_type_hint(&mut self) -> Result<TypeHint, String> {
+        self.try_parse_type_hint()
+            .ok_or_else(|| format!("expected type keyword after ':', got {:?}", self.peek()))
+    }
+
+    fn parse_param(&mut self) -> Result<Param, String> {
+        let name = match self.bump() {
+            Token::Ident(s) => s,
+            t => return Err(format!("expected param name, got {:?}", t)),
+        };
+        let hint = if *self.peek() == Token::Colon {
+            self.bump();
+            Some(self.parse_type_hint()?)
+        } else {
+            None
+        };
+        Ok(Param { name, hint })
     }
 
     pub fn parse_repl(&mut self) -> Result<(Vec<Def>, Vec<Expr>), String> {
-        if self.has_top_level_colon() { return self.parse(); }
         let mut defs = vec![];
         while self.is_def_start() {
             defs.push(self.parse_def()?);
@@ -121,22 +186,15 @@ impl Parser {
         Ok((defs, exprs))
     }
 
-    fn parse(&mut self) -> Result<(Vec<Def>, Vec<Expr>), String> {
-        let defs = self.parse_defs()?;
-        if *self.peek() != Token::Colon {
-            return Err(format!("expected ':', got {:?}", self.peek()));
-        }
-        self.bump();
-        Ok((defs, self.parse_expr_list()?))
-    }
-
-    // Defs separated by ';'; stops before ':' or when next item is not a def.
+    // Defs separated by ';'; stops when next item is not a def.
+    #[allow(dead_code)]
     fn parse_defs(&mut self) -> Result<Vec<Def>, String> {
-        if *self.peek() == Token::Colon || *self.peek() == Token::Eof { return Ok(vec![]); }
+        if *self.peek() == Token::Eof { return Ok(vec![]); }
+        if !self.is_def_start() { return Ok(vec![]); }
         let mut defs = vec![self.parse_def()?];
         while *self.peek() == Token::Semicolon {
             self.bump();
-            if *self.peek() == Token::Colon || *self.peek() == Token::Eof { break; }
+            if *self.peek() == Token::Eof { break; }
             if !self.is_def_start() { break; }
             defs.push(self.parse_def()?);
         }
@@ -144,33 +202,13 @@ impl Parser {
     }
 
     // Parse { stmts } contents (cursor is after '{').
-    // ';' separates stmts. ':' introduces explicit output list (→ Tuple if multiple).
-    // Without ':', the last Expr stmt is the output.
+    // ';' separates stmts. The last Expr stmt is the output.
     fn parse_block_inner(&mut self) -> Result<Expr, String> {
         let mut stmts: Vec<BlockStmt> = vec![];
         loop {
             while *self.peek() == Token::Semicolon { self.bump(); }
             match self.peek() {
                 Token::RBrace | Token::Eof => break,
-                Token::Colon => {
-                    self.bump();
-                    let mut outs = vec![];
-                    if *self.peek() != Token::RBrace {
-                        outs.push(self.expr()?);
-                        while *self.peek() == Token::Comma {
-                            self.bump();
-                            if *self.peek() == Token::RBrace { break; }
-                            outs.push(self.expr()?);
-                        }
-                    }
-                    let out_expr = if outs.len() == 1 {
-                        outs.into_iter().next().unwrap()
-                    } else {
-                        Expr::Tuple(outs)
-                    };
-                    stmts.push(BlockStmt::Expr(out_expr));
-                    break;
-                }
                 _ => {}
             }
             if self.is_def_start() {
@@ -179,7 +217,7 @@ impl Parser {
                 stmts.push(BlockStmt::Expr(self.expr()?));
             }
             match self.peek() {
-                Token::Semicolon | Token::RBrace | Token::Colon | Token::Eof => {}
+                Token::Semicolon | Token::RBrace | Token::Eof => {}
                 t => return Err(format!("expected ';' or '}}', got {:?}", t.clone())),
             }
         }
@@ -197,16 +235,19 @@ impl Parser {
             let mut params = vec![];
             if *self.peek() != Token::RParen {
                 loop {
-                    match self.bump() {
-                        Token::Ident(s) => params.push(s),
-                        t => return Err(format!("expected param name, got {:?}", t)),
-                    }
+                    params.push(self.parse_param()?);
                     if *self.peek() == Token::Comma { self.bump(); } else { break; }
                 }
             }
             self.eat(&Token::RParen)?;
+            let ret_hint = if *self.peek() == Token::Arrow {
+                self.bump();
+                Some(self.parse_type_hint()?)
+            } else {
+                None
+            };
             self.eat(&Token::Eq)?;
-            Ok(Def::Func(name, params, self.expr()?))
+            Ok(Def::Func(name, params, ret_hint, self.expr()?))
         } else {
             self.eat(&Token::Eq)?;
             if self.is_multi_lambda() {
@@ -389,13 +430,11 @@ impl Parser {
             Token::LParen => {
                 self.bump();
                 if self.looks_like_paren_lambda() {
-                    let mut params = vec![];
+                    let mut params: Vec<Param> = vec![];
                     let mut had_rparen = false;
                     loop {
-                        match self.bump() {
-                            Token::Ident(s) => params.push(s),
-                            t => return Err(format!("expected param, got {:?}", t)),
-                        }
+                        let p = self.parse_param()?;
+                        params.push(p);
                         match self.peek().clone() {
                             Token::Comma  => { self.bump(); }
                             Token::RParen => { self.bump(); had_rparen = true; break; }
@@ -406,7 +445,7 @@ impl Parser {
                     self.eat(&Token::Arrow)?;
                     let body = self.expr()?;
                     if !had_rparen { self.eat(&Token::RParen)?; }
-                    Ok(Expr::Lambda(params, body.into()))
+                    Ok(Expr::Lambda(params, None, body.into()))
                 } else {
                     // () -> expr  — zero-arg lambda
                     if *self.peek() == Token::RParen
@@ -414,7 +453,7 @@ impl Parser {
                     {
                         self.bump(); // consume )
                         self.bump(); // consume ->
-                        return Ok(Expr::Lambda(vec![], self.expr()?.into()));
+                        return Ok(Expr::Lambda(vec![], None, self.expr()?.into()));
                     }
                     // Empty parens → empty tuple
                     if *self.peek() == Token::RParen {
@@ -504,7 +543,7 @@ impl Parser {
                 self.bump();
                 if *self.peek() == Token::Arrow {
                     self.bump();
-                    Ok(Expr::Lambda(vec![name], self.expr()?.into()))
+                    Ok(Expr::Lambda(vec![Param { name, hint: None }], None, self.expr()?.into()))
                 } else if *self.peek() == Token::LParen {
                     self.bump();
                     let mut args = vec![];

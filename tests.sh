@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Comprehensive test suite for mathlang.
 
-M="$HOME/mathlang/target/release/m"
+M="${MATHLANG_BIN:-$HOME/mathlang/target/release/m}"
 PASS=0
 FAIL=0
 FAILS=()
@@ -88,46 +88,46 @@ run       "const.neginf" "-inf" "-inf"
 
 # ── Variables ─────────────────────────────────────────────────────────────────
 section "VARIABLES"
-run "var.simple"    "x=3; y=4 : x^2 + y^2"        "25"
-run "var.reuse"     "x=5 : x * x"                 "25"
-run "var.chain"     "a=2; b=a*3 : b"               "6"
-run "var.expr_rhs"  "x=2^8 : x"                    "256"
+run "var.simple"    "x=3; y=4; x^2 + y^2"        "25"
+run "var.reuse"     "x=5; x * x"                 "25"
+run "var.chain"     "a=2; b=a*3; b"               "6"
+run "var.expr_rhs"  "x=2^8; x"                    "256"
 run "var.no_colon"  "x=3; x^2"                     "9"
 
 # ── User functions ────────────────────────────────────────────────────────────
 section "USER FUNCTIONS"
-run "fn.one_arg"    "f(x) = x^2 : f(5)"             "25"
-run "fn.two_arg"    "g(x,y) = x^2 + y^2 : g(3,4)"  "25"
-run "fn.three_arg"  "h(a,b,c) = a+b+c : h(1,2,3)"  "6"
-run "fn.compose"    "f(x) = x+1; g(x) = f(f(x)) : g(3)" "5"
-run "fn.recursive"  "f(n) = if(n <= 1, 1, n * f(n-1)) : f(6)" "720"
-run "fn.mutual_ref" "a(x) = x^2; b(x) = a(x) + 1 : b(4)" "17"
+run "fn.one_arg"    "f(x) = x^2; f(5)"             "25"
+run "fn.two_arg"    "g(x,y) = x^2 + y^2; g(3,4)"  "25"
+run "fn.three_arg"  "h(a,b,c) = a+b+c; h(1,2,3)"  "6"
+run "fn.compose"    "f(x) = x+1; g(x) = f(f(x)); g(3)" "5"
+run "fn.recursive"  "f(n) = if(n <= 1, 1, n * f(n-1)); f(6)" "720"
+run "fn.mutual_ref" "a(x) = x^2; b(x) = a(x) + 1; b(4)" "17"
 # parameter shadowing: param names shadow global names like i, pi
-run "fn.shadow_i"       "f(i) = i+1 : f(2)"              "3"
-run "fn.shadow_pi"      "g(pi) = pi+1 : g(2)"            "3"
-run "fn.shadow_cx_body" "f(i) = i+1i : f(1)"             "1 + i"
+run "fn.shadow_i"       "f(i) = i+1; f(2)"              "3"
+run "fn.shadow_pi"      "g(pi) = pi+1; g(2)"            "3"
+run "fn.shadow_cx_body" "f(i) = i+1i; f(1)"             "1 + i"
 
 # ── Lambdas ───────────────────────────────────────────────────────────────────
 section "LAMBDAS"
-run "lambda.single"         "f = x -> x^2 : f(4)"                    "16"
-run "lambda.multi"          "f = (x, y) -> x + y : f(3, 4)"          "7"
-run "lambda.multi_bare"     "f = x, y -> x * y : f(3, 4)"            "12"
+run "lambda.single"         "f = x -> x^2; f(4)"                    "16"
+run "lambda.multi"          "f = (x, y) -> x + y; f(3, 4)"          "7"
+run "lambda.multi_bare"     "f = x, y -> x * y; f(3, 4)"            "12"
 run "lambda.inline"         "(x -> x^2)(5)"                           "25"
 run "lambda.inline_call"    "(x -> x + 1)(9)"                         "10"
 run "lambda.as_arg"         "sum(x -> x, 1, 10)"                      "55"
-run "lambda.closure"        "a=10; f = x -> x + a : f(5)"            "15"
-run "lambda.nested"         "f = x -> (y -> x + y) : f(3)(4)"        "7"
+run "lambda.closure"        "a=10; f = x -> x + a; f(5)"            "15"
+run "lambda.nested"         "f = x -> (y -> x + y); f(3)(4)"        "7"
 run "lambda.in_sum"         "sum(x -> x^2, 1, 10)"                   "385"
 run "lambda.in_prod"        "prod(x -> x, 1, 5)"                     "120"
 
 # ── Blocks ────────────────────────────────────────────────────────────────────
 section "BLOCKS"
-run "block.simple"          "{x = 3; y = 4 : x + y}"                 "7"
-run "block.colon_out"       "{a = 2; b = 3 : a * b}"                 "6"
-run "block.isolation"       "x=99; {x = 1 : x}"                      "1"
-run "block.fn_in_block"     "{f(x) = x^2 : f(5)}"                   "25"
-run "block.as_expr"         "1 + {x=3 : x*2}"                        "7"
-run "block.multi_out"       "{a=1; b=2 : (a, b)}"                    "[1, 2]"
+run "block.simple"          "{x = 3; y = 4; x + y}"                 "7"
+run "block.semicolon_out"   "{a = 2; b = 3; a * b}"                 "6"
+run "block.isolation"       "x=99; {x = 1; x}"                      "1"
+run "block.fn_in_block"     "{f(x) = x^2; f(5)}"                   "25"
+run "block.as_expr"         "1 + {x=3; x*2}"                        "7"
+run "block.multi_out"       "{a=1; b=2; (a, b)}"                    "[1, 2]"
 
 # ── Comparisons ───────────────────────────────────────────────────────────────
 section "COMPARISONS"
@@ -202,7 +202,7 @@ run "tup.eq_ew"         "(1,2,3) == (1,2,3)"                "[1, 1, 1]"
 run "tup.neq_ew"        "(1,2,3) == (1,2,4)"                "[1, 1, 0]"
 run "tup.all_eq"        "sum((1,2,3) == (1,2,3))"           "3"
 run "tup.neg"           "-(1,2,3)"                          "[-1, -2, -3]"
-run "tup.fn_apply"      "f(x)=x^2 : f((1,2,3))"            "[1, 4, 9]"
+run "tup.fn_apply"      "f(x)=x^2; f((1,2,3))"            "[1, 4, 9]"
 run "tup.append"        "append((1,2,3), 4)"                "[1, 2, 3, 4]"
 run "tup.concat"        "concat((1,2),(3,4))"               "[1, 2, 3, 4]"
 run "tup.flatten"       "flatten(zeros(2,3))"               "[0, 0, 0, 0, 0, 0]"
@@ -251,8 +251,8 @@ run_match "stat.var"  "var((2,4,4,4,5,5,7,9))" "^4"
 section "HIGHER-ORDER"
 run "ho.compose"          "compose(x -> x+1, x -> x^2)(3)"         "10"
 run "ho.compose_builtins" "compose(sqrt, abs)(-9)"                  "3"
-run "ho.partial_add"      "add5 = partial((x,y) -> x+y, 5) : add5(3)" "8"
-run "ho.partial_builtin"  "sq = partial(pow, 2) : sq(10)"           "1024"
+run "ho.partial_add"      "add5 = partial((x,y) -> x+y, 5); add5(3)" "8"
+run "ho.partial_builtin"  "sq = partial(pow, 2); sq(10)"           "1024"
 run "ho.map_partial"      "map(partial((x,y) -> x+y, 10), (1,2,3))"  "[11, 12, 13]"
 run "ho.filter_partial"   "map(partial(pow,2), (1,2,3,4))"          "[2, 4, 8, 16]"
 
@@ -540,13 +540,13 @@ run_err   "edge.bad_index"  "(1,2,3)[5]"
 
 # ── Chained / compound expressions ───────────────────────────────────────────
 section "COMPOUND EXPRESSIONS"
-run "comp.fn_chain"       "f(x)=x+1; g(x)=x^2 : g(f(3))"         "16"
-run "comp.let_in_arg"     "a=3; b=4 : sqrt(a^2 + b^2)"            "5"
-run "comp.block_in_fn"    "f(x) = {y=x^2 : y+1} : f(4)"           "17"
-run "comp.tuple_in_fn"    "f(t) = t[0] + t[1] : f((3,4))"         "7"
+run "comp.fn_chain"       "f(x)=x+1; g(x)=x^2; g(f(3))"         "16"
+run "comp.let_in_arg"     "a=3; b=4; sqrt(a^2 + b^2)"            "5"
+run "comp.block_in_fn"    "f(x) = {y=x^2; y+1}; f(4)"           "17"
+run "comp.tuple_in_fn"    "f(t) = t[0] + t[1]; f((3,4))"         "7"
 run "comp.map_then_sum"   "sum(map(x -> x^2, (1,2,3,4)))"         "30"
 run "comp.filter_sum"     "sum(filter(x -> x > 2, (1,2,3,4,5)))"  "12"
-run "comp.compose_chain"  "f=x->x+1; g=x->x*2 : compose(f,g)(5)" "11"
+run "comp.compose_chain"  "f=x->x+1; g=x->x*2; compose(f,g)(5)" "11"
 run "comp.lambda_in_if"   "(if(1>0, x->x^2, x->x))(5)"           "25"
 
 # ── tensor() constructor ──────────────────────────────────────────────────────
@@ -571,7 +571,7 @@ run "lit.shape"      "shape((1,2; 3,4))"                  "[2, 2]"
 run "lit.index"      "(1,2; 3,4)[0,1]"                    "2"
 run "lit.index2"     "(1,2; 3,4)[1,0]"                    "3"
 run "lit.det"        "det((1,2; 3,4))"                    "-2"
-run "lit.assign"     "M = (1,2; 3,4) : M[1,1]"           "4"
+run "lit.assign"     "M = (1,2; 3,4); M[1,1]"           "4"
 run "lit.1col"       "shape((1; 2; 3))"                   "[3, 1]"
 run "lit.arith"      "(1,0; 0,1) + (0,1; 1,0)"            "⎡ 1  1 ⎤ ⎣ 1  1 ⎦"
 
@@ -870,9 +870,9 @@ run "ffc.re_im_pair"    "Re = zeros(4); Im = tensor(k->k, 4); shape(fft(Re, Im))
 
 # ── zero-arg lambdas ─────────────────────────────────────────────────────────
 section "ZERO-ARG LAMBDA"
-run "zl.call"           "f = () -> 42 : f()"                    "42"
+run "zl.call"           "f = () -> 42; f()"                    "42"
 run "zl.inline"         "(() -> 99)()"                          "99"
-run "zl.tensor_ret"     "f = () -> [1,2,3] : f()"              "[1, 2, 3]"
+run "zl.tensor_ret"     "f = () -> [1,2,3]; f()"              "[1, 2, 3]"
 run "zl.side_effect"    "{n = cell(0); tick = () -> set(n, get(n)+1); tick(); get(n)}"  "1"
 
 # ── cell / get / set ──────────────────────────────────────────────────────────
@@ -904,7 +904,7 @@ run "arr.one"           "[1]"                                   "[1]"
 run "arr.three"         "[1, 2, 3]"                             "[1, 2, 3]"
 run "arr.float"         "[0.5, 1.5]"                            "[0.5, 1.5]"
 run "arr.expr"          "[1+1, 2*3, 4^2]"                      "[2, 6, 16]"
-run "arr.var"           "x=7 : [x, x+1, x+2]"                 "[7, 8, 9]"
+run "arr.var"           "x=7; [x, x+1, x+2]"                 "[7, 8, 9]"
 # [x] is a length-1 tensor, unlike (x) which is a scalar
 run "arr.one_vs_paren"  "len([42])"                             "1"
 run "arr.paren_scalar"  "(42)"                                  "42"
@@ -920,7 +920,7 @@ run "arr.slice"         "[10,20,30][0..1]"                      "[10, 20]"
 run "arr.add"           "[1,2,3] + [4,5,6]"                    "[5, 7, 9]"
 run "arr.scale"         "2 * [1,2,3]"                          "[2, 4, 6]"
 # Round-trip: output of a tensor can be typed back as input
-run "arr.roundtrip"     "x = [1,2,3] : x"                      "[1, 2, 3]"
+run "arr.roundtrip"     "x = [1,2,3]; x"                      "[1, 2, 3]"
 # Errors: non-numeric elements
 run_err "arr.err_tuple"   "[(1,2),(3,4)]"
 run_err "arr.err_fn"      "[x->x]"
@@ -1206,6 +1206,26 @@ else
     echo "(skipping HDF5 tests — binary not compiled with --features hdf5)"
 fi
 rm -f "$_H5F" "$_H5F2"
+
+# ── TYPE HINTS ────────────────────────────────────────────────────────────────
+section "TYPE HINTS"
+run "typehint.real_param"        'f(x: real) = x^2; f(3)'          "9"
+run "typehint.complex_to_real"   'f(x: real) = x^2; f(3+0i)'       "9"
+run_err "typehint.complex_reject" 'f(x: real) = x; f(1+2i)'
+run "typehint.nat_param"         'f(n: nat) = n+1; f(5)'           "6"
+run_err "typehint.nat_neg"       'f(n: nat) = n+1; f(-1)'
+run_err "typehint.nat_frac"      'f(n: nat) = n+1; f(1.5)'
+run "typehint.int_param"         'f(n: int) = n; f(-3)'            "-3"
+run_err "typehint.int_frac"      'f(n: int) = n; f(1.5)'
+run "typehint.tensor_param"      'f(T: tensor) = sum(T); f(linspace(1,3,3))'  "6"
+run_err "typehint.tensor_scalar" 'f(T: tensor) = T; f(5)'
+run "typehint.real_tensor"       'f(T: real tensor) = sum(T); f(linspace(0,1,5))'  "2.5"
+run "typehint.complex_widen"     'f(x: complex) = re(x); f(3.0)'   "3"
+run "typehint.fn_param"          'apply(f: fn, x) = f(x); apply(sqrt, 4)'  "2"
+run_err "typehint.fn_reject"     'apply(f: fn, x) = f(x); apply(5, 4)'
+run "typehint.ret_hint"          'f(x: real) -> real = x^2; f(3)'  "9"
+run_err "typehint.ret_complex"   'f(x) -> real = x+1i; f(3)'
+run "typehint.num_any"           'f(x: num) = re(x); f(3+2i)'      "3"
 
 # ── print summary ─────────────────────────────────────────────────────────────
 echo

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::lexer::Lexer;
 use crate::ast::Def;
 use crate::parser::Parser;
-use crate::eval::{Val, Env, TData, eval, fmt_val, is_protected};
+use crate::eval::{Val, Env, TData, eval, fmt_val, is_protected, FnSig, builtin_sig};
 
 pub const BUILTIN_FNS: &[&str] = &[
     "id", "fact", "factorial", "delta",
@@ -144,7 +144,7 @@ impl rustyline::completion::Completer for MathHelper {
         -> rustyline::Result<(usize, Vec<String>)>
     {
         if line.starts_with('!') {
-            let cmds = ["!clear", "!defs", "!exit", "!help", "!include ", "!loadhdf5 ", "!loadnpy ", "!loadtensor ", "!print ", "!q", "!quit", "!savehdf5 ", "!savenpy ", "!savetensor ", "!version"];
+            let cmds = ["!clear", "!defs", "!exit", "!help", "!include ", "!loadhdf5 ", "!loadnpy ", "!loadtensor ", "!print ", "!q", "!quit", "!savehdf5 ", "!savenpy ", "!savetensor ", "!type ", "!version"];
             return Ok((0, cmds.iter().filter(|&&c| c.starts_with(line)).map(|s| s.to_string()).collect()));
         }
         let start = line[..pos].rfind(|c: char| !c.is_alphanumeric() && c != '_').map_or(0, |i| i+1);
@@ -224,15 +224,20 @@ pub fn eval_line(line: &str, env: &mut Env, repl: bool) -> bool {
                     Err(e) => { eprintln!("error: {e}"); return false; }
                 }
             }
-            Def::Func(name, params, body) => {
+            Def::Func(name, params, ret_hint, body) => {
                 if is_protected(name) {
                     eprintln!("error: cannot redefine built-in '{name}'");
                     return false;
                 }
+                let names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+                let sig = FnSig {
+                    params: params.iter().map(|p| p.hint.clone()).collect(),
+                    ret: ret_hint.clone(),
+                };
                 let mut captured = (*env.vars).clone();
-                let fn_val = Val::make_fn(params.clone(), body.clone(), std::sync::Arc::new(captured.clone()));
+                let fn_val = Val::make_fn_with_sig(names.clone(), sig.clone(), body.clone(), std::sync::Arc::new(captured.clone()));
                 captured.insert(name.clone(), fn_val);
-                env.define(name.clone(), Val::make_fn(params.clone(), body.clone(), std::sync::Arc::new(captured)));
+                env.define(name.clone(), Val::make_fn_with_sig(names, sig, body.clone(), std::sync::Arc::new(captured)));
             }
         }
     }
@@ -263,7 +268,15 @@ pub fn show_defs(env: &Env) {
     for (k, v) in env.vars.iter() {
         if BUILTIN_CONSTS.contains(&k.as_str()) || BUILTIN_FNS.contains(&k.as_str()) || k == "result" { continue; }
         let display = match v {
-            Val::Fn(params, ..) => format!("fn({}) = …", params.join(", ")),
+            Val::Fn(params, _, _, _, sig) => {
+                let param_strs: Vec<String> = params.iter().enumerate().map(|(i, p)| {
+                    if let Some(Some(h)) = sig.params.get(i) {
+                        format!("{}: {}", p, h.display())
+                    } else { p.clone() }
+                }).collect();
+                let ret_str = if let Some(h) = &sig.ret { format!(" -> {}", h.display()) } else { String::new() };
+                format!("fn({}){}= …", param_strs.join(", "), if ret_str.is_empty() { " ".into() } else { format!("{} ", ret_str) })
+            }
             _ => fmt_val(&v),
         };
         items.push((k.clone(), display));
@@ -721,6 +734,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
     match name.trim() {
         "help" => print!(concat!(
             "Commands:  !help  !include <file>  !defs  !clear  !version\n",
+            "           !type <name>  — show type signature of a function or builtin\n",
             "           !print [text with {{expr}} interpolation]  — print formatted output\n",
             "           !savetensor <var> <file>  — save tensor to binary .mlt file\n",
             "           !loadtensor <var> <file>  — load tensor from .mlt file\n",
@@ -734,8 +748,9 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "           f(x) = x^2         named function\n",
             "           f = x -> x^2       lambda (first-class)\n",
             "           g = n,r -> n+r     multi-arg lambda\n",
-            "           x=3; y=4 : x+y     define, then evaluate\n",
-            "           {{x=3; y=4 : x^2+y^2}}  block with local scope\n\n",
+            "           f(x: real) = x^2   type-hinted param\n",
+            "           f(x: nat) -> real = sqrt(x)  with return type\n",
+            "           {{x=3; y=4; x^2+y^2}}  block with local scope\n\n",
             "Tuples:    (1,2,3)   t[0]   t[-1]   t[1..3]   t[0,2,4]\n",
             "Ranges:    (0..10)  — inclusive; range(a,b) — exclusive\n",
             "Operators: + - * / // % ^ **   -> (lambda)   n! (postfix factorial)\n",
@@ -1017,6 +1032,43 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     }
                     Err(e) => eprintln!("loadhdf5: {e}"),
                 }
+            }
+        }
+        "type" => {
+            let name = arg.trim();
+            if name.is_empty() {
+                eprintln!("usage: !type <builtin-or-function-name>");
+                return;
+            }
+            // Check if it's a user-defined function in env
+            if let Some(val) = env.vars.get(name) {
+                match val {
+                    Val::Fn(params, _, _, _, sig) => {
+                        let param_strs: Vec<String> = params.iter().enumerate().map(|(i, p)| {
+                            if let Some(Some(h)) = sig.params.get(i) {
+                                format!("{p}: {}", h.display())
+                            } else { p.clone() }
+                        }).collect();
+                        let ret_str = if let Some(h) = &sig.ret { format!(" -> {}", h.display()) } else { String::new() };
+                        println!("{name}({}){}", param_strs.join(", "), ret_str);
+                        return;
+                    }
+                    Val::Builtin(bname) => {
+                        if let Some(sig) = builtin_sig(bname.as_str()) {
+                            println!("{sig}");
+                            return;
+                        }
+                        println!("{name}: builtin (no signature recorded)");
+                        return;
+                    }
+                    _ => { println!("{name}: {}", fmt_val(val)); return; }
+                }
+            }
+            // Check builtin table directly
+            if let Some(sig) = builtin_sig(name) {
+                println!("{sig}");
+            } else {
+                eprintln!("!type: unknown name '{name}'");
             }
         }
         "defs" | "vars" | "fns" => show_defs(env),
