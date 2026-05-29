@@ -1209,6 +1209,13 @@ rm -f "$_H5F" "$_H5F2"
 
 # ── TYPE HINTS ────────────────────────────────────────────────────────────────
 section "TYPE HINTS"
+run "colon.named_ret"      'f(x: real): real = x^2; f(3)'        "9"
+run_err "colon.ret_reject" 'f(x): real = x+1i; f(3)'
+run "colon.lambda_ret"     'g = (x: real): real -> x*2; g(4)'    "8"
+run_err "colon.lam_reject" 'g = (x): real -> x+1i; g(2)'
+run "colon.zero_arg"       'c = (): real -> 5; c()'              "5"
+run_err "colon.old_arrow"  'f(x) -> real = x; f(2)'
+run "const.e_val"          'round(e, 6)'                         "2.718282"
 run "typehint.real_param"        'f(x: real) = x^2; f(3)'          "9"
 run "typehint.complex_to_real"   'f(x: real) = x^2; f(3+0i)'       "9"
 run_err "typehint.complex_reject" 'f(x: real) = x; f(1+2i)'
@@ -1223,8 +1230,8 @@ run "typehint.real_tensor"       'f(T: real tensor) = sum(T); f(linspace(0,1,5))
 run "typehint.complex_widen"     'f(x: complex) = re(x); f(3.0)'   "3"
 run "typehint.fn_param"          'apply(f: fn, x) = f(x); apply(sqrt, 4)'  "2"
 run_err "typehint.fn_reject"     'apply(f: fn, x) = f(x); apply(5, 4)'
-run "typehint.ret_hint"          'f(x: real) -> real = x^2; f(3)'  "9"
-run_err "typehint.ret_complex"   'f(x) -> real = x+1i; f(3)'
+run "typehint.ret_hint"          'f(x: real): real = x^2; f(3)'  "9"
+run_err "typehint.ret_complex"   'f(x): real = x+1i; f(3)'
 run "typehint.num_any"           'f(x: num) = re(x); f(3+2i)'      "3"
 
 # ── print summary ─────────────────────────────────────────────────────────────

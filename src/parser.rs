@@ -67,7 +67,11 @@ impl Parser {
         let mut count = 0;
         loop {
             match self.toks.get(p) {
-                Some(Token::RParen) => return matches!(self.toks.get(p + 1), Some(Token::Arrow)),
+                Some(Token::RParen) => {
+                    // accept ')->' and '): type ->'
+                    let r = Self::skip_colon_hint(&self.toks, p + 1);
+                    return matches!(self.toks.get(r), Some(Token::Arrow));
+                }
                 Some(Token::Arrow) if count > 0 => return true,
                 Some(Token::Comma) => {
                     p += 1;
@@ -105,12 +109,8 @@ impl Parser {
                 Token::RParen => {
                     depth -= 1;
                     if depth == 0 {
-                        let mut r = q + 1;
-                        // skip optional -> type_hint
-                        if matches!(self.toks.get(r), Some(Token::Arrow)) {
-                            r += 1;
-                            r = Self::skip_type_ident(&self.toks, r);
-                        }
+                        // skip optional ': type_hint' return annotation
+                        let r = Self::skip_colon_hint(&self.toks, q + 1);
                         return matches!(self.toks.get(r), Some(Token::Eq));
                     }
                 }
@@ -240,7 +240,7 @@ impl Parser {
                 }
             }
             self.eat(&Token::RParen)?;
-            let ret_hint = if *self.peek() == Token::Arrow {
+            let ret_hint = if *self.peek() == Token::Colon {
                 self.bump();
                 Some(self.parse_type_hint()?)
             } else {
@@ -442,18 +442,30 @@ impl Parser {
                             ref t => return Err(format!("expected ',' or ')', got {:?}", t)),
                         }
                     }
+                    let ret_hint = if had_rparen && *self.peek() == Token::Colon {
+                        self.bump();
+                        Some(self.parse_type_hint()?)
+                    } else {
+                        None
+                    };
                     self.eat(&Token::Arrow)?;
                     let body = self.expr()?;
                     if !had_rparen { self.eat(&Token::RParen)?; }
-                    Ok(Expr::Lambda(params, None, body.into()))
+                    Ok(Expr::Lambda(params, ret_hint, body.into()))
                 } else {
-                    // () -> expr  — zero-arg lambda
+                    // () -> expr  or  (): type -> expr  — zero-arg lambda
                     if *self.peek() == Token::RParen
-                        && matches!(self.toks.get(self.pos + 1), Some(Token::Arrow))
+                        && matches!(self.toks.get(Self::skip_colon_hint(&self.toks, self.pos + 1)), Some(Token::Arrow))
                     {
                         self.bump(); // consume )
+                        let ret_hint = if *self.peek() == Token::Colon {
+                            self.bump();
+                            Some(self.parse_type_hint()?)
+                        } else {
+                            None
+                        };
                         self.bump(); // consume ->
-                        return Ok(Expr::Lambda(vec![], None, self.expr()?.into()));
+                        return Ok(Expr::Lambda(vec![], ret_hint, self.expr()?.into()));
                     }
                     // Empty parens → empty tuple
                     if *self.peek() == Token::RParen {
