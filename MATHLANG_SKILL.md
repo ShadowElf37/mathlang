@@ -86,9 +86,9 @@ sign2 = x -> if(x > 0, 1, if(x < 0, -1, 0))
 ## Blocks
 
 ```
-{x=3; y=4 : x^2+y^2}          # 25, local scope
-1 + {a=2 : a*3}                # 7
-f(n) = {half = n/2 : half^2}   # block in function body
+{x=3; y=4; x^2+y^2}          # 25, local scope
+1 + {a=2; a*3}                # 7
+f(n) = {half = n/2; half^2}   # block in function body
 ```
 
 ---
@@ -311,7 +311,7 @@ map(x -> x^2, T)      # any lambda
 
 ### Named result extraction
 ```
-{x=3; y=4 : x, y}         # outputs two values: 3  4
+{x=3; y=4; x, y}         # outputs two values: 3  4
 ```
 
 ---

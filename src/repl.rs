@@ -50,6 +50,10 @@ pub const BUILTIN_FNS: &[&str] = &[
 
 pub const BUILTIN_CONSTS: &[&str] = &["pi", "e", "phi", "inf", "i"];
 
+// Type-annotation keywords. Some (tensor, fn, cell) are also function names, so
+// the highlighter only colours them as types when they follow a ':'.
+pub const TYPE_KEYWORDS: &[&str] = &["any", "num", "real", "complex", "int", "nat", "tensor", "fn", "cell", "tuple"];
+
 // ── REPL helper ───────────────────────────────────────────────────────────────
 
 struct MathHelper {
@@ -78,6 +82,7 @@ fn highlight_line(line: &str, user_fns: &[String], user_vars: &[String]) -> Stri
     let b = line.as_bytes();
     let mut out = String::with_capacity(line.len() + 64);
     let mut i = 0;
+    let mut expect_type = false; // true right after a ':' — next identifier is a type
     while i < line.len() {
         if b[i].is_ascii_whitespace() { out.push(b[i] as char); i += 1; continue; }
         if b[i].is_ascii_digit() || (b[i] == b'.' && b.get(i+1).map_or(false, |c| c.is_ascii_digit())) {
@@ -89,12 +94,21 @@ fn highlight_line(line: &str, user_fns: &[String], user_vars: &[String]) -> Stri
                 while i < b.len() && b[i].is_ascii_digit() { i += 1; }
             }
             out.push_str(&format!("\x1b[36m{}\x1b[0m", &line[s..i]));
+            expect_type = false;
             continue;
         }
         if b[i].is_ascii_alphabetic() || b[i] == b'_' {
             let s = i;
             while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') { i += 1; }
             let name = &line[s..i];
+            // Type annotation (green) — only after a ':'. Keep the flag alive for
+            // the second word of "real tensor" / "complex tensor".
+            if expect_type && TYPE_KEYWORDS.contains(&name) {
+                out.push_str(&format!("\x1b[32m{name}\x1b[0m"));
+                expect_type = name == "real" || name == "complex";
+                continue;
+            }
+            expect_type = false;
             if BUILTIN_CONSTS.contains(&name) {
                 out.push_str(&format!("\x1b[36m{name}\x1b[0m"));
             } else if BUILTIN_FNS.contains(&name) || user_fns.iter().any(|u| u == name) {
@@ -116,16 +130,24 @@ fn highlight_line(line: &str, user_fns: &[String], user_vars: &[String]) -> Stri
             match (b[i], b[i+1]) {
                 (b'-', b'>') | (b'*', b'*') | (b'/', b'/') | (b'.', b'.') => {
                     out.push_str(&format!("\x1b[33m{}\x1b[0m", &line[i..i+2]));
-                    i += 2; continue;
+                    i += 2; expect_type = false; continue;
                 }
                 _ => {}
             }
+        }
+        if b[i] == b':' {
+            // type-annotation operator — what follows is a type
+            out.push(':');
+            expect_type = true;
+            i += 1;
+            continue;
         }
         if matches!(b[i], b'+' | b'-' | b'*' | b'/' | b'%' | b'^') {
             out.push_str(&format!("\x1b[33m{}\x1b[0m", b[i] as char));
         } else {
             out.push(b[i] as char);
         }
+        expect_type = false;
         i += 1;
     }
     out

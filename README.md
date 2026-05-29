@@ -198,10 +198,10 @@ Unit conversion factors and functions for physics, chemistry, and engineering.
 
 Inside the REPL or a `.math` file, each line is an expression or a definition (`name = expr`). Multiple definitions on one line are separated by `;`.
 
-For shell one-liners, the full argument is parsed as one or more expressions. Use `;` to separate definitions and `:` to mark the output expressions:
+For shell one-liners, the full argument is parsed as a sequence of statements separated by `;`; the value of the last expression is printed:
 
 ```zsh
-m 'x=3; y=4 : x^2 + y^2'    # 25   (: separates defs from output)
+m 'x=3; y=4; x^2 + y^2'      # 25   (; separates statements; last is the output)
 m 'sqrt(2), sin(pi/2)'       # 1.414…  1  (comma = multiple outputs)
 ```
 
@@ -357,7 +357,7 @@ result = 4
 
 ## Blocks
 
-Blocks `{...}` create a local scope. Use `;` to separate definitions, `:` before the output expression(s).
+Blocks `{...}` create a local scope. Statements are separated by `;`; the value of the last expression is the block's result.
 
 ```
 > {x = 3; y = 4; x^2 + y^2}
