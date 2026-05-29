@@ -33,19 +33,23 @@
 result = ⎡ 0  0 ⎤
 ⎣ 0  1 ⎦
 
-21.1. builtins need signature documentation, maybe even dedicated help texts `!help <builtin>`, we should store those in separate files in a help directory, plus the general !help text -- then clean up the !help text
+21.1. [PARTIAL] builtins have signatures (builtin_sig) shown by !type/!help. General
+   !help text cleaned up (type vocabulary + colon return syntax). Dedicated per-builtin
+   help texts (`!help <builtin>` from a help directory) DEFERRED — too many tokens.
 
-21.2. function type output inference, and notational change: `f(x: real, y:complex) = linspace(0, 1, 10)` has !type output of `(real, complex) -> tensor`, so we get rid of the f() prefix, the variable names, and infer the output type from the well-known signature of the builtins involved. we will need automatic fusion of signatures: for example, `f(x: real, y: complex) -> y*linspace(0, 1, 10)` is `(real, complex) -> complex tensor`
+21.2. [DONE] !type infers and fuses signatures. A function shows `(t1, t2) -> ret`
+   (no f() prefix, no var names); the return type is inferred from the body via
+   signature fusion when not annotated. e.g. f(x: real, y: complex) = y*linspace(0,1,10)
+   gives `(real, complex) -> complex tensor`. See infer_type() in eval.rs.
 
-21.3. teal highlight for types (overrides purple for var names, for example tensor is a function but also a type name -- highlighter must know the difference!!!)
+21.3. [DONE] type keywords highlight green (only after a ':' so `tensor` the builtin
+   stays purple but `: tensor` the annotation is green). See highlight_line in repl.rs.
 
-21.4. should say real:
-> !type 2
-!type: unknown name '2'
-> !type pi
-pi: 3.141592653589793
-> x = 5
-> !type x
-x: 5
+21.4. [DONE] !type reports the TYPE, not the value: !type 2 -> real, !type pi -> real,
+   x=5; !type x -> real, !type 3+2i -> complex. Falls back to static inference for
+   arbitrary expressions.
 
-21.5 output inference will let us get rid of this perverse syntax `f() -> real = 1` -- but we should also replace that syntax anyway with `f(): real = 1` because that is unambiguous, right? and that syntax can be reused for lambdas `(x: real): real -> 1`
+21.5. [DONE] return-type syntax is now `f(): real = 1` (colon after the param list),
+   and lambdas `(x: real): real -> body`. The old `f() -> real = 1` arrow form is gone.
+
+22. e constant was wrong (2.718281828281828); now std::f64::consts::E. [DONE]

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::lexer::Lexer;
 use crate::ast::Def;
 use crate::parser::Parser;
-use crate::eval::{Val, Env, TData, eval, fmt_val, is_protected, FnSig, builtin_sig};
+use crate::eval::{Val, Env, TData, eval, fmt_val, is_protected, FnSig, builtin_sig, infer_type, hint_of_val};
 
 pub const BUILTIN_FNS: &[&str] = &[
     "id", "fact", "factorial", "delta",
@@ -1037,38 +1037,52 @@ fn bang_command(cmd: &str, env: &mut Env) {
         "type" => {
             let name = arg.trim();
             if name.is_empty() {
-                eprintln!("usage: !type <builtin-or-function-name>");
+                eprintln!("usage: !type <expr>");
                 return;
             }
-            // Check if it's a user-defined function in env
+            // A name bound in the environment: functions show their fused
+            // signature `(t1, t2) -> ret`; values show their type.
             if let Some(val) = env.vars.get(name) {
                 match val {
-                    Val::Fn(params, _, _, _, sig) => {
-                        let param_strs: Vec<String> = params.iter().enumerate().map(|(i, p)| {
-                            if let Some(Some(h)) = sig.params.get(i) {
-                                format!("{p}: {}", h.display())
-                            } else { p.clone() }
+                    Val::Fn(params, body, _, _, sig) => {
+                        let param_strs: Vec<String> = params.iter().enumerate().map(|(i, _)| {
+                            sig.params.get(i).and_then(|h| h.clone())
+                                .map_or_else(|| "any".to_string(), |h| h.display().to_string())
                         }).collect();
-                        let ret_str = if let Some(h) = &sig.ret { format!(" -> {}", h.display()) } else { String::new() };
-                        println!("{name}({}){}", param_strs.join(", "), ret_str);
+                        let mut pmap = std::collections::HashMap::new();
+                        for (i, pn) in params.iter().enumerate() {
+                            if let Some(Some(h)) = sig.params.get(i) { pmap.insert(pn.clone(), h.clone()); }
+                        }
+                        let ret = match &sig.ret {
+                            Some(h) => h.display().to_string(),
+                            None    => infer_type(body, &pmap, env).display().to_string(),
+                        };
+                        println!("({}) -> {ret}", param_strs.join(", "));
                         return;
                     }
                     Val::Builtin(bname) => {
-                        if let Some(sig) = builtin_sig(bname.as_str()) {
-                            println!("{sig}");
-                            return;
-                        }
-                        println!("{name}: builtin (no signature recorded)");
+                        println!("{}", builtin_sig(bname.as_str()).unwrap_or("fn"));
                         return;
                     }
-                    _ => { println!("{name}: {}", fmt_val(val)); return; }
+                    other => {
+                        println!("{}", hint_of_val(other).display());
+                        return;
+                    }
                 }
             }
-            // Check builtin table directly
-            if let Some(sig) = builtin_sig(name) {
-                println!("{sig}");
-            } else {
-                eprintln!("!type: unknown name '{name}'");
+            // A builtin function name.
+            if let Some(sig) = builtin_sig(name) { println!("{sig}"); return; }
+            // Otherwise, parse and statically infer the type of the expression.
+            let toks = Lexer::new(name).tokenize();
+            match Parser::new(toks).parse_repl() {
+                Ok((_, exprs)) => match exprs.first() {
+                    Some(e) => {
+                        let empty = std::collections::HashMap::new();
+                        println!("{}", infer_type(e, &empty, env).display());
+                    }
+                    None => eprintln!("!type: nothing to type"),
+                },
+                Err(e) => eprintln!("!type: {e}"),
             }
         }
         "defs" | "vars" | "fns" => show_defs(env),

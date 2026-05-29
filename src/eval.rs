@@ -224,6 +224,155 @@ impl Env {
     }
 }
 
+// ───────────────────────── type inference ─────────────────────────
+
+/// The static TypeHint of a runtime value (best-effort; used by `!type`).
+pub fn hint_of_val(v: &Val) -> TypeHint {
+    match v {
+        Val::Num(_)               => TypeHint::Real,
+        Val::Complex(..)          => TypeHint::Complex,
+        Val::Tensor { .. }        => TypeHint::RealTensor,
+        Val::ComplexTensor { .. } => TypeHint::ComplexTensor,
+        Val::Tuple(_)             => TypeHint::Tuple,
+        Val::Cell(_)              => TypeHint::Cell,
+        Val::Fn(..) | Val::Builtin(_) => TypeHint::Fn,
+    }
+}
+
+/// Map a type keyword (as it appears in a signature string) to a TypeHint.
+fn hint_from_kw(s: &str) -> TypeHint {
+    match s.trim() {
+        "num"            => TypeHint::Num,
+        "real"           => TypeHint::Real,
+        "complex"        => TypeHint::Complex,
+        "int"            => TypeHint::Int,
+        "nat"            => TypeHint::Nat,
+        "tensor"         => TypeHint::Tensor,
+        "real tensor"    => TypeHint::RealTensor,
+        "complex tensor" => TypeHint::ComplexTensor,
+        "fn"             => TypeHint::Fn,
+        "cell"           => TypeHint::Cell,
+        "tuple"          => TypeHint::Tuple,
+        _                => TypeHint::Any,
+    }
+}
+
+/// Return-type of a builtin, parsed from the tail of its signature string.
+fn builtin_ret_hint(name: &str) -> Option<TypeHint> {
+    let sig = builtin_sig(name)?;
+    let ret = sig.rsplit("->").next()?.trim();
+    Some(hint_from_kw(ret))
+}
+
+fn is_tensor_hint(t: &TypeHint) -> bool {
+    matches!(t, TypeHint::Tensor | TypeHint::RealTensor | TypeHint::ComplexTensor)
+}
+fn is_complex_hint(t: &TypeHint) -> bool {
+    matches!(t, TypeHint::Complex | TypeHint::ComplexTensor)
+}
+fn is_real_hint(t: &TypeHint) -> bool {
+    matches!(t, TypeHint::Real | TypeHint::Int | TypeHint::Nat | TypeHint::RealTensor)
+}
+
+/// Fuse the operand types of an arithmetic operator into a result type.
+fn fuse_arith(a: TypeHint, b: TypeHint) -> TypeHint {
+    use TypeHint::*;
+    if a == Any || b == Any { return Any; }
+    if is_tensor_hint(&a) || is_tensor_hint(&b) {
+        if is_complex_hint(&a) || is_complex_hint(&b) { ComplexTensor }
+        else if is_real_hint(&a) && is_real_hint(&b)  { RealTensor }
+        else { Tensor }
+    } else if a == Complex || b == Complex {
+        Complex
+    } else if a == Num || b == Num {
+        Num
+    } else {
+        Real
+    }
+}
+
+/// Fuse the element types of a tensor/array literal into the tensor's type.
+fn fuse_elems(elems: &[&Expr], params: &HashMap<String, TypeHint>, env: &Env) -> TypeHint {
+    use TypeHint::*;
+    if elems.is_empty() { return RealTensor; }
+    let mut any_complex = false;
+    let mut any_unknown = false;
+    for e in elems {
+        match infer_type(e, params, env) {
+            Complex | ComplexTensor => any_complex = true,
+            Real | Int | Nat | Num | RealTensor | Tensor => {}
+            _ => any_unknown = true,
+        }
+    }
+    if any_complex { ComplexTensor } else if any_unknown { Tensor } else { RealTensor }
+}
+
+/// Best-effort static type inference for an expression, given the parameter
+/// hints in scope. Returns `Any` when the type cannot be determined. Used by
+/// `!type` to infer function return types (signature fusion).
+pub fn infer_type(expr: &Expr, params: &HashMap<String, TypeHint>, env: &Env) -> TypeHint {
+    use TypeHint::*;
+    match expr {
+        Expr::Num(_)     => Real,
+        Expr::ImagLit(_) => Complex,
+        Expr::Var(name) => {
+            if let Some(h) = params.get(name) { return h.clone(); }
+            if let Some(v) = env.vars.get(name) { return hint_of_val(v); }
+            if builtin_sig(name).is_some() { return Fn; }
+            match name.as_str() {
+                "i"                                => Complex,
+                "pi" | "e" | "phi" | "inf" | "tau" => Real,
+                _                                  => Any,
+            }
+        }
+        Expr::Neg(e) => infer_type(e, params, env),
+        Expr::BinOp(l, op, r) => match op {
+            Op::Lt | Op::Gt | Op::LtEq | Op::GtEq | Op::Eq | Op::Ne | Op::And | Op::Or => Real,
+            _ => fuse_arith(infer_type(l, params, env), infer_type(r, params, env)),
+        },
+        Expr::Tuple(_)     => Tuple,
+        Expr::Array(elems) => fuse_elems(&elems.iter().collect::<Vec<_>>(), params, env),
+        Expr::TensorLit(rows) => {
+            let flat: Vec<&Expr> = rows.iter().flatten().collect();
+            fuse_elems(&flat, params, env)
+        }
+        Expr::Range(..) => RealTensor,
+        Expr::Index(base, _) => match infer_type(base, params, env) {
+            RealTensor    => Real,
+            ComplexTensor => Complex,
+            Tensor        => Num,
+            _             => Any,
+        },
+        Expr::Slice(..)  => Any,
+        Expr::Lambda(..) => Fn,
+        Expr::Block(stmts) => {
+            let mut p = params.clone();
+            let mut last = Any;
+            for s in stmts {
+                match s {
+                    BlockStmt::Def(Def::Var(n, e))   => { let t = infer_type(e, &p, env); p.insert(n.clone(), t); }
+                    BlockStmt::Def(Def::Func(n, ..)) => { p.insert(n.clone(), Fn); }
+                    BlockStmt::Expr(e)               => last = infer_type(e, &p, env),
+                }
+            }
+            last
+        }
+        Expr::Apply(f, _args) => {
+            if let Expr::Var(name) = &**f {
+                if params.get(name).is_none() {
+                    if let Some(Val::Fn(_, _, _, _, sig)) = env.vars.get(name) {
+                        return sig.ret.clone().unwrap_or(Any);
+                    }
+                    if let Some(r) = builtin_ret_hint(name) { return r; }
+                }
+            }
+            Any
+        }
+    }
+}
+
+// ───────────────────────── builtin signatures ─────────────────────────
+
 pub fn builtin_sig(name: &str) -> Option<&'static str> {
     match name {
         "abs"    => Some("abs(x: num) -> num"),
