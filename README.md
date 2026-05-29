@@ -53,7 +53,7 @@ result = 4.09…e-16
 ```zsh
 m '3 + 4'
 m 'pi * 2^2'
-m 'x=3; y=4 : sqrt(x^2 + y^2)'
+m 'x=3; y=4; sqrt(x^2 + y^2)'
 ```
 
 > **Always quote the argument** in the shell to avoid metacharacter expansion (`^`, `*`, `;`, `>`).
@@ -82,12 +82,13 @@ result = 10
 | `!include <file>` | load a `.math` file into the current session |
 | `!clear` | clear all user definitions |
 | `!version` | show version |
+| `!type <expr>` | show the type of a value, expression, or function |
 | `!print [text with {expr}]` | print text with interpolated expressions |
 | `!savetensor <var> <file>` | save tensor to binary `.mlt` file |
 | `!loadtensor <var> <file>` | load tensor from `.mlt` file |
 | `!savehdf5 <var> <file> …` | save tensor to HDF5 (requires `--features hdf5`) |
 | `!loadhdf5 <var> <file> …` | load tensor from HDF5 |
-| `quit` / `exit` | quit |
+| `!q` / `!quit` / `!exit` | quit |
 
 ---
 
@@ -279,6 +280,40 @@ Lambdas are first-class — pass them to functions, apply them inline:
 result = 25
 > sum(x -> x^2, 1, 10)
 result = 385
+```
+
+---
+
+## Type hints
+
+Function parameters and return values can carry optional type hints. They are
+checked when the function is called — a value that doesn't match (and can't be
+coerced) raises an error.
+
+```
+> f(x: real) = x^2            # x must be real
+> g(z: complex) = re(z)       # reals widen to complex automatically
+> f(n: nat): real = sqrt(n)   # return type goes after the parameter list
+> h(T: real tensor) = sum(T)  # tensor element-type hint
+> k = (x: real): real -> x*2  # lambdas can be typed too
+```
+
+A complex value with a negligible imaginary part coerces to `real`; otherwise it
+is rejected. The vocabulary is `real`, `complex`, `num`, `int`, `nat`, `tensor`,
+`real tensor`, `complex tensor`, `fn`, `cell`, `tuple`, and `any`.
+
+Use `!type` to see the type of any value, expression, or function. For a function
+it prints the fused signature, inferring the return type from the body when it is
+not annotated:
+
+```
+> !type 5
+real
+> !type 3 + 2i
+complex
+> f(x: real, y: complex) = y * linspace(0, 1, 10)
+> !type f
+(real, complex) -> complex tensor
 ```
 
 ---
