@@ -36,12 +36,24 @@ fn write_frame(out: &mut impl Write, data: &[f64], rows: usize, cols: usize, t: 
     out.write_all(b"MXFR")?;
     out.write_all(&(cols as u32).to_le_bytes())?;
     out.write_all(&(rows as u32).to_le_bytes())?;
+    out.write_all(&1u32.to_le_bytes())?;  // channels = 1 (scalar)
     out.write_all(&t.to_le_bytes())?;
     for &v in data {
         out.write_all(&(v as f32).to_le_bytes())?;
     }
     out.flush()?;
     Ok(())
+}
+
+pub fn find_animator() -> String {
+    if let Ok(p) = std::env::var("WGPU_ANIMATOR") {
+        return p;
+    }
+    let local = "./animator/target/release/wgpu_animator";
+    if std::path::Path::new(local).exists() {
+        return local.to_string();
+    }
+    "wgpu_animator".to_string()
 }
 
 // ── Call f(t), expect a 2-D (or 1-D) Tensor ───────────────────────────────────
@@ -68,18 +80,7 @@ fn call_for_frame(f: &Val, t: f64, env: &Env) -> Result<(Vec<f64>, usize, usize)
     }
 }
 
-// ── Locate the wgpu_animator binary ───────────────────────────────────────────
-
-fn find_animator() -> String {
-    if let Ok(p) = std::env::var("WGPU_ANIMATOR") {
-        return p;
-    }
-    let local = "./animator/target/release/wgpu_animator";
-    if std::path::Path::new(local).exists() {
-        return local.to_string();
-    }
-    "wgpu_animator".to_string() // hope it's in PATH
-}
+// ── Locate the wgpu_animator binary (defined above write_frame) ───────────────
 
 // ── Shared frame-streaming core ────────────────────────────────────────────────
 //

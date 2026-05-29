@@ -544,6 +544,7 @@ name = "mathlang"
 version = "0.17.0"
 dependencies = [
  "hdf5-metno",
+ "image",
  "libm",
  "plotters",
  "rand",

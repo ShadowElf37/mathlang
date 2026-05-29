@@ -35,7 +35,18 @@
 9. Split eval.rs — it is too large; defer until the GPU eval path (gpu_eval.rs) is
    designed, so the split boundary is clear.
 
-10. graphing should display the graph instead of saving to file?
+10. [DONE] graph() now saves to graph_<timestamp>_<n>.png AND opens the animator
+    in bare single-frame RGB mode so the image appears immediately. The --bare flag
+    hides colorbar and axis-tick overlays. MXFR protocol updated to include a
+    channels field (1=scalar, 3=RGB) so the animator can display colour images.
+
+16. [DONE] --bare flag for animator: hides colorbar and axis-tick overlays.
+    Implemented alongside item 10 (graph display) and item 17 (RGB protocol).
+
+17. [PARTIAL] MXFR protocol: added channels field (C=1 scalar, C=3 RGB).
+    Rgba32Float texture path in renderer; shader RGB passthrough branch.
+    Still TODO: showRGB(T) and animateRGB(T) mathlang builtins for [H,W,3]
+    and [t,H,W,3] tensors.
 
 11. aur package that puts animator and m executables in bin; hdf5 option?
 
