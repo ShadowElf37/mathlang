@@ -47,3 +47,5 @@ pi: 3.141592653589793
 > x = 5
 > !type x
 x: 5
+
+21.5 output inference will let us get rid of this perverse syntax `f() -> real = 1` -- but we should also replace that syntax anyway with `f(): real = 1` because that is unambiguous, right? and that syntax can be reused for lambdas `(x: real): real -> 1`
