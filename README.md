@@ -360,7 +360,7 @@ result = 4
 Blocks `{...}` create a local scope. Use `;` to separate definitions, `:` before the output expression(s).
 
 ```
-> {x = 3; y = 4 : x^2 + y^2}
+> {x = 3; y = 4; x^2 + y^2}
 result = 25
 ```
 
