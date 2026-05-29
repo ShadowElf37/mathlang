@@ -15,32 +15,8 @@
 
 2. GPU backend (in progress, see CONSIDERATIONS.md)
 
-3. [DONE] !savenpy <var> <file.npy> / !loadnpy <var> <file.npy>
-   Saves real tensors as float64, complex tensors as complex128.
-   Loads f2/f4/f8, c8/c16, i/u 1/2/4/8 bytes, bool — converts all to f64.
-
-4. [DONE] Removed : separator syntax. : is now exclusively the type-annotation operator.
-   All test expressions updated to use ; instead of :.
-
-5. Claude Opus exhaustive ergonomics and bug check
-
-6. [DONE] animator error messages: show type+shape instead of full tensor dump; hint
-   about NaN/division-by-zero when a complex tensor is returned unexpectedly.
-
-7. [DONE] animator: spacebar to pause/resume; left/right arrows to step frames (also pause).
-
-8. [DONE] Type hints on function params and return types. Vocabulary: real/complex/num/int/nat/tensor/real tensor/complex tensor/fn/cell/tuple/any. Coerces complex→real when |im|<eps. !type <name> shows signatures. See TYPEHINTS.md.
-
 9. Split eval.rs — it is too large; defer until the GPU eval path (gpu_eval.rs) is
    designed, so the split boundary is clear.
-
-10. [DONE] graph() now saves to graph_<timestamp>_<n>.png AND opens the animator
-    in bare single-frame RGB mode so the image appears immediately. The --bare flag
-    hides colorbar and axis-tick overlays. MXFR protocol updated to include a
-    channels field (1=scalar, 3=RGB) so the animator can display colour images.
-
-16. [DONE] --bare flag for animator: hides colorbar and axis-tick overlays.
-    Implemented alongside item 10 (graph display) and item 17 (RGB protocol).
 
 17. [PARTIAL] MXFR protocol: added channels field (C=1 scalar, C=3 RGB).
     Rgba32Float texture path in renderer; shader RGB passthrough branch.
@@ -49,12 +25,25 @@
 
 11. aur package that puts animator and m executables in bin; hdf5 option?
 
-12. [DONE] replaced quit/exit with !q, !quit, !exit
+18. consider moving graph() and animate2D() to !graph and !animate2D since theyre not really functions
 
-13. [DONE] matrix printing: 2D+ tensors inside tuples now get a newline prefix so
-    the matrix rows don't run into the surrounding text.
+19. graph() doesnt open the animator but that was a feature we supposedly implemented
+20. matrix printing is still broken in the repl:
+> tensor(1, 2, 2)
+result = ⎡ 0  0 ⎤
+⎣ 0  1 ⎦
 
-14. [DONE] removed old 1D-tuple fft; renamed fftn/ifftn to fft/ifft (n-D tensor DFT).
+21.1. builtins need signature documentation, maybe even dedicated help texts `!help <builtin>`, we should store those in separate files in a help directory, plus the general !help text -- then clean up the !help text
 
-15. [DONE] animator: --title <text> CLI flag; shown as top-left text overlay with
-    drop-shadow. From mathlang: set WGPU_TITLE env var before calling animate2D.
+21.2. function type output inference, and notational change: `f(x: real, y:complex) = linspace(0, 1, 10)` has !type output of `(real, complex) -> tensor`, so we get rid of the f() prefix, the variable names, and infer the output type from the well-known signature of the builtins involved. we will need automatic fusion of signatures: for example, `f(x: real, y: complex) -> y*linspace(0, 1, 10)` is `(real, complex) -> complex tensor`
+
+21.3. teal highlight for types (overrides purple for var names, for example tensor is a function but also a type name -- highlighter must know the difference!!!)
+
+21.4. should say real:
+> !type 2
+!type: unknown name '2'
+> !type pi
+pi: 3.141592653589793
+> x = 5
+> !type x
+x: 5
