@@ -15,7 +15,9 @@
 
 2. GPU backend (in progress, see CONSIDERATIONS.md)
 
-3. !savenpy !loadnpy
+3. [DONE] !savenpy <var> <file.npy> / !loadnpy <var> <file.npy>
+   Saves real tensors as float64, complex tensors as complex128.
+   Loads f2/f4/f8, c8/c16, i/u 1/2/4/8 bytes, bool — converts all to f64.
 
 4. Consider removing : syntax for the final expression in blocks and the CLI — it is
    synonymous with ; for the last expression, and tuple separation after : could jus
@@ -44,4 +46,5 @@
 
 14. [DONE] removed old 1D-tuple fft; renamed fftn/ifftn to fft/ifft (n-D tensor DFT).
 
-15. animator: allow specifying the plot title (where would it go? just on top of the plot in the top left corner?)
+15. [DONE] animator: --title <text> CLI flag; shown as top-left text overlay with
+    drop-shadow. From mathlang: set WGPU_TITLE env var before calling animate2D.

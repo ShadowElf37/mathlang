@@ -144,7 +144,7 @@ impl rustyline::completion::Completer for MathHelper {
         -> rustyline::Result<(usize, Vec<String>)>
     {
         if line.starts_with('!') {
-            let cmds = ["!clear", "!defs", "!exit", "!help", "!include ", "!loadhdf5 ", "!loadtensor ", "!print ", "!q", "!quit", "!savehdf5 ", "!savetensor ", "!version"];
+            let cmds = ["!clear", "!defs", "!exit", "!help", "!include ", "!loadhdf5 ", "!loadnpy ", "!loadtensor ", "!print ", "!q", "!quit", "!savehdf5 ", "!savenpy ", "!savetensor ", "!version"];
             return Ok((0, cmds.iter().filter(|&&c| c.starts_with(line)).map(|s| s.to_string()).collect()));
         }
         let start = line[..pos].rfind(|c: char| !c.is_alphanumeric() && c != '_').map_or(0, |i| i+1);
@@ -319,6 +319,223 @@ pub fn import_file(path: &str, display: &str, env: &mut Env, verbose: bool) {
             if verbose { println!("included {n} definition(s) from {display}"); }
         }
         Err(e) => eprintln!("include {display}: {e}"),
+    }
+}
+
+// ── NumPy .npy I/O ────────────────────────────────────────────────────────────
+
+fn npy_shape_str(shape: &[usize]) -> String {
+    match shape {
+        []  => "()".into(),
+        [n] => format!("({n},)"),
+        _   => format!("({})", shape.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ")),
+    }
+}
+
+fn npy_find_str(header: &str, key: &str) -> Option<String> {
+    for q in ['"', '\''] {
+        let pat = format!("{q}{key}{q}");
+        if let Some(ki) = header.find(&pat) {
+            let rest = header[ki + pat.len()..].trim_start().trim_start_matches(':').trim_start();
+            let qv = rest.chars().next()?;
+            if qv == '\'' || qv == '"' {
+                let inner = &rest[1..];
+                return Some(inner[..inner.find(qv)?].to_string());
+            }
+        }
+    }
+    None
+}
+
+fn npy_find_shape(header: &str) -> Option<String> {
+    for q in ['"', '\''] {
+        let pat = format!("{q}shape{q}");
+        if let Some(ki) = header.find(&pat) {
+            let rest = header[ki + pat.len()..].trim_start().trim_start_matches(':').trim_start();
+            if rest.starts_with('(') {
+                let end = rest.find(')')?;
+                return Some(rest[..=end].to_string());
+            }
+        }
+    }
+    None
+}
+
+fn npy_parse_shape(s: &str) -> Result<Vec<usize>, String> {
+    let inner = s.trim().trim_start_matches('(').trim_end_matches(')');
+    if inner.trim().is_empty() { return Ok(vec![]); }
+    inner.split(',').map(|p| p.trim()).filter(|p| !p.is_empty())
+        .map(|p| p.parse::<usize>().map_err(|e| format!("bad shape dim '{p}': {e}")))
+        .collect()
+}
+
+fn f16_to_f64(bits: u16) -> f64 {
+    let sign = if bits >> 15 != 0 { -1.0f64 } else { 1.0 };
+    let exp  = (bits >> 10 & 0x1f) as i32;
+    let mant = (bits & 0x3ff) as f64;
+    match exp {
+        0x1f => if mant != 0.0 { f64::NAN } else { sign * f64::INFINITY },
+        0    => sign * mant / 1024.0 * 2.0f64.powi(-14),
+        _    => sign * (1.0 + mant / 1024.0) * 2.0f64.powi(exp - 15),
+    }
+}
+
+fn save_npy(path: &str, val: &Val) -> Result<(), String> {
+    (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+        let (dtype, shape) = match val {
+            Val::Tensor { shape, .. }        => ("<f8",  shape.as_slice()),
+            Val::ComplexTensor { shape, .. } => ("<c16", shape.as_slice()),
+            _ => unreachable!(),
+        };
+        let header = format!(
+            "{{'descr': '{dtype}', 'fortran_order': False, 'shape': {}, }}",
+            npy_shape_str(shape)
+        );
+        // Total must be multiple of 64: magic(6)+version(2)+hlen_field(2) = 10 prefix bytes.
+        let min_total = 10 + header.len() + 1; // +1 for trailing '\n'
+        let padded    = (min_total + 63) / 64 * 64;
+        let mut hdr   = header;
+        for _ in 0..(padded - min_total) { hdr.push(' '); }
+        hdr.push('\n');
+        f.write_all(b"\x93NUMPY")?;
+        f.write_all(&[1u8, 0u8])?;
+        f.write_all(&(hdr.len() as u16).to_le_bytes())?;
+        f.write_all(hdr.as_bytes())?;
+        match val {
+            Val::Tensor { data, .. } => {
+                for &v in data.iter() { f.write_all(&v.to_le_bytes())?; }
+            }
+            Val::ComplexTensor { re, im, .. } => {
+                for (&r, &i) in re.iter().zip(im.iter()) {
+                    f.write_all(&r.to_le_bytes())?;
+                    f.write_all(&i.to_le_bytes())?;
+                }
+            }
+            _ => unreachable!()
+        }
+        Ok(())
+    })().map_err(|e| e.to_string())
+}
+
+fn load_npy(path: &str) -> Result<Val, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    if bytes.len() < 10 || &bytes[..6] != b"\x93NUMPY" {
+        return Err("not a valid .npy file".into());
+    }
+    let major = bytes[6];
+    let (hlen, doff) = if major <= 1 {
+        (u16::from_le_bytes([bytes[8], bytes[9]]) as usize, 10usize)
+    } else {
+        if bytes.len() < 12 { return Err("truncated header".into()); }
+        (u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize, 12usize)
+    };
+    if bytes.len() < doff + hlen { return Err("truncated header".into()); }
+    let header = std::str::from_utf8(&bytes[doff..doff + hlen])
+        .map_err(|_| "invalid header encoding")?;
+
+    let descr = npy_find_str(header, "descr").ok_or("missing 'descr' in npy header")?;
+    let shape_s = npy_find_shape(header).ok_or("missing 'shape' in npy header")?;
+    let shape = npy_parse_shape(&shape_s)?;
+    if header.contains("'fortran_order': True") || header.contains("\"fortran_order\": True") {
+        return Err("Fortran-order arrays are not supported".into());
+    }
+
+    let nelem: usize = if shape.is_empty() { 1 } else { shape.iter().product() };
+    let shape = if shape.is_empty() { vec![1] } else { shape };
+    let buf   = &bytes[doff + hlen..];
+
+    // Parse dtype: endian-char + kind-char + byte-width, e.g. "<f8", ">c16", "|u1"
+    let db = descr.as_bytes();
+    if db.len() < 3 { return Err(format!("unrecognised dtype: {descr}")); }
+    let be   = db[0] == b'>';
+    let kind = db[1] as char;
+    let nb: usize = descr[2..].parse()
+        .map_err(|_| format!("unrecognised dtype: {descr}"))?;
+
+    let need = |n: usize| -> Result<(), String> {
+        if buf.len() < n { Err(format!("truncated data: need {n} bytes, have {}", buf.len())) }
+        else { Ok(()) }
+    };
+
+    match (kind, nb) {
+        ('f', 8) => {
+            need(nelem * 8)?;
+            Ok(Val::Tensor { shape, data: TData::new((0..nelem).map(|i| {
+                let b: [u8; 8] = buf[i*8..(i+1)*8].try_into().unwrap();
+                if be { f64::from_be_bytes(b) } else { f64::from_le_bytes(b) }
+            }).collect()) })
+        }
+        ('f', 4) => {
+            need(nelem * 4)?;
+            Ok(Val::Tensor { shape, data: TData::new((0..nelem).map(|i| {
+                let b: [u8; 4] = buf[i*4..(i+1)*4].try_into().unwrap();
+                if be { f32::from_be_bytes(b) as f64 } else { f32::from_le_bytes(b) as f64 }
+            }).collect()) })
+        }
+        ('f', 2) => {
+            need(nelem * 2)?;
+            Ok(Val::Tensor { shape, data: TData::new((0..nelem).map(|i| {
+                let b: [u8; 2] = buf[i*2..(i+1)*2].try_into().unwrap();
+                f16_to_f64(if be { u16::from_be_bytes(b) } else { u16::from_le_bytes(b) })
+            }).collect()) })
+        }
+        ('c', 16) => {
+            need(nelem * 16)?;
+            let mut re = Vec::with_capacity(nelem);
+            let mut im = Vec::with_capacity(nelem);
+            for i in 0..nelem {
+                let br: [u8; 8] = buf[i*16..i*16+8].try_into().unwrap();
+                let bi: [u8; 8] = buf[i*16+8..i*16+16].try_into().unwrap();
+                re.push(if be { f64::from_be_bytes(br) } else { f64::from_le_bytes(br) });
+                im.push(if be { f64::from_be_bytes(bi) } else { f64::from_le_bytes(bi) });
+            }
+            Ok(Val::ComplexTensor { re: TData::new(re), im: TData::new(im), shape })
+        }
+        ('c', 8) => {
+            need(nelem * 8)?;
+            let mut re = Vec::with_capacity(nelem);
+            let mut im = Vec::with_capacity(nelem);
+            for i in 0..nelem {
+                let br: [u8; 4] = buf[i*8..i*8+4].try_into().unwrap();
+                let bi: [u8; 4] = buf[i*8+4..i*8+8].try_into().unwrap();
+                re.push(if be { f32::from_be_bytes(br) as f64 } else { f32::from_le_bytes(br) as f64 });
+                im.push(if be { f32::from_be_bytes(bi) as f64 } else { f32::from_le_bytes(bi) as f64 });
+            }
+            Ok(Val::ComplexTensor { re: TData::new(re), im: TData::new(im), shape })
+        }
+        ('i' | 'u', nb) if nb <= 8 => {
+            need(nelem * nb)?;
+            let signed = kind == 'i';
+            let data: Vec<f64> = (0..nelem).map(|i| {
+                let sl = &buf[i*nb..(i+1)*nb];
+                match (signed, nb, be) {
+                    (_,     1, _    ) => if signed { sl[0] as i8 as f64 } else { sl[0] as f64 },
+                    (true,  2, false) => i16::from_le_bytes(sl.try_into().unwrap()) as f64,
+                    (true,  2, true ) => i16::from_be_bytes(sl.try_into().unwrap()) as f64,
+                    (false, 2, false) => u16::from_le_bytes(sl.try_into().unwrap()) as f64,
+                    (false, 2, true ) => u16::from_be_bytes(sl.try_into().unwrap()) as f64,
+                    (true,  4, false) => i32::from_le_bytes(sl.try_into().unwrap()) as f64,
+                    (true,  4, true ) => i32::from_be_bytes(sl.try_into().unwrap()) as f64,
+                    (false, 4, false) => u32::from_le_bytes(sl.try_into().unwrap()) as f64,
+                    (false, 4, true ) => u32::from_be_bytes(sl.try_into().unwrap()) as f64,
+                    (true,  8, false) => i64::from_le_bytes(sl.try_into().unwrap()) as f64,
+                    (true,  8, true ) => i64::from_be_bytes(sl.try_into().unwrap()) as f64,
+                    (false, 8, false) => u64::from_le_bytes(sl.try_into().unwrap()) as f64,
+                    (false, 8, true ) => u64::from_be_bytes(sl.try_into().unwrap()) as f64,
+                    _ => 0.0,
+                }
+            }).collect();
+            Ok(Val::Tensor { data: TData::new(data), shape })
+        }
+        ('b', 1) => {
+            need(nelem)?;
+            Ok(Val::Tensor { shape, data: TData::new(
+                (0..nelem).map(|i| if buf[i] != 0 { 1.0 } else { 0.0 }).collect()
+            ) })
+        }
+        _ => Err(format!("unsupported dtype '{descr}' — supported: f2/f4/f8, c8/c16, i/u 1/2/4/8, bool")),
     }
 }
 
@@ -507,6 +724,8 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "           !print [text with {{expr}} interpolation]  — print formatted output\n",
             "           !savetensor <var> <file>  — save tensor to binary .mlt file\n",
             "           !loadtensor <var> <file>  — load tensor from .mlt file\n",
+            "           !savenpy <var> <file.npy>  — save tensor to NumPy .npy (f64/c128)\n",
+            "           !loadnpy <var> <file.npy>  — load NumPy .npy (f2/f4/f8, c8/c16, int, bool)\n",
             "           !savehdf5 <var> <file> [/ds] [--append] [--overwrite] [--gzip 0-9]\n",
             "           !loadhdf5 <var> <file> [/ds] [--list]\n",
             "Init file: ~/.mathlangrc (auto-imported on start; override with $MATHLANG_INIT)\n",
@@ -670,6 +889,50 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     println!("loaded {var} ({desc}) from {fp}");
                 }
                 Err(e) => eprintln!("loadtensor: {e}"),
+            }
+        }
+        "savenpy" => {
+            let mut it = arg.splitn(2, ' ');
+            let (var, fp) = (it.next().unwrap_or("").trim(), it.next().unwrap_or("").trim());
+            if var.is_empty() || fp.is_empty() {
+                eprintln!("usage: !savenpy <var> <file.npy>"); return;
+            }
+            match env.vars.get(var) {
+                Some(v @ Val::Tensor { data, .. }) => {
+                    let (n, v) = (data.len(), v.clone());
+                    match save_npy(&expand_path(fp), &v) {
+                        Ok(()) => println!("saved {var} ({n} elements, real f64) → {fp}"),
+                        Err(e) => eprintln!("savenpy: {e}"),
+                    }
+                }
+                Some(v @ Val::ComplexTensor { re, .. }) => {
+                    let (n, v) = (re.len(), v.clone());
+                    match save_npy(&expand_path(fp), &v) {
+                        Ok(()) => println!("saved {var} ({n} elements, complex f64) → {fp}"),
+                        Err(e) => eprintln!("savenpy: {e}"),
+                    }
+                }
+                Some(_) => eprintln!("savenpy: {var} is not a tensor"),
+                None    => eprintln!("savenpy: {var} not defined"),
+            }
+        }
+        "loadnpy" => {
+            let mut it = arg.splitn(2, ' ');
+            let (var, fp) = (it.next().unwrap_or("").trim(), it.next().unwrap_or("").trim());
+            if var.is_empty() || fp.is_empty() {
+                eprintln!("usage: !loadnpy <var> <file.npy>"); return;
+            }
+            match load_npy(&expand_path(fp)) {
+                Ok(val) => {
+                    let desc = match &val {
+                        Val::Tensor { data, shape }        => format!("{shape:?} real f64, {} elem", data.len()),
+                        Val::ComplexTensor { re, shape, .. } => format!("{shape:?} complex f64, {} elem", re.len()),
+                        _ => unreachable!(),
+                    };
+                    env.define(var.to_string(), val);
+                    println!("loaded {var} ({desc}) ← {fp}");
+                }
+                Err(e) => eprintln!("loadnpy: {e}"),
             }
         }
         "savehdf5" => {

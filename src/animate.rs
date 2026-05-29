@@ -261,10 +261,19 @@ pub fn eval_animate2d(args: &[Expr], env: &Env) -> Result<Val, String> {
 
     let animator = find_animator();
     let fps_str = format!("{}", fps as u32);
-    eprintln!("animate2D: spawning '{animator}' --fps {fps_str}");
+
+    let mut cmd_args: Vec<String> = vec![
+        "--stdin".into(), "--colormap".into(), "heat".into(),
+        "--fps".into(), fps_str,
+    ];
+    if let Ok(title) = std::env::var("WGPU_TITLE") {
+        cmd_args.push("--title".into());
+        cmd_args.push(title);
+    }
+    eprintln!("animate2D: spawning '{animator}'");
 
     let mut child = std::process::Command::new(&animator)
-        .args(["--stdin", "--colormap", "heat", "--fps", &fps_str])
+        .args(&cmd_args)
         .stdin(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!(
