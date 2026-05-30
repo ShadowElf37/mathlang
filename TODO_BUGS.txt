@@ -1,0 +1,23 @@
+1. unless theres a good reason, i think these are bugs:
+> f = x: tensor -> x
+error: unexpected token: Colon
+> f = (x: tensor) -> x
+> !type [5]
+real tensor
+> f([5])
+error: x: expected tensor, got 5
+
+2. parity between `!type <builtin>` which prints the builtin name, and `!type <fn>` which doesnt print the fn name
+
+3. help text for rand(a,b) wrong
+
+4. no documentation of tensordot but its an important function
+
+5. consider moving graph() and animate2D() to !graph and !animate2D since theyre not really functions
+
+6. graph() doesnt open the animator but that was a feature we supposedly implemented
+
+7. matrix printing is still broken in the repl:
+> tensor(1, 2, 2)
+result = ⎡ 0  0 ⎤
+⎣ 0  1 ⎦
