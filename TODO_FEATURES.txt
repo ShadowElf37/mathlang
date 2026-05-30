@@ -15,22 +15,18 @@
 
 2. [SEPARATE BRANCH] GPU backend (see CONSIDERATIONS.md)
 
-3. Split eval.rs — it is too large; defer until the GPU eval path (gpu_eval.rs) is
+2.5. Split eval.rs — it is too large; defer until the GPU eval path (gpu_eval.rs) is
    designed, so the split boundary is clear.
 
-4. [PARTIAL] MXFR protocol: added channels field (C=1 scalar, C=3 RGB).
+3. [PARTIAL] MXFR protocol: added channels field (C=1 scalar, C=3 RGB).
     Rgba32Float texture path in renderer; shader RGB passthrough branch.
     Still TODO: showRGB(T) and animateRGB(T) mathlang builtins for [H,W,3]
     and [t,H,W,3] tensors.
 
-5. aur package that puts animator and m executables in bin; hdf5 option?
-
-6. [PARTIAL] builtins have signatures (builtin_sig) shown by !type/!help. General
-   !help text cleaned up (type vocabulary + colon return syntax). Dedicated per-builtin
-   help texts (`!help <builtin>` from a help directory) DEFERRED — too many tokens.
+4. aur package that puts animator and m executables in bin; hdf5 option?
 
 
 CONTINUAL:
 
-7.1. Claude Opus try to tackle a complex project in pure mathlang, and see what's too difficult, awkward, unintuitive, verbose, messy, etc. from the perspective of an engineer/physicist/mathematician -- mark those as new bugs or feature requests
-7.2. Claude Opus search codebase for performance optimizations, bugs, unwise features, excessively delicate or complex code, technical debt, very old features that dont fit the style of the language, bad ergonomics or things that "should work" but don't, poor documentation
+0.1. Claude Opus try to tackle a complex project in pure mathlang, and see what's too difficult, awkward, unintuitive, verbose, messy, etc. from the perspective of an engineer/physicist/mathematician -- mark those as new bugs or feature requests
+0.2. Claude Opus search codebase for performance optimizations, bugs, unwise features, excessively delicate or complex code, technical debt, very old features that dont fit the style of the language, bad ergonomics or things that "should work" but don't, poor documentation
