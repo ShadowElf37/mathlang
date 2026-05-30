@@ -1,23 +1,19 @@
 /// animate2D — spawn wgpu_animator and stream 2D tensor frames to it via the MXFR protocol.
 /// animate2D_raw — same, but writes raw MXFR to stdout for manual piping.
 ///
-/// Protocol (from animator/PROTOCOL.md):
-///   Per frame, write (little-endian):
-///     b"MXFR"  — 4 magic bytes
-///     W: u32   — width  (cols)
-///     H: u32   — height (rows)
-///     t: f64   — timestamp
-///     data: W*H f32 values, row-major, row-0 = top of display
+/// Axis convention: tensors are indexed T[x, y] — first index is x (horizontal),
+/// second index is y (vertical, y=0 at top of display).  Shapes are [nx, ny].
+/// A 3-D animation tensor has shape [n_frames, nx, ny].
 ///
 /// Calling conventions (both animate2D and animate2D_raw unless noted):
-///   animate2D(T)                — T: 3-D Tensor [n_frames, H, W]
-///   animate2D(T, fps)           — same, with fps (animate2D only)
-///   animate2D(f, n)             — f: t→2-D Tensor, n frames at t=0..n-1
-///   animate2D(f, n, fps)        — same, with fps (animate2D only)
-///   animate2D(f, t_vals)        — f + 1-D tensor of timestamps
-///   animate2D(f, t_vals, fps)   — same, with fps (animate2D only)
-///   animate2D(f, t0, t1, n)     — f + linspace(t0, t1, n)
-///   animate2D(f, t0, t1, n, fps)— same, with fps (animate2D only)
+///   !animate2D T                — T: 3-D Tensor [n_frames, nx, ny]
+///   !animate2D T fps            — same, with fps (animate2D only)
+///   !animate2D f n              — f: t→2-D Tensor [nx,ny], n frames at t=0..n-1
+///   !animate2D f n fps          — same, with fps (animate2D only)
+///   !animate2D f t_vals         — f + 1-D tensor of timestamps
+///   !animate2D f t_vals fps     — same, with fps (animate2D only)
+///   !animate2D f t0 t1 n        — f + linspace(t0, t1, n)
+///   !animate2D f t0 t1 n fps    — same, with fps (animate2D only)
 ///
 /// Animator binary discovery (animate2D only):
 ///   1. $WGPU_ANIMATOR env var
@@ -30,16 +26,21 @@ use crate::eval::{Val, Env, eval, apply_val};
 
 // ── Binary helpers ─────────────────────────────────────────────────────────────
 
-fn write_frame(out: &mut impl Write, data: &[f64], rows: usize, cols: usize, t: f64)
+// data is stored x-major: data[x*ny + y] = T[x, y].
+// MXFR expects row-major (y outer): pixel[y*nx + x] = T[x, y].
+// This function transposes on the fly: width=nx, height=ny.
+fn write_frame_xy(out: &mut impl Write, data: &[f64], nx: usize, ny: usize, t: f64)
     -> std::io::Result<()>
 {
     out.write_all(b"MXFR")?;
-    out.write_all(&(cols as u32).to_le_bytes())?;
-    out.write_all(&(rows as u32).to_le_bytes())?;
-    out.write_all(&1u32.to_le_bytes())?;  // channels = 1 (scalar)
+    out.write_all(&(nx as u32).to_le_bytes())?;  // width  = nx
+    out.write_all(&(ny as u32).to_le_bytes())?;  // height = ny
+    out.write_all(&1u32.to_le_bytes())?;
     out.write_all(&t.to_le_bytes())?;
-    for &v in data {
-        out.write_all(&(v as f32).to_le_bytes())?;
+    for y in 0..ny {
+        for x in 0..nx {
+            out.write_all(&(data[x * ny + y] as f32).to_le_bytes())?;
+        }
     }
     out.flush()?;
     Ok(())
@@ -58,13 +59,15 @@ pub fn find_animator() -> String {
 
 // ── Call f(t), expect a 2-D (or 1-D) Tensor ───────────────────────────────────
 
+// Returns (data, nx, ny) where data is stored x-major: data[x*ny + y] = T[x, y].
+// For 2-D tensors shape=[nx, ny]; for 1-D tensors (nx=n, ny=1) stays a horizontal strip.
 fn call_for_frame(f: &Val, t: f64, env: &Env) -> Result<(Vec<f64>, usize, usize), String> {
     let result = apply_val(f.clone(), vec![Val::Num(t)], env)?;
     match result {
         Val::Tensor { data, shape } if shape.len() == 2 => Ok((data.into_vec(), shape[0], shape[1])),
         Val::Tensor { data, shape } if shape.len() == 1 => {
-            let cols = data.len();
-            Ok((data.into_vec(), 1, cols))
+            let n = data.len();
+            Ok((data.into_vec(), n, 1))
         }
         other => {
             let type_desc = match &other {
@@ -75,7 +78,7 @@ fn call_for_frame(f: &Val, t: f64, env: &Env) -> Result<(Vec<f64>, usize, usize)
                 Val::Tuple(v) => format!("tuple of {} elements", v.len()),
                 _             => "non-tensor value".into(),
             };
-            Err(format!("animate2D: f(t) must return a 2-D tensor, got {type_desc}"))
+            Err(format!("animate2D: f(t) must return a 2-D tensor [nx, ny], got {type_desc}"))
         }
     }
 }
@@ -95,7 +98,7 @@ fn stream_frames(
     out: &mut impl Write,
 ) -> Result<usize, String> {
     match first {
-        // ── animate2D(T) — 3-D Tensor [n_frames, H, W] ───────────────────────
+        // ── animate2D(T) — 3-D Tensor [n_frames, nx, ny] ─────────────────────
         Val::Tensor { ref data, ref shape } if shape.len() == 3 => {
             if !rest.is_empty() {
                 return Err(format!(
@@ -103,12 +106,12 @@ fn stream_frames(
                     rest.len()
                 ));
             }
-            let (nf, h, w) = (shape[0], shape[1], shape[2]);
-            let frame_size = h * w;
-            eprintln!("animate2D: streaming {nf} frames ({h}×{w})");
+            let (nf, nx, ny) = (shape[0], shape[1], shape[2]);
+            let frame_size = nx * ny;
+            eprintln!("animate2D: streaming {nf} frames ({nx}×{ny})");
             for f in 0..nf {
                 let slice = &data[f * frame_size .. (f + 1) * frame_size];
-                write_frame(out, slice, h, w, f as f64)
+                write_frame_xy(out, slice, nx, ny, f as f64)
                     .map_err(|e| format!("animate2D: write error: {e}"))?;
             }
             eprintln!("animate2D: done ({nf} frames)");
@@ -146,19 +149,19 @@ fn stream_frames(
             let n_frames = t_vals.len();
             eprintln!("animate2D: computing and streaming {n_frames} frames …");
 
-            let (first_data, rows, cols) = call_for_frame(&f_val, t_vals[0], env)?;
-            eprintln!("animate2D: grid {rows}×{cols}");
-            write_frame(out, &first_data, rows, cols, t_vals[0])
+            let (first_data, nx, ny) = call_for_frame(&f_val, t_vals[0], env)?;
+            eprintln!("animate2D: grid {nx}×{ny}");
+            write_frame_xy(out, &first_data, nx, ny, t_vals[0])
                 .map_err(|e| format!("animate2D: write error: {e}"))?;
 
             for &t in &t_vals[1..] {
-                let (frame_data, fr, fc) = call_for_frame(&f_val, t, env)?;
-                if fr != rows || fc != cols {
+                let (frame_data, fnx, fny) = call_for_frame(&f_val, t, env)?;
+                if fnx != nx || fny != ny {
                     return Err(format!(
-                        "animate2D: frame at t={t} has shape [{fr},{fc}], expected [{rows},{cols}]"
+                        "animate2D: frame at t={t} has shape [{fnx},{fny}], expected [{nx},{ny}]"
                     ));
                 }
-                write_frame(out, &frame_data, rows, cols, t)
+                write_frame_xy(out, &frame_data, fnx, fny, t)
                     .map_err(|e| format!("animate2D: write error: {e}"))?;
             }
 

@@ -182,10 +182,14 @@ Implements rustyline `Completer`, `Highlighter`, `Hinter` for syntax coloring, t
 
 `eval_animate2d_raw(args, env)` — same but writes MXFR to stdout (no subprocess).
 
+### Axis convention
+
+Tensors use **T[x, y]** convention: first index is x (horizontal, columns), second is y (vertical, rows). Shape is `[nx, ny]`. `stream_frames` transposes x-major data to MXFR row-major format on the fly via `write_frame_xy`.
+
 ### Calling conventions for animate2D
 
-- `!animate2D T [fps]` — T is 3-D Tensor `[n_frames, H, W]`
-- `!animate2D f n [fps]` — f called at t=0..n-1
+- `!animate2D T [fps]` — T is 3-D Tensor `[n_frames, nx, ny]` (T[x,y] convention)
+- `!animate2D f n [fps]` — f called at t=0..n-1; f must return `[nx, ny]` tensor
 - `!animate2D f t_vals [fps]` — f called at each timestamp in 1-D tensor
 - `!animate2D f t0 t1 n [fps]` — f called at linspace(t0, t1, n)
 
