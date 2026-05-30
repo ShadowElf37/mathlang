@@ -15,6 +15,23 @@
 
 2. GPU backend (in progress, see CONSIDERATIONS.md)
 
+3. unless theres a good reason, i think these are bugs:
+> f = x: tensor -> x
+error: unexpected token: Colon
+> f = (x: tensor) -> x
+> !type [5]
+real tensor
+> f([5])
+error: x: expected tensor, got 5
+
+4. parity between `!type <builtin>` which prints the builtin name, and `!type <fn>` which doesnt print the fn name
+
+5. help text for rand(a,b) wrong
+
+6. no documentation of tensordot but its an important function
+
+
+
 9. Split eval.rs — it is too large; defer until the GPU eval path (gpu_eval.rs) is
    designed, so the split boundary is clear.
 
@@ -37,19 +54,3 @@ result = ⎡ 0  0 ⎤
    !help text cleaned up (type vocabulary + colon return syntax). Dedicated per-builtin
    help texts (`!help <builtin>` from a help directory) DEFERRED — too many tokens.
 
-21.2. [DONE] !type infers and fuses signatures. A function shows `(t1, t2) -> ret`
-   (no f() prefix, no var names); the return type is inferred from the body via
-   signature fusion when not annotated. e.g. f(x: real, y: complex) = y*linspace(0,1,10)
-   gives `(real, complex) -> complex tensor`. See infer_type() in eval.rs.
-
-21.3. [DONE] type keywords highlight green (only after a ':' so `tensor` the builtin
-   stays purple but `: tensor` the annotation is green). See highlight_line in repl.rs.
-
-21.4. [DONE] !type reports the TYPE, not the value: !type 2 -> real, !type pi -> real,
-   x=5; !type x -> real, !type 3+2i -> complex. Falls back to static inference for
-   arbitrary expressions.
-
-21.5. [DONE] return-type syntax is now `f(): real = 1` (colon after the param list),
-   and lambdas `(x: real): real -> body`. The old `f() -> real = 1` arrow form is gone.
-
-22. e constant was wrong (2.718281828281828); now std::f64::consts::E. [DONE]
