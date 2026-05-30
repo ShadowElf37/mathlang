@@ -1,0 +1,36 @@
+1. [PARTIAL] bytecode VM — lazy OnceLock compilation, stack-based interpreter, tensor
+   indexing (Index), nested lambdas (MakeClosure), non-recursive Def::Func in blocks.
+
+   Still possible to add to the bytecode VM:
+   1a. Slices in compiled bodies: T[lo..hi] currently falls back; add a Slice instruction
+   1b. Ranges in compiled bodies: lo..hi currently falls back; produces a 1-D tensor
+   1c. Tensor literals: (1,2; 3,4) currently falls back; straightforward to compile
+   1d. Recursive local functions: needs MakeRecFn or a Cell-based two-pass trick
+   1e. Loop instruction: bounded iteration (sum(f, lo, hi) style) compiled to a flat
+       loop in the VM — also the only recursion-analogue that is GPU-safe
+   1f. Move Instruction enum to src/vm.rs so src/gpu/ can import it without pulling
+       in all of eval.rs (deferred until eval.rs is split, see item 9)
+   1g. LoadBuffer instruction: GPU-side tensor indexing for captured buffers inside
+       GPU lambda bodies (v2 GPU feature, see CONSIDERATIONS.md §15)
+
+2. [SEPARATE BRANCH] GPU backend (see CONSIDERATIONS.md)
+
+3. Split eval.rs — it is too large; defer until the GPU eval path (gpu_eval.rs) is
+   designed, so the split boundary is clear.
+
+4. [PARTIAL] MXFR protocol: added channels field (C=1 scalar, C=3 RGB).
+    Rgba32Float texture path in renderer; shader RGB passthrough branch.
+    Still TODO: showRGB(T) and animateRGB(T) mathlang builtins for [H,W,3]
+    and [t,H,W,3] tensors.
+
+5. aur package that puts animator and m executables in bin; hdf5 option?
+
+6. [PARTIAL] builtins have signatures (builtin_sig) shown by !type/!help. General
+   !help text cleaned up (type vocabulary + colon return syntax). Dedicated per-builtin
+   help texts (`!help <builtin>` from a help directory) DEFERRED — too many tokens.
+
+
+CONTINUAL:
+
+7.1. Claude Opus try to tackle a complex project in pure mathlang, and see what's too difficult, awkward, unintuitive, verbose, messy, etc. from the perspective of an engineer/physicist/mathematician -- mark those as new bugs or feature requests
+7.2. Claude Opus search codebase for performance optimizations, bugs, unwise features, excessively delicate or complex code, technical debt, very old features that dont fit the style of the language, bad ergonomics or things that "should work" but don't, poor documentation
