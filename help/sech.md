@@ -3,6 +3,6 @@
 Computes the hyperbolic secant: 1/cosh(x).
 
 [1mExamples:[0m
-[2m> sech(0)
+[0m> sech(0)
 result = 1
 [0m

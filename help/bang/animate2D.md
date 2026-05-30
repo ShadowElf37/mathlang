@@ -8,7 +8,7 @@ Animate a 2D field and display it in the wgpu animator window. Accepts a pre-com
 - [33m!animate2D f t0 t1 n [fps][0m — call f(t) for t in linspace(t0, t1, n)
 
 [1mExamples:[0m
-[2m> T = tensor((t,x,y) -> sin(x+t)*cos(y), 60, 50, 50)
+[0m> T = tensor((t,x,y) -> sin(x+t)*cos(y), 60, 50, 50)
 > !animate2D T 30
 > !animate2D t -> tensor((x,y) -> sin(x+t), 50, 50), 0, 2pi, 60, 24
 [0m

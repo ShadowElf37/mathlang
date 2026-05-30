@@ -3,7 +3,7 @@
 Computes the absolute value (magnitude) of a number. For complex numbers, returns the modulus.
 
 [1mExamples:[0m
-[2m> abs(-5)
+[0m> abs(-5)
 result = 5
 > abs(3 + 4i)
 result = 5

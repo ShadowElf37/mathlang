@@ -3,7 +3,7 @@
 Computes the base-10 logarithm.
 
 [1mExamples:[0m
-[2m> log10(100)
+[0m> log10(100)
 result = 2
 > log10(1000)
 result = 3

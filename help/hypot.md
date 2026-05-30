@@ -3,7 +3,7 @@
 Computes √(x² + y²) safely (avoiding overflow).
 
 [1mExamples:[0m
-[2m> hypot(3, 4)
+[0m> hypot(3, 4)
 result = 5
 > hypot(5, 12)
 result = 13

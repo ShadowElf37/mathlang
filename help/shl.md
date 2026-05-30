@@ -3,7 +3,7 @@
 Bitwise left shift: shifts the bits of x left by n positions.
 
 [1mExamples:[0m
-[2m> shl(1, 8)
+[0m> shl(1, 8)
 result = 256
 > shl(3, 2)
 result = 12

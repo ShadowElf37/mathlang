@@ -3,7 +3,7 @@
 Computes the principal square root. For complex numbers, returns the result in the first quadrant.
 
 [1mExamples:[0m
-[2m> sqrt(4)
+[0m> sqrt(4)
 result = 2
 > sqrt(-1)
 result = i

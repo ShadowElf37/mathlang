@@ -3,7 +3,7 @@
 Computes the natural logarithm (base e). Works with positive reals and complex numbers.
 
 [1mExamples:[0m
-[2m> ln(1)
+[0m> ln(1)
 result = 0
 > ln(e)
 result = 1

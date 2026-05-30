@@ -5,7 +5,7 @@ Show the type signature of a builtin, user-defined function, or any expression.
 [1mUsage:[0m [33m!type <name>[0m | [33m!type <expr>[0m
 
 [1mExamples:[0m
-[2m> !type sin
+[0m> !type sin
 sin(x: num) -> num
 > f(x: real) = x^2
 > !type f

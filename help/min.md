@@ -3,7 +3,7 @@
 Finds the minimum value. Can compare two numbers or find minimum in a tensor.
 
 [1mExamples:[0m
-[2m> min(3, 5)
+[0m> min(3, 5)
 result = 3
 > min((4,2,8,1))
 result = 1

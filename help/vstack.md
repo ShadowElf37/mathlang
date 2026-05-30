@@ -3,7 +3,7 @@
 Stacks two 2-D matrices vertically (row-wise).
 
 [1mExamples:[0m
-[2m> vstack(eye(2), eye(2))
+[0m> vstack(eye(2), eye(2))
 result =
 ⎡ 1  0 ⎤
 ⎢ 0  1 ⎥

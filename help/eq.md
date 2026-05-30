@@ -3,7 +3,7 @@
 Equality comparison returning 1 (true) or 0 (false).
 
 [1mExamples:[0m
-[2m> eq(5, 5)
+[0m> eq(5, 5)
 result = 1
 > eq(3, 5)
 result = 0

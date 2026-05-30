@@ -5,7 +5,7 @@ Save a tensor variable to an HDF5 file. Optionally specify a dataset path, and u
 [1mUsage:[0m [33m!savehdf5 <var> <file> [/dataset] [--append] [--overwrite] [--gzip 0-9][0m
 
 [1mExamples:[0m
-[2m> !savehdf5 T data.h5
+[0m> !savehdf5 T data.h5
 > !savehdf5 T data.h5 /results --gzip 6
 > !savehdf5 T data.h5 /run2 --append
 [0m

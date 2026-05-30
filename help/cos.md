@@ -3,7 +3,7 @@
 Computes the cosine of an angle in radians. Works with real and complex arguments.
 
 [1mExamples:[0m
-[2m> cos(0)
+[0m> cos(0)
 result = 1
 > cos(pi)
 result = -1

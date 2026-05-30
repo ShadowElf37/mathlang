@@ -3,7 +3,7 @@
 Computes the argument (phase angle) of a complex number in radians.
 
 [1mExamples:[0m
-[2m> arg(1)
+[0m> arg(1)
 result = 0
 > arg(i)
 result = 1.570796326794897

@@ -452,6 +452,89 @@ pub fn builtin_sig(name: &str) -> Option<&'static str> {
         "set"    => Some("set(c: cell, val: any) -> any"),
         "rand"   => Some("rand() -> real | rand(n: nat) -> tensor | rand(n1: nat, n2: nat, …) -> tensor"),
         "tensordot" => Some("tensordot(T1: tensor, T2: tensor, n: nat) | tensordot(T1, T2, (a, b)) | tensordot(T1, T2, ((a1,…),(b1,…)))"),
+        // trig aliases / specials
+        "sec"    => Some("sec(x: num) -> num"),
+        "csc"    => Some("csc(x: num) -> num"),
+        "cot"    => Some("cot(x: num) -> num"),
+        "sech"   => Some("sech(x: num) -> num"),
+        "csch"   => Some("csch(x: num) -> num"),
+        "sinc"   => Some("sinc(x: real) -> real"),
+        "jinc"   => Some("jinc(x: real) -> real"),
+        "expm1"  => Some("expm1(x: num) -> num"),
+        // scalar utilities
+        "deg"     => Some("deg(x: real) -> real"),
+        "rad"     => Some("rad(x: real) -> real"),
+        "delta"   => Some("delta(x: real) -> int"),
+        "heaviside" => Some("heaviside(x: real) -> real"),
+        "signum"  => Some("signum(x: real) -> real"),
+        "id"      => Some("id(x: any) -> any"),
+        "not"     => Some("not(x: int) -> int"),
+        "factorial" => Some("factorial(n: nat) -> real"),
+        "length"  => Some("length(x: any) -> nat"),
+        // stats
+        "median"  => Some("median(x: tensor) -> real"),
+        "mode"    => Some("mode(x: tensor) -> real"),
+        // probability
+        "gaussian"     => Some("gaussian(x: real, mu: real, sigma: real) -> real"),
+        "gaussian_cdf" => Some("gaussian_cdf(x: real, mu: real, sigma: real) -> real"),
+        // levi-civita
+        "eps"     => Some("eps(i: int, j: int, …) -> int"),
+        // tuple / 1-D tensor ops
+        "append"  => Some("append(t: any, x: any) -> any"),
+        "concat"  => Some("concat(a: any, b: any) -> any"),
+        "flatten" => Some("flatten(T: tensor) -> tensor"),
+        "argmin"  => Some("argmin(t: tensor) -> nat"),
+        "argmax"  => Some("argmax(t: tensor) -> nat"),
+        "zip"     => Some("zip(a: tensor, b: tensor) -> tensor"),
+        // comparison functions
+        "lt"  => Some("lt(a: num, b: num) -> int"),
+        "leq" => Some("leq(a: num, b: num) -> int"),
+        "gt"  => Some("gt(a: num, b: num) -> int"),
+        "geq" => Some("geq(a: num, b: num) -> int"),
+        "eq"  => Some("eq(a: num, b: num) -> int"),
+        "neq" => Some("neq(a: num, b: num) -> int"),
+        // bitwise
+        "and"  => Some("and(a: int, b: int) -> int"),
+        "or"   => Some("or(a: int, b: int) -> int"),
+        "xor"  => Some("xor(a: int, b: int) -> int"),
+        "nand" => Some("nand(a: int, b: int) -> int"),
+        "nor"  => Some("nor(a: int, b: int) -> int"),
+        "xnor" => Some("xnor(a: int, b: int) -> int"),
+        "shl"  => Some("shl(a: int, b: int) -> int"),
+        "shr"  => Some("shr(a: int, b: int) -> int"),
+        // control flow
+        "if" => Some("if(cond: num, a: any, b: any) -> any"),
+        // tensor construction
+        "tensor" => Some("tensor(f: fn, n1: nat, n2: nat, …) -> tensor"),
+        "matrix" => Some("matrix(f: fn, r: nat, c: nat) -> tensor"),
+        // tensor indexing
+        "row" => Some("row(M: tensor, i: nat) -> tensor"),
+        "col" => Some("col(M: tensor, j: nat) -> tensor"),
+        "dim" => Some("dim(T: tensor, axis: nat) -> nat"),
+        // tensor reshaping
+        "cat"      => Some("cat(axis: nat, T1: tensor, T2: tensor, …) -> tensor"),
+        "squeeze"  => Some("squeeze(T: tensor) -> tensor"),
+        "unsqueeze" => Some("unsqueeze(T: tensor, dim: nat) -> tensor"),
+        "permute"  => Some("permute(T: tensor, p0: nat, p1: nat, …) -> tensor"),
+        // linear algebra
+        "solve"      => Some("solve(A: tensor, b: tensor) -> tensor"),
+        "eig"        => Some("eig(M: tensor) -> tuple"),
+        "eigvals"    => Some("eigvals(M: tensor) -> tensor"),
+        "eig_top"    => Some("eig_top(M: tensor) -> tuple"),
+        "eig_bot"    => Some("eig_bot(M: tensor) -> tuple"),
+        "qr"         => Some("qr(M: tensor) -> tuple"),
+        "diagonalize" => Some("diagonalize(M: tensor) -> tuple"),
+        "hstack"     => Some("hstack(A: tensor, B: tensor) -> tensor"),
+        "vstack"     => Some("vstack(A: tensor, B: tensor) -> tensor"),
+        "tomat"      => Some("tomat(t: tensor, r: nat, c: nat) -> tensor"),
+        "outer"      => Some("outer(A: tensor, B: tensor) -> tensor"),
+        // elementwise
+        "lerp"  => Some("lerp(a: any, b: any, t: any) -> any"),
+        "clamp" => Some("clamp(x: any, lo: real, hi: real) -> any"),
+        "shift" => Some("shift(T: tensor, n: int, axis: nat) -> tensor"),
+        "roll"  => Some("roll(T: tensor, n: int, axis: nat) -> tensor"),
+        // n-D grid
+        "lingrid" => Some("lingrid(start: any, end: any, counts: any, f: fn) -> tensor"),
         _ => None,
     }
 }

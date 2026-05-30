@@ -3,7 +3,7 @@
 Conditional evaluation: returns a if cond is nonzero, otherwise returns b. Branches are evaluated lazily.
 
 [1mExamples:[0m
-[2m> if(1, 10, 20)
+[0m> if(1, 10, 20)
 result = 10
 > if(0, 10, 20)
 result = 20

@@ -3,7 +3,7 @@
 Computes the Frobenius norm (L2 norm) of a tensor.
 
 [1mExamples:[0m
-[2m> norm((3,4))
+[0m> norm((3,4))
 result = 5
 > norm((1,2; 3,4))
 result = 5.477...

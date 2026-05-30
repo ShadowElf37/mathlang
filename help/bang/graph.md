@@ -5,7 +5,7 @@ Plot a function over a range and open the result in the animator. The range defa
 [1mUsage:[0m [33m!graph f[0m | [33m!graph f, a, b[0m
 
 [1mExamples:[0m
-[2m> !graph sin
+[0m> !graph sin
 (plots sin over [-10, 10])
 > !graph x -> x^2, -5, 5
 (plots x² over [-5, 5])

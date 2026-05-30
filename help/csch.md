@@ -3,6 +3,6 @@
 Computes the hyperbolic cosecant: 1/sinh(x).
 
 [1mExamples:[0m
-[2m> csch(1)
+[0m> csch(1)
 result = 0.8509...
 [0m

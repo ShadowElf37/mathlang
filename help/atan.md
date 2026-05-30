@@ -3,7 +3,7 @@
 Computes the inverse tangent (arctangent) in radians. Result is in (-π/2, π/2).
 
 [1mExamples:[0m
-[2m> atan(0)
+[0m> atan(0)
 result = 0
 > atan(1)
 result = 0.7853981633974483

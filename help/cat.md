@@ -3,7 +3,7 @@
 Concatenates tensors along a specified axis.
 
 [1mExamples:[0m
-[2m> cat(0, eye(2), eye(2))
+[0m> cat(0, eye(2), eye(2))
 result =
 ⎡ 1  0 ⎤
 ⎢ 0  1 ⎥

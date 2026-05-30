@@ -3,7 +3,7 @@
 Tensor contraction along specified axes.
 
 [1mExamples:[0m
-[2m> A = ones(2, 3)
+[0m> A = ones(2, 3)
 > B = ones(3, 4)
 > shape(tensordot(A, B, 1))
 result = [2, 4]
