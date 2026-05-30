@@ -15,8 +15,27 @@
 
 2. [SEPARATE BRANCH] GPU backend (see CONSIDERATIONS.md) + PDE solvers
 
-2.5. Split eval.rs — it is too large; defer until the GPU eval path (gpu_eval.rs) is
-   designed, so the split boundary is clear.
+2.5. Split eval.rs — it is too large (now 4662 lines); defer until the GPU eval path
+   (gpu_eval.rs) is designed, so the split boundary is clear.
+
+5. [from eval 0.x, 2026-05-30, see docs/EVALUATION.md] Make iteration first-class,
+   scalable, and collectible — the language's primary use case (time-stepping/PDEs)
+   currently has no safe, ergonomic iteration form (recursion overflows ~1500 deep;
+   the scalable path is the undocumented `sum(k->{set(c,..);0},1,N)` cell hack).
+   5a. iterate(f, x0, n) — apply f n times; flat internal loop, O(1) stack, scales
+       to 1e6. The safe replacement for the recursive evolve() idiom. Backs TODO 1e
+       (VM Loop instruction) and is GPU-safe. Same special-form shape as sum(f,lo,hi).
+   5b. scan(f, x0, n) / iterates(f, x0, n) — return the whole orbit
+       [x0, f(x0), ..., f^n(x0)] stacked into a tensor (vector states -> rows,
+       shape [n+1, d]). Highest-impact addition; retires the cell+sum trajectory hack.
+   5c. cumsum / cumprod / diff — standard array scans; trivial, constantly needed.
+   5d. Singleton collection literal: make (x,) a length-1 tensor (Python-style), or
+       add vec(x). Removes tensor(k->x,1) boilerplate; fixes recursive-accumulator
+       base cases where (x) currently collapses to the scalar x.
+   5e. Generalize the stacking family (unification): vstack/hstack/append/concat
+       should auto-promote ranks (a 1-D vector becomes a row when stacked onto a 2-D
+       matrix) and accept scalars/empty operands. Removes manual unsqueeze/reshape
+       glue and makes 5b's vector case fall out for free.
 
 3. [PARTIAL] MXFR protocol: added channels field (C=1 scalar, C=3 RGB).
     Rgba32Float texture path in renderer; shader RGB passthrough branch.

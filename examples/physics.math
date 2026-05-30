@@ -32,7 +32,7 @@ alpha = 7.2973525693e-3  # fine-structure constant
 
 
 # harmonic oscillator solutions
-oscillator(gamma, omega_0, x_0, v_0, t) = {omega_d_t = t*sqrt(gamma^2-omega_0^2) : exp(-gamma*t) * (x_0 * cos(omega_d_t) + (v_0 + gamma * x_0) * t * sinc(omega_d_t))}
+oscillator(gamma, omega_0, x_0, v_0, t) = {omega_d_t = t*sqrt(gamma^2-omega_0^2); exp(-gamma*t) * (x_0 * cos(omega_d_t) + (v_0 + gamma * x_0) * t * sinc(omega_d_t))}
 
 oscillatorMBK(m, b, k, x_0, v_0, t) = oscillator(b/(2*m), sqrt(k/m), x_0, v_0, t)
 
@@ -44,7 +44,7 @@ heatKernel(x, t, k) = 1/sqrt(4*pi*k*t) * exp(-x**2 / (4*k*t))
 # heatSpectral(f, t, k, L, n) — evolve initial condition f for time t
 #   k: diffusivity  L: domain period  n: number of grid points
 #   Returns n-tuple u(x_j, t) at x_j = j*L/n  (use heatGrid to recover x values)
-heatSpectral(f, t, k, L, n) = {u0=map(f,range(0,n)*(L/n)); decay=map(m->exp(-k*(2*pi*min(m,n-m)/L)^2*t),range(0,n)) : map(re,ifft(decay*fft(u0)))}
+heatSpectral(f, t, k, L, n) = {u0=map(f,range(0,n)*(L/n)); decay=map(m->exp(-k*(2*pi*min(m,n-m)/L)^2*t),range(0,n)); map(re,ifft(decay*fft(u0)))}
 
 # companion: the x-coordinates heatSpectral samples at
 heatGrid(L, n) = range(0, n) * (L/n)

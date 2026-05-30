@@ -1,7 +1,45 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
-use std::cell::RefCell;
+use std::cell::{Cell as StdCell, RefCell};
 use crate::ast::{Expr, BlockStmt, Op, Def, TypeHint};
+
+// ── Recursion guard ───────────────────────────────────────────────────────────
+// User-function calls all funnel through apply_fn_direct. A thread-local depth
+// counter turns runaway recursion into a catchable error instead of a native
+// stack overflow (which would abort the whole process / REPL session). The limit
+// is generous because the evaluator runs on a large-stack worker thread (see
+// main.rs / repl.rs); it only needs to trip before the real stack does.
+const MAX_CALL_DEPTH: u32 = 100_000;
+
+thread_local! {
+    static CALL_DEPTH: StdCell<u32> = const { StdCell::new(0) };
+}
+
+/// RAII guard: increments the call-depth counter on entry, decrements on drop.
+/// `DepthGuard::enter()` returns an error if the limit is exceeded.
+struct DepthGuard;
+
+impl DepthGuard {
+    fn enter() -> Result<DepthGuard, String> {
+        CALL_DEPTH.with(|d| {
+            let depth = d.get() + 1;
+            if depth > MAX_CALL_DEPTH {
+                Err(format!("recursion limit exceeded ({MAX_CALL_DEPTH} nested calls); \
+                             for long iterations use a flat loop (sum/prod over a range, \
+                             optionally driving a cell) instead of deep recursion"))
+            } else {
+                d.set(depth);
+                Ok(DepthGuard)
+            }
+        })
+    }
+}
+
+impl Drop for DepthGuard {
+    fn drop(&mut self) {
+        CALL_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
 
 // ── Bytecode instructions ─────────────────────────────────────────────────────
 // Flat instruction set for the stack-based bytecode VM.
@@ -3259,6 +3297,17 @@ fn compile_fn(
 
 // ── Bytecode VM helpers ────────────────────────────────────────────────────────
 
+/// Normalize an index along an axis of length `dim`: negatives count from the end.
+/// Errors on out-of-range in *either* direction (positive overflow AND negative
+/// underflow) — the latter previously clamped silently to 0, masking bugs.
+fn norm_index(raw: i64, dim: usize, what: &str) -> Result<usize, String> {
+    let i = if raw < 0 { raw + dim as i64 } else { raw };
+    if i < 0 || i >= dim as i64 {
+        return Err(format!("{what} index {raw} out of range (size={dim})"));
+    }
+    Ok(i as usize)
+}
+
 fn vm_tensor_index(data: &[f64], shape: &[usize], idx: &Val) -> Result<Val, String> {
     let indices: Vec<i64> = match idx {
         Val::Num(f) => vec![*f as i64],
@@ -3270,10 +3319,7 @@ fn vm_tensor_index(data: &[f64], shape: &[usize], idx: &Val) -> Result<Val, Stri
         _ => return Err("vm []: invalid index type".into()),
     };
     if indices.len() == 1 {
-        let raw  = indices[0];
-        let dim0 = shape[0] as i64;
-        let i    = if raw < 0 { (dim0 + raw).max(0) as usize } else { raw as usize };
-        if i >= shape[0] { return Err(format!("tensor index {raw} out of range (size={})", shape[0])); }
+        let i = norm_index(indices[0], shape[0], "tensor")?;
         if shape.len() == 1 {
             Ok(Val::Num(data[i]))
         } else {
@@ -3287,8 +3333,7 @@ fn vm_tensor_index(data: &[f64], shape: &[usize], idx: &Val) -> Result<Val, Stri
         let mut linear = 0usize;
         let mut stride = 1usize;
         for (&raw, &dim) in indices.iter().rev().zip(shape.iter().rev()) {
-            let i = if raw < 0 { (dim as i64 + raw).max(0) as usize } else { raw as usize };
-            if i >= dim { return Err(format!("tensor index {raw} out of range (size={})", dim)); }
+            let i = norm_index(raw, dim, "tensor")?;
             linear += i * stride;
             stride *= dim;
         }
@@ -3307,10 +3352,7 @@ fn vm_complex_tensor_index(re: &[f64], im: &[f64], shape: &[usize], idx: &Val) -
         _ => return Err("vm []: invalid index type".into()),
     };
     if indices.len() == 1 {
-        let raw  = indices[0];
-        let dim0 = shape[0] as i64;
-        let i    = if raw < 0 { (dim0 + raw).max(0) as usize } else { raw as usize };
-        if i >= shape[0] { return Err(format!("tensor index {raw} out of range (size={})", shape[0])); }
+        let i = norm_index(indices[0], shape[0], "tensor")?;
         if shape.len() == 1 {
             Ok(make_complex(re[i], im[i]))
         } else {
@@ -3325,8 +3367,7 @@ fn vm_complex_tensor_index(re: &[f64], im: &[f64], shape: &[usize], idx: &Val) -
         let mut linear = 0usize;
         let mut stride = 1usize;
         for (&raw, &dim) in indices.iter().rev().zip(shape.iter().rev()) {
-            let i = if raw < 0 { (dim as i64 + raw).max(0) as usize } else { raw as usize };
-            if i >= dim { return Err(format!("tensor index {raw} out of range (size={})", dim)); }
+            let i = norm_index(raw, dim, "tensor")?;
             linear += i * stride;
             stride *= dim;
         }
@@ -3487,11 +3528,7 @@ fn run_vm(
                     Val::ComplexTensor { re, im, shape } => vm_complex_tensor_index(re, im, shape, &idx_val),
                     Val::Tuple(items) => {
                         let raw = idx_val.num("vm []")? as i64;
-                        let n = items.len() as i64;
-                        let i = if raw < 0 { (n + raw).max(0) as usize } else { raw as usize };
-                        if i >= items.len() {
-                            return Err(format!("tuple index {raw} out of range (size={})", items.len()));
-                        }
+                        let i = norm_index(raw, items.len(), "tuple")?;
                         Ok(items[i].clone())
                     }
                     other => Err(format!("vm []: cannot index {}", fmt_val(other))),
@@ -3600,6 +3637,8 @@ fn apply_fn_direct(
     args:     Vec<Val>,
     env:      &Env,
 ) -> Result<Val, String> {
+    // Guard against runaway recursion (catchable error, not a stack overflow).
+    let _depth = DepthGuard::enter()?;
     // Coerce args per param hints
     let args = if sig.params.is_empty() {
         args
@@ -4278,16 +4317,14 @@ fn eval_tuple_index_ast(items: Vec<Val>, idx: &Expr, env: &Env) -> Result<Val, S
         let idx_val = eval(idx, env)?;
         match idx_val {
             Val::Num(n) => {
-                let raw = n as i64;
-                let i = if raw < 0 { (dim as i64 + raw).max(0) as usize } else { raw as usize };
-                items.into_iter().nth(i).ok_or_else(|| format!("index {raw} out of range"))
+                let i = norm_index(n as i64, dim, "tuple")?;
+                items.into_iter().nth(i).ok_or_else(|| format!("index {n} out of range"))
             }
             Val::Tuple(indices) => {
-                let len = dim as i64;
                 let result: Result<Vec<Val>, _> = indices.into_iter().map(|iv| {
-                    let n = iv.num("index")? as i64;
-                    let i = if n < 0 { (len + n).max(0) as usize } else { n as usize };
-                    items.iter().nth(i).cloned().ok_or_else(|| format!("index {n} out of range"))
+                    let raw = iv.num("index")? as i64;
+                    let i = norm_index(raw, dim, "tuple")?;
+                    items.get(i).cloned().ok_or_else(|| format!("index {raw} out of range"))
                 }).collect();
                 Ok(Val::Tuple(result?))
             }
@@ -4309,11 +4346,7 @@ fn eval_tensor_index_ast(data: &[f64], shape: &[usize], idx: &Expr, env: &Env) -
     if items.len() == 1 && !matches!(items[0], Expr::Slice(..)) {
         let idx_val = eval(items[0], env)?;
         let raw = idx_val.num("tensor index")? as i64;
-        let dim0 = shape[0] as i64;
-        let i = if raw < 0 { (dim0 + raw).max(0) as usize } else { raw as usize };
-        if i >= shape[0] {
-            return Err(format!("tensor index {raw} out of range (size={})", shape[0]));
-        }
+        let i = norm_index(raw, shape[0], "tensor")?;
         return if shape.len() == 1 {
             Ok(Val::Num(data[i]))
         } else {
@@ -4374,11 +4407,7 @@ fn eval_complex_tensor_index_ast(re: &[f64], im: &[f64], shape: &[usize], idx: &
     if items.len() == 1 && !matches!(items[0], Expr::Slice(..)) {
         let idx_val = eval(items[0], env)?;
         let raw = idx_val.num("tensor index")? as i64;
-        let dim0 = shape[0] as i64;
-        let i = if raw < 0 { (dim0 + raw).max(0) as usize } else { raw as usize };
-        if i >= shape[0] {
-            return Err(format!("tensor index {raw} out of range (size={})", shape[0]));
-        }
+        let i = norm_index(raw, shape[0], "tensor")?;
         return if shape.len() == 1 {
             Ok(make_complex(re[i], im[i]))
         } else {
@@ -4433,11 +4462,11 @@ fn eval_complex_tensor_index_ast(re: &[f64], im: &[f64], shape: &[usize], idx: &
 ///   is_range = true  → this dimension is kept in the output
 ///   is_range = false → this dimension is collapsed (scalar index)
 fn resolve_index_item(item: &Expr, dim: usize, k: usize, env: &Env) -> Result<(bool, Vec<usize>), String> {
-    // Clamp a signed index to [0, dim).
+    // Resolve a signed scalar index to [0, dim), erroring on out-of-range either way.
     let clamp = |raw: i64| -> Result<usize, String> {
-        let i = if raw < 0 { (dim as i64 + raw).max(0) as usize } else { raw as usize };
-        if i >= dim { Err(format!("index {raw} out of range for dim {k} (size={dim})")) }
-        else { Ok(i) }
+        let i = if raw < 0 { raw + dim as i64 } else { raw };
+        if i < 0 || i >= dim as i64 { Err(format!("index {raw} out of range for dim {k} (size={dim})")) }
+        else { Ok(i as usize) }
     };
     match item {
         // T[..] — all indices

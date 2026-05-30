@@ -538,6 +538,23 @@ run       "edge.paren_expr" "(((3 + 4)))"     "7"
 run_err   "edge.undef_var"  "xyz"
 run_err   "edge.bad_index"  "(1,2,3)[5]"
 
+# ── Negative-index bounds checking (regression: must error, not wrap to 0) ────
+section "NEGATIVE INDEX BOUNDS"
+run       "negidx.last"        "(10,20,30)[-1]"        "30"
+run       "negidx.first"       "(10,20,30)[-3]"        "10"
+run_err   "negidx.under1"      "(10,20,30)[-4]"
+run_err   "negidx.under_big"   "(10,20,30)[-100]"
+run_err   "negidx.mat_row"     "(1,2;3,4)[-3]"
+run_err   "negidx.mat_col"     "(1,2,3;4,5,6)[0,-5]"
+run_err   "negidx.tuple"       "{t=(1,(2,3),4); t[-9]}"
+run       "negidx.slice_ok"    "(1,2,3,4,5)[1..3]"     "[2, 3, 4]"
+
+# ── Recursion depth guard (regression: catchable error, not stack overflow) ───
+section "RECURSION GUARD"
+run       "rec.shallow_ok"   "f(n)=if(n<=0,0,f(n-1)+1); f(5000)"           "5000"
+run       "rec.deep_ok"      "f(n)=if(n<=0,0,f(n-1)+1); f(90000)"          "90000"
+run_match "rec.over_limit"   "f(n)=if(n<=0,0,f(n-1)+1); f(500000)"         "recursion limit exceeded"
+
 # ── Chained / compound expressions ───────────────────────────────────────────
 section "COMPOUND EXPRESSIONS"
 run "comp.fn_chain"       "f(x)=x+1; g(x)=x^2; g(f(3))"         "16"

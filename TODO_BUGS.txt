@@ -1,0 +1,32 @@
+Found during evaluation 0.x (2026-05-30, v0.20.0). See docs/EVALUATION.md.
+All five fixed in v0.20.1 (regression tests in tests.sh: NEGATIVE INDEX BOUNDS,
+RECURSION GUARD; example files load-tested).
+
+[FIXED v0.20.1] BUG-1 negative out-of-range index silently returned element 0
+  (10,20,30)[-4] now errors like positive [10] does. Root cause was the
+  `(dim + raw).max(0)` clamp at 12 sites in src/eval.rs. Replaced with a shared
+  norm_index(raw,dim,what) helper that errors when the resolved index is < 0 or
+  >= dim. Slice lower-bound clamping (Python-style) intentionally retained.
+
+[FIXED v0.20.1] BUG-2 deep recursion overflowed the native stack and aborted
+  Two-part fix: (a) the evaluator now runs on a 1 GB-stack worker thread
+  (src/main.rs run()), and (b) a thread-local DepthGuard in apply_fn_direct caps
+  recursion at 100000 nested calls and returns a catchable "recursion limit
+  exceeded" error. The REPL now survives runaway recursion (defs preserved).
+  Verified: 90000-deep recursion works; 500000 errors cleanly.
+
+[FIXED v0.20.1] BUG-3 bundled .math libraries didn't load
+  Migrated examples/advanced.math, examples/physics.math, examples/animation_test.math
+  off the removed `:` block separator to `;`/last-expr form. Removed the now-builtin
+  ncr/quadratic defs from advanced.math (solveQuadratic kept as an alias over the
+  builtin). animation_test.math also corrected from a bare `animate2D(...)` call (it
+  is a REPL command, not a function) to `!animate2D ..., 0, 100, 100`.
+
+[FIXED v0.20.1] BUG-4 README heat.math example referenced undefined `solver`
+  Updated README to use `solver_demo` and to document heatSolver/heatSolverDisk.
+
+[FIXED v0.20.1] BUG-5 docs/MATHLANG_SKILL.md taught the removed `:` separator
+  Rewrote the syntax rules to `;`/last-expr, added a top-level-vs-block note,
+  replaced the recursion-only time-stepping idiom with both recursion (now noting
+  the depth cap) and the scalable cell+sum flat-loop pattern, and corrected the
+  "no mutable state" / negative-index gotchas.

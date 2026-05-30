@@ -6,15 +6,20 @@
 ## Syntax rules
 
 ```
-m 'defs; ... : expr, expr'   # CLI: definitions before :, outputs after
+m 'def; def; ... ; expr, expr'   # CLI: ;-separated statements; last is the output
 # In .math files: one definition per line; # is a comment
 # In REPL: !include file.math to load; !defs to inspect
 ```
 
-- `;` separates definitions.  `:` separates definitions from output expressions.
-- Without `:`, the whole input is the output expression.
-- `{defs; ... : expr}` — block with local scope; returns last expr.
+- `;` separates statements (definitions and expressions). The **last expression**
+  is the output. (There is no `:` separator — it was removed.)
+- Multiple comma-separated outputs are allowed in the final expression position:
+  `x=3; y=4; x^2, y^2`.
+- `{stmt; stmt; ... ; expr}` — block with local scope; returns the last expression.
 - Blocks can be nested and appear anywhere an expression is expected.
+- Note: at the **top level** only definitions may precede the final expression. To
+  sequence side-effecting expression statements (e.g. `set` on a cell), wrap them
+  in a `{ ... }` block.
 
 ---
 
@@ -290,11 +295,23 @@ lap2d(T) = {
 }
 ```
 
-### Recursive time-stepping
+### Time-stepping
+
+Recursion is fine for **short** runs (recursion depth is capped at 100000 nested
+calls — beyond that you get a catchable `recursion limit exceeded` error, not a
+crash):
 ```
 evolve(T, n) = if(n <= 0, T, evolve(step(T), n-1))
-# Returns a solver lambda: physical time → state
-solver(T0) = t -> evolve(T0, round(t/dt))
+solver(T0) = t -> evolve(T0, round(t/dt))   # returns a solver lambda
+```
+
+For **long** runs (many thousands+ of steps), use a flat loop instead of deep
+recursion: keep state in a `cell` and drive it with `sum` over a range (O(1) stack,
+scales to millions of steps):
+```
+{ c = cell(T0);
+  sum(k -> {set(c, step(get(c))); 0}, 1, n);   # advance n steps, value discarded
+  get(c) }                                       # final state
 ```
 
 ### Building initial conditions with spatial logic
@@ -323,11 +340,15 @@ map(x -> x^2, T)      # any lambda
 - **`pi` is shadowed by parameters** too: `f(pi)=pi+1; f(2)` → 3 (pi inside = parameter = 2).
 - **Implicit multiply pitfall:** `2x^2` = `(2x)^2`, not `2*(x^2)`. Use `2*x^2` when in doubt.
 - **No indexed assignment:** `T[i,j] = v` does NOT work. Build tensors from scratch with `tensor(...)`.
-- **No mutable state.** Time evolution must use recursion.
+- **Mutable state via cells only.** Variables are immutable, but `cell(v)` / `get(c)`
+  / `set(c, v)` provide an explicit mutable reference. This is the scalable way to
+  carry state across a long flat loop (see *Time-stepping* above).
+- **Negative indices are bounds-checked:** `(1,2,3)[-1]` → 3, but `(1,2,3)[-4]` is an
+  out-of-range error (it does not wrap).
 - **Range slices are inclusive on both ends:** `T[1..3]` gives elements 1, 2, 3 (4 elements if 0-indexed).
 - **`range(a,b)` is exclusive on the right** (like Python): `range(0,5)` → `[0,1,2,3,4]`.
 - **`linspace(a,b,n)` is inclusive on both ends:** n points from a to b.
 - **`argmax`/`argmin`** on 1-D → scalar; on n-D → 1-D index tensor `[i, j, ...]`.
 - **`solve(A,b)`** returns a 1-D tensor (not tuple).
 - **`.math` files** use `;` to end each line only if putting multiple defs on one line. One def per line works fine without `;`.
-- **Blocks in .math files:** definitions before `:` are local, so wrap multi-step computations in `{ ... : result }`.
+- **Blocks in .math files:** definitions inside a block are local, so wrap multi-step computations in `{ defs; ...; result }`.

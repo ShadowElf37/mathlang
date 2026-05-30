@@ -180,12 +180,16 @@ Physical constants in SI units (`c`, `g`, `G`, `k_B`, `N_A`, `R`, `h`, `hbar`, e
 2-D heat equation solver with spatially-varying diffusivity.
 
 ```zsh
-m -f heat.math 'solver(0)'    # initial condition: 20×20 grid, cold disk in hot air
-m -f heat.math 'solver(10)'   # temperature after t=10 (50 steps)
-m -f heat.math 'solver(20)'   # mostly equilibrated (~100 ms)
+m -f heat.math 'solver_demo(0)'    # initial condition: 20×20 grid, cold disk in hot air
+m -f heat.math 'solver_demo(10)'   # temperature after t=10 (50 steps)
+m -f heat.math 'solver_demo(20)'   # mostly equilibrated (~100 ms)
 ```
 
-`heatSolver(T0, alpha, dx, dt)` takes initial temperature grid, diffusivity field, and timestep; returns a function `t -> T(t)`. Uses energy-conserving divergence-form FD with Neumann BCs.
+`solver_demo` is a ready-made stateful solver (cold disk in hot air). To build your
+own, `heatSolver(T0, alpha, dx, dt)` takes an initial temperature grid, diffusivity
+field, and timestep and returns a stateful solver; `heatSolverDisk(N, dx, dt,
+T_disk, T_air, a_disk, a_air)` is the convenience constructor used for `solver_demo`.
+Uses energy-conserving divergence-form FD with Neumann BCs.
 
 #### `conversions.math`
 
