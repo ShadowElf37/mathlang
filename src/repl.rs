@@ -76,8 +76,72 @@ impl MathHelper {
     }
 }
 
+// Highlight the argument portion of a !print template.
+// Literal text (and escaped {{ / }}) is yellow; {expr} has yellow braces with math-highlighted expr inside.
+fn highlight_print_args(arg: &str, user_fns: &[String], user_vars: &[String]) -> String {
+    let mut out = String::new();
+    let mut chars = arg.chars().peekable();
+    let mut in_yellow = false;
+
+    macro_rules! open_yellow  { () => { if !in_yellow { out.push_str("\x1b[33m"); in_yellow = true;  } } }
+    macro_rules! close_yellow { () => { if  in_yellow { out.push_str("\x1b[0m");  in_yellow = false; } } }
+
+    while let Some(ch) = chars.next() {
+        if ch == '{' {
+            if chars.peek() == Some(&'{') {
+                chars.next();
+                open_yellow!();
+                out.push('{');
+            } else {
+                let mut expr_src = String::new();
+                let mut depth = 1usize;
+                let mut closed = false;
+                loop {
+                    match chars.next() {
+                        None => { open_yellow!(); out.push('{'); out.push_str(&expr_src); break; }
+                        Some('}') => {
+                            depth -= 1;
+                            if depth == 0 { closed = true; break; }
+                            expr_src.push('}');
+                        }
+                        Some('{') => { depth += 1; expr_src.push('{'); }
+                        Some(c)   => expr_src.push(c),
+                    }
+                }
+                if closed {
+                    close_yellow!();
+                    out.push_str("\x1b[33m{\x1b[0m");
+                    out.push_str(&highlight_line(&expr_src, user_fns, user_vars));
+                    out.push_str("\x1b[33m}\x1b[0m");
+                }
+            }
+        } else if ch == '}' && chars.peek() == Some(&'}') {
+            chars.next();
+            open_yellow!();
+            out.push('}');
+        } else {
+            open_yellow!();
+            out.push(ch);
+        }
+    }
+    close_yellow!();
+    out
+}
+
 fn highlight_line(line: &str, user_fns: &[String], user_vars: &[String]) -> String {
-    if line.starts_with('!') { return format!("\x1b[33m{line}\x1b[0m"); }
+    if line.starts_with('!') {
+        let cmd_end = line.find(|c: char| c.is_ascii_whitespace()).unwrap_or(line.len());
+        let cmd_name = &line[1..cmd_end];
+        let rest = &line[cmd_end..];
+        let cmd_colored = format!("\x1b[33m{}\x1b[0m", &line[..cmd_end]);
+        return match cmd_name {
+            "type" | "graph" | "animate2D" | "animate2D_raw" =>
+                format!("{}{}", cmd_colored, highlight_line(rest, user_fns, user_vars)),
+            "print" =>
+                format!("{}{}", cmd_colored, highlight_print_args(rest, user_fns, user_vars)),
+            _ => format!("\x1b[33m{line}\x1b[0m"),
+        };
+    }
     let b = line.as_bytes();
     let mut out = String::with_capacity(line.len() + 64);
     let mut i = 0;
