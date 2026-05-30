@@ -1,1 +1,2 @@
-cargo build --release
+cd animator && cargo build --release && cd .. && cargo build --release
+
