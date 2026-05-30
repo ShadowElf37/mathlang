@@ -1273,6 +1273,17 @@ run    "bug7.matrix_shape_correct" 'shape(zeros(2,2))' "[2, 2]"
 _repl_check "bug7.matrix_display_newline" "zeros(2,2)" "result =
 "
 
+# ── ncr / quadratic ───────────────────────────────────────────────────────────
+run    "ncr.basic"         'ncr(10, 3)'        "120"
+run    "ncr.zero_r"        'ncr(5, 0)'         "1"
+run    "ncr.r_eq_n"        'ncr(5, 5)'         "1"
+run    "ncr.r_gt_n"        'ncr(3, 5)'         "0"
+run    "ncr.symmetry"      'ncr(8,3) == ncr(8,5)' "1"
+run    "quad.two_real"     'quadratic(1,-5,6)' "(3, 2)"
+run    "quad.double_root"  'quadratic(1,-2,1)' "(1, 1)"
+run_match "quad.complex"   'quadratic(1,0,1)'  "i"
+run_err   "quad.a_zero"    'quadratic(0,1,1)'
+
 # ── !help <name> ──────────────────────────────────────────────────────────────
 # Builtin help: shows description and injected type signature
 _repl_check "help.builtin.sin"       "!help sin"          "sin\(x: num\) -> num"

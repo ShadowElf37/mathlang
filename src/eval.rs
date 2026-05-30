@@ -184,7 +184,7 @@ impl Env {
             "floor", "ceil", "round",
             "trunc", "frac",
             "log", "log10", "log2",
-            "sign", "signum", "id", "delta", "fact", "factorial", "not", "sinc",
+            "sign", "signum", "id", "delta", "fact", "factorial", "ncr", "quadratic", "not", "sinc",
             "sech", "csch",
             "erf", "erfc", "j0", "j1", "jinc",
             "heaviside",
@@ -470,6 +470,8 @@ pub fn builtin_sig(name: &str) -> Option<&'static str> {
         "id"      => Some("id(x: any) -> any"),
         "not"     => Some("not(x: int) -> int"),
         "factorial" => Some("factorial(n: nat) -> real"),
+        "ncr"       => Some("ncr(n: nat, r: nat) -> real"),
+        "quadratic" => Some("quadratic(a: real, b: real, c: real) -> tuple"),
         "length"  => Some("length(x: any) -> nat"),
         // stats
         "median"  => Some("median(x: tensor) -> real"),
@@ -548,7 +550,7 @@ pub fn is_protected(name: &str) -> bool {
         | "sec" | "csc" | "cot"
         | "floor" | "ceil" | "round" | "trunc" | "frac"
         | "log" | "log10" | "log2"
-        | "sign" | "signum" | "id" | "delta" | "fact" | "factorial" | "not" | "sinc"
+        | "sign" | "signum" | "id" | "delta" | "fact" | "factorial" | "ncr" | "quadratic" | "not" | "sinc"
         | "sech" | "csch"
         | "erf" | "erfc" | "j0" | "j1" | "jinc"
         | "heaviside"
@@ -1371,6 +1373,39 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             let n = v.num("fact")? as u64;
             Ok(Val::Num((1..=n).map(|k| k as f64).product()))
         }),
+        "ncr" => {
+            arity("ncr", 2, vals.len())?;
+            let mut it = vals.into_iter();
+            let n = it.next().unwrap().num("ncr")? as u64;
+            let r = it.next().unwrap().num("ncr")? as u64;
+            if r > n { return Ok(Val::Num(0.0)); }
+            let r = r.min(n - r); // use smaller of r, n-r for efficiency
+            let result: f64 = (0..r).fold(1.0, |acc, i| acc * (n - i) as f64 / (i + 1) as f64);
+            Ok(Val::Num(result))
+        }
+        "quadratic" => {
+            arity("quadratic", 3, vals.len())?;
+            let mut it = vals.into_iter();
+            let a = it.next().unwrap().num("quadratic")?;
+            let b = it.next().unwrap().num("quadratic")?;
+            let c = it.next().unwrap().num("quadratic")?;
+            if a == 0.0 { return Err("quadratic: leading coefficient a must be nonzero".into()); }
+            let disc = b * b - 4.0 * a * c;
+            if disc >= 0.0 {
+                let s = disc.sqrt();
+                Ok(Val::Tuple(vec![
+                    Val::Num((-b + s) / (2.0 * a)),
+                    Val::Num((-b - s) / (2.0 * a)),
+                ]))
+            } else {
+                let re = -b / (2.0 * a);
+                let im = (-disc).sqrt() / (2.0 * a);
+                Ok(Val::Tuple(vec![
+                    Val::Complex(re,  im),
+                    Val::Complex(re, -im),
+                ]))
+            }
+        }
 
         // ── Polymorphic min / max (scalar pair, tuple, or tensor) ────────────
         "min" | "max" => match (vals.len(), &vals[..]) {

@@ -1,0 +1,14 @@
+[1;4mncr[0m
+
+Binomial coefficient: the number of ways to choose r items from n without regard to order.
+
+[1mExamples:[0m
+[0m> ncr(10, 3)
+result = 120
+> ncr(5, 0)
+result = 1
+> ncr(5, 5)
+result = 1
+> ncr(6, 2)
+result = 15
+[0m

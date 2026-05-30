@@ -7,7 +7,7 @@ use crate::parser::Parser;
 use crate::eval::{Val, Env, TData, eval, fmt_val, is_protected, FnSig, builtin_sig, infer_type, hint_of_val};
 
 pub const BUILTIN_FNS: &[&str] = &[
-    "id", "fact", "factorial", "delta",
+    "id", "fact", "factorial", "ncr", "delta", "quadratic",
     "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
     "sinh", "cosh", "tanh", "expm1",
     "sec", "csc", "cot",
@@ -861,7 +861,8 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     "           sinh cosh tanh  sec csc cot\n",
                     "Algebra:   sqrt cbrt abs sign heaviside  floor ceil round(x[,n]) trunc frac\n",
                     "           ln log(x[,base]) log2 log10 exp expm1  pow hypot\n",
-                    "           min max  gcd lcm  fact  n!\n",
+                    "           min max  gcd lcm  fact  n!  ncr(n,r)\n",
+                    "           quadratic(a,b,c)  — roots of ax²+bx+c=0 (real or complex pair)\n",
                     "Angle:     deg rad\n",
                     "Special:   sinc  sech csch  erf erfc  j0 j1 jinc\n",
                     "           gaussian(x,mu,sigma)  gaussian_cdf(x,mu,sigma)\n",
