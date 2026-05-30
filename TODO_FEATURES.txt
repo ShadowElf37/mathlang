@@ -53,6 +53,40 @@
 
 4. aur package that puts animator and m executables in bin; hdf5 option?
 
+6. Tame the builtin namespace. The global builtin table has ~150 names, and every
+   one is a reserved word: is_protected() (src/eval.rs ~563) bars the user from
+   binding any of them as a variable. Two distinct costs — discoverability (the
+   flat !help list is a wall) and namespace pollution (the reserved-word set). Do
+   them in two stages, lowest-risk first:
+
+   6a. [PRIMARY] Prelude extraction. Move the "library tier" builtins — special
+       functions and niche stats (erf, erfc, j0/j1, jinc, gaussian_cdf, sinc,
+       maybe median/mode, the integrators once stable) — out of Rust into an
+       auto-loaded mathlang prelude (.math), built on the MATHLANG_INIT / import_file
+       machinery that already exists. Keep a small frozen *core* protected (~40
+       names: arithmetic, tensor construction/indexing, cell/get/set, the loop
+       forms iterate/scan/sum/prod, if, map/filter/reduce). Net effect: the Rust
+       builtin table and is_protected both shrink dramatically, AND prelude-defined
+       names become *user-overridable* (they're ordinary defs, not protected) — a
+       strict ergonomics win. No grammar change; only an auto-load hook + moving
+       definitions. This is the high-value/low-risk move and should land first.
+
+   6b. [OPTIONAL, later] Additive namespace values, only if 6a leaves discoverability
+       wanting. Expose grouped modules — linalg, stats, signal, bits — as first-class
+       Val::Namespace map values so `linalg.det(A)` works and a namespace can be bound
+       or passed around. Keep all current flat names working (back-compat); new niche
+       builtins then go *only* into a namespace, capping global growth. Feasibility:
+       the lexer already errors on a bare `.` not followed by a digit (src/lexer.rs
+       ~88) and disambiguates decimals by digit-lookahead, so `.` is free for member
+       access with no grammar conflict. Needs: a Val::Namespace variant, a parse node
+       for `ident.ident` access, and resolution in eval + the VM (LoadCaptured-style).
+       Do NOT move existing names *out* of the global table (that breaks every script);
+       namespaces are an additive alias layer, not a replacement.
+
+   Rationale: 6a is the honest dividend of "is the infra good enough to build in
+   mathlang" — yes, so push the library tier into mathlang itself. 6b is the
+   long-term shape for a browsable stdlib but shouldn't gate 6a.
+
 
 CONTINUAL FOR CLAUDE OPUS:
 
