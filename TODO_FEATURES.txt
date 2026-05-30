@@ -31,4 +31,5 @@ CONTINUAL FOR CLAUDE OPUS:
 0.1. Try to tackle a complex project in pure mathlang, and see what's too difficult, awkward, unintuitive, verbose, messy, unperformant, etc. from the perspective of an engineer/physicist/mathematician -- mark those as new bugs or feature requests
 0.2. Search codebase for performance optimizations, bugs, unwise features, excessively delicate or complex code, technical debt and dead code, very old features that dont fit the style of the language, bad ergonomics or things that "should work" but don't, poor or outdated documentation, idiotic ideas
 0.3. Recommend features that would improve the language, consistent with the style and goals of the language so far
-0.4. Generate a markdown report with your findings and opinions
+0.4. Particularly consider where things can become more unified and generalized
+0.5. Generate a markdown report with your findings and opinions
