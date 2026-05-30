@@ -901,10 +901,10 @@ fn bang_command(cmd: &str, env: &mut Env) {
             } else {
                 let topic = arg.trim_start_matches('!');
                 // Try bang command help first (if arg starts with ! or is a known command)
-                let bang_text = std::fs::read_to_string(format!("help/bang/{topic}.md")).ok();
+                let bang_text = std::fs::read_to_string(format!("help/bang/{topic}.txt")).ok();
                 if let Some(text) = bang_text {
                     print!("{text}");
-                } else if let Ok(text) = std::fs::read_to_string(format!("help/{topic}.md")) {
+                } else if let Ok(text) = std::fs::read_to_string(format!("help/{topic}.txt")) {
                     // Inject type signature on its own line before the Examples section.
                     // The files are ANSI-encoded, so find "Examples:", then back up to
                     // the preceding \n\n to insert cleanly outside any escape sequences.
