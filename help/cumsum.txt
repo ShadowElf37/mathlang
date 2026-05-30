@@ -1,0 +1,9 @@
+[1;4mcumsum[0m
+
+Running (cumulative) sum of a 1-D tensor or tuple; output length equals
+the input length.
+
+[1mExamples:[0m
+[0m> cumsum([1, 2, 3, 4])
+result = [1, 3, 6, 10]
+[0m

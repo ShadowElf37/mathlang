@@ -482,9 +482,10 @@ impl Parser {
                     }
                     // Collect first row (comma-separated items)
                     let mut row0 = vec![first];
+                    let mut trailing_comma = false;
                     while *self.peek() == Token::Comma {
                         self.bump();
-                        if matches!(self.peek(), Token::RParen | Token::Semicolon) { break; }
+                        if matches!(self.peek(), Token::RParen | Token::Semicolon) { trailing_comma = true; break; }
                         row0.push(self.expr()?);
                     }
                     // Matrix literal: rows separated by ;
@@ -506,7 +507,12 @@ impl Parser {
                     }
                     self.eat(&Token::RParen)?;
                     if row0.len() == 1 {
-                        Ok(row0.into_iter().next().unwrap())
+                        if trailing_comma {
+                            // (x,) → length-1 tensor, identical to [x] (singleton literal).
+                            Ok(Expr::Array(row0))
+                        } else {
+                            Ok(row0.into_iter().next().unwrap())
+                        }
                     } else {
                         Ok(Expr::Tuple(row0))
                     }

@@ -1,0 +1,10 @@
+[1;4mdiff[0m
+
+First difference of a 1-D tensor or tuple: out[k] = t[k+1] - t[k]. The
+output is one shorter than the input (empty for inputs of length < 2).
+Inverse of cumsum up to the first element.
+
+[1mExamples:[0m
+[0m> diff([1, 4, 9, 16])
+result = [3, 5, 7]
+[0m

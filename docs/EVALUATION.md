@@ -3,8 +3,12 @@
 *Date: 2026-05-30 · evaluator: Claude Opus · against v0.20.0*
 
 > **Status:** all five bugs below (BUG-1…BUG-5) were fixed in **v0.20.1**; see
-> `TODO_BUGS.txt`. The feature recommendations (0.3/0.4) remain open in
-> `TODO_FEATURES.txt` §5.
+> `TODO_BUGS.txt`. All six feature recommendations (0.3/0.4 — FEAT-A…FEAT-E plus the
+> singleton literal) shipped in **v0.21.0**: `iterate`/`scan`, `cumsum`/`cumprod`/
+> `diff`, the `(x,)` singleton literal, and rank-promoting `vstack`/`hstack`/
+> `append`/`concat`. See `TODO_FEATURES.txt` §5. Only FEAT-F (the VM `Loop`
+> instruction, TODO 1e) is deferred — it's a perf/GPU concern tied to the separate
+> gpu_eval path, not a correctness gap.
 
 This report covers the "CONTINUAL FOR CLAUDE OPUS" items: build something real in
 pure mathlang and note what's awkward (0.1), hunt for bugs / tech debt / outdated

@@ -101,7 +101,8 @@ f(n) = {half = n/2; half^2}   # block in function body
 ## Tensors (the primary array type)
 
 `(a,b,c)` with numbers → 1-D Tensor displayed as `[a, b, c]`.  
-`(a,b; c,d)` → 2-D Tensor (matrix).
+`(a,b; c,d)` → 2-D Tensor (matrix).  
+`(x,)` → length-1 Tensor `[x]` (trailing comma); `(x)` alone is just the scalar `x`.
 
 ### Constructors
 ```
@@ -156,9 +157,14 @@ unsqueeze(T, dim)             # insert size-1 dim
 ### Concatenation
 ```
 cat(axis, T1, T2, ...)        # concat along axis
-hstack(A, B)                  # cat(1,...)
-vstack(A, B)                  # cat(0,...)
+hstack(A, B)                  # cat(1,...); a 1-D vector is treated as a column
+vstack(A, B)                  # cat(0,...); a 1-D vector is treated as a row
+append(v, x)                  # grow a 1-D tensor/tuple; scalar v → [v, x]
+concat(a, b)                  # join 1-D tensors/tuples; accepts scalars & empties
 ```
+`hstack`/`vstack` rank-promote, so a vector stacks directly onto a matrix (e.g.
+`vstack((1,2;3,4), (5,6))` → 3×2). Note `(x,)` is a length-1 tensor (unlike `(x)`,
+which is just the scalar `x`) — useful as an accumulator base case.
 
 ### Linear algebra
 ```
@@ -238,6 +244,21 @@ filter(f, v)                   # keep elements where f(x) != 0  →  1-D
 reduce((a,b)->expr, v)         # left fold
 compose(f, g)                  # x -> f(g(x))
 partial(f, a)                  # x -> f(a, x)
+iterate(f, x0, n)              # f^n(x0): apply f n times (flat loop, O(1) stack)
+scan(f, x0, n)                 # orbit [x0, f(x0), …, f^n(x0)] stacked into a tensor
+```
+
+`iterate`/`scan` are the **preferred** way to time-step or iterate to a fixed
+point — they loop internally (O(1) stack, scale to millions of steps), unlike
+recursion which is capped at 100000 nested calls. `x0` may be a scalar, a vector,
+a tuple, or complex. For `scan`, scalar states stack into a 1-D tensor of length
+`n+1`; **vector** states of width `d` stack into a 2-D tensor `[n+1, d]`, one
+state per row — so a whole trajectory is a one-liner:
+
+```
+iterate(x -> 2*x, 1, 10)                 # 1024
+scan(x -> 2*x, 1, 4)                     # [1, 2, 4, 8, 16]
+scan(v -> (v[1], -v[0]), (1,0), 100)     # [101, 2] orbit of a harmonic oscillator
 ```
 
 ---
@@ -266,6 +287,7 @@ prod(f, a, b)                  # integer product
 **Comparison fns:** `lt leq gt geq eq neq` — 2-arg, return 0/1; good with `map`/`filter`  
 **Bitwise:** `and or xor nand nor xnor not shl(x,n) shr(x,n)`  
 **Misc:** `len(v)` / `length(v)`, `sort(v)`, `zip(a,b)`, `dot(a,b)`, `append(v,x)`, `concat(a,b)`, `flatten(v)`  
+**Array scans:** `cumsum(v)`, `cumprod(v)`, `diff(v)` — running sum/product, first difference (over a 1-D tensor or tuple)  
 **Plotting:** `graph(f)` or `graph(f, a, b)` — saves graph_N.png
 
 ---
@@ -297,22 +319,25 @@ lap2d(T) = {
 
 ### Time-stepping
 
-Recursion is fine for **short** runs (recursion depth is capped at 100000 nested
-calls — beyond that you get a catchable `recursion limit exceeded` error, not a
-crash):
+**Preferred:** drive the loop with `iterate` (final state) or `scan` (whole
+trajectory). Both run a flat internal loop — O(1) stack, scaling to millions of
+steps — and `step` here can carry any state (tensor, vector, scalar, complex):
 ```
-evolve(T, n) = if(n <= 0, T, evolve(step(T), n-1))
-solver(T0) = t -> evolve(T0, round(t/dt))   # returns a solver lambda
+evolve(T0, n) = iterate(step, T0, n)             # final state after n steps
+solver(T0) = t -> iterate(step, T0, round(t/dt)) # returns a solver lambda
+traj = scan(step, T0, n)                          # every intermediate state
 ```
 
-For **long** runs (many thousands+ of steps), use a flat loop instead of deep
-recursion: keep state in a `cell` and drive it with `sum` over a range (O(1) stack,
-scales to millions of steps):
+Recursion still works for **short** runs and reads naturally, but is capped at
+100000 nested calls (beyond that you get a catchable `recursion limit exceeded`
+error, not a crash), so prefer `iterate`/`scan` for anything long:
 ```
-{ c = cell(T0);
-  sum(k -> {set(c, step(get(c))); 0}, 1, n);   # advance n steps, value discarded
-  get(c) }                                       # final state
+evolve(T, n) = if(n <= 0, T, evolve(step(T), n-1))
 ```
+
+The older `cell`-driven flat loop (`{c = cell(T0); sum(k -> {set(c, step(get(c)));
+0}, 1, n); get(c)}`) is still valid but is superseded by `iterate`/`scan` — reach
+for a `cell` only when you genuinely need mutable state outside an iteration.
 
 ### Building initial conditions with spatial logic
 ```

@@ -1,0 +1,12 @@
+[1;4mscan[0m
+
+Returns the whole orbit [x0, f(x0), ..., f^n(x0)] stacked into a tensor.
+Scalar states give a 1-D tensor of length n+1; vector states (length d)
+give a 2-D tensor [n+1, d] with one state per row. Flat loop, O(1) stack.
+
+[1mExamples:[0m
+[0m> scan(x -> 2*x, 1, 4)
+result = [1, 2, 4, 8, 16]
+> shape(scan(v -> (v[1], -v[0]), (1,0), 3))
+result = [4, 2]
+[0m

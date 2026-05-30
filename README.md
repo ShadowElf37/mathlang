@@ -482,6 +482,58 @@ result = 10
 
 ---
 
+## Iteration
+
+For time-stepping and fixed-point iteration, `iterate` and `scan` apply a step
+function repeatedly in a **flat internal loop** — O(1) stack, scaling to millions
+of steps where deep recursion would overflow.
+
+`iterate(f, x0, n)` returns `fⁿ(x0)` (f applied n times):
+
+```
+> iterate(x -> 2*x, 1, 10)
+result = 1024
+> iterate(x -> x + 1, 0, 1000000)   # a million steps, O(1) stack
+result = 1000000
+```
+
+`scan(f, x0, n)` returns the whole orbit `[x0, f(x0), …, fⁿ(x0)]` stacked into a
+tensor. Scalar states give a 1-D tensor of length `n+1`; **vector** states of
+length `d` give a 2-D tensor `[n+1, d]`, one state per row:
+
+```
+> scan(x -> 2*x, 1, 4)
+result = [1, 2, 4, 8, 16]
+> scan(v -> (v[1], -v[0]), (1,0), 4)   # harmonic-oscillator orbit, as rows
+⎡  1   0 ⎤
+⎢  0  -1 ⎥
+⎢ -1   0 ⎥
+⎢  0   1 ⎥
+⎣  1   0 ⎦
+```
+
+This makes a stepper and its whole trajectory a one-liner. For example, one RK4
+step of `y' = (y₁, -y₀)`, traced for the full orbit:
+
+```
+> rk4(f,y,h) = {k1=f(y); k2=f(y+h/2*k1); k3=f(y+h/2*k2); k4=f(y+h*k3); y+h/6*(k1+2*k2+2*k3+k4)}
+> scan(y -> rk4(v -> (v[1], -v[0]), y, 0.1), (1,0), 100)   # 101×2 trajectory
+```
+
+`cumsum`, `cumprod`, and `diff` are running scans over a 1-D tensor or tuple
+(`diff` is the inverse of `cumsum` up to the first element):
+
+```
+> cumsum([1, 2, 3, 4])
+result = [1, 3, 6, 10]
+> cumprod([1, 2, 3, 4])
+result = [1, 2, 6, 24]
+> diff([1, 4, 9, 16])
+result = [3, 5, 7]
+```
+
+---
+
 ## Tensors and matrices
 
 Tensors are n-dimensional arrays of real numbers. A 1-D tensor displays as `[...]`, a 2-D tensor as a boxed matrix.
@@ -565,6 +617,25 @@ All standard operators broadcast element-wise. Scalar-tensor and tensor-tensor (
 > cat(1, eye(2), eye(2))            # stack horizontally (= hstack)
 > hstack(A, B)
 > vstack(A, B)
+```
+
+`hstack`/`vstack` **promote ranks**: a 1-D vector is treated as a row (for
+`vstack`) or column (for `hstack`), and a scalar as a 1×1 block, so a vector
+stacks directly onto a matrix:
+
+```
+> vstack((1,2;3,4), (5,6))          # append a row vector to a matrix → 3×2
+> hstack((1,2), (3,4))              # two column vectors → 2×2
+```
+
+`append` and `concat` likewise accept scalars (and empty operands) as length-1
+vectors, and `(x,)` is a singleton 1-D tensor — handy as an accumulator base
+case (`(x)` alone is just the scalar `x`):
+
+```
+> (5,)                              # [5]   — singleton tensor (cf. (5) = 5)
+> append(1, 2)                      # [1, 2]
+> concat(zeros(0), [1, 2])          # [1, 2]
 ```
 
 ### Linear algebra
@@ -698,7 +769,7 @@ result = 3  4
 
 **Statistics** (1-D tensors or matrices): `mean`, `median`, `mode`, `std`, `var`, `min`, `max`, `sum`, `prod`
 
-**Array ops:** `len`, `sort`, `zip(a,b)`, `dot(a,b)`, `append(t,x)`, `concat(a,b)`, `flatten(t)`, `argmin(t)`, `argmax(t)`, `linspace(a,b,n)`, `range(a,b)`
+**Array ops:** `len`, `sort`, `zip(a,b)`, `dot(a,b)`, `append(t,x)`, `concat(a,b)`, `flatten(t)`, `argmin(t)`, `argmax(t)`, `cumsum(t)`, `cumprod(t)`, `diff(t)`, `linspace(a,b,n)`, `range(a,b)`
 
 **Tensor constructors:** `zeros(n1,n2,…)`, `ones(n1,n2,…)`, `eye(n)`, `diag(t)`, `matrix(f,r,c)`, `tensor(f,n1,n2,…)`, `rand()`, `rand(n1,n2,…)`
 
@@ -717,6 +788,8 @@ result = 3  4
 **Comparisons (function form):** `lt`, `leq`, `gt`, `geq`, `eq`, `neq` — 2-arg comparison functions returning `0`/`1`; useful with `map`/`filter`/`partial`
 
 **Higher-order:** `map(f,t)`, `filter(f,t)`, `reduce(f,t)`, `compose(f,g)`, `partial(f,a)`
+
+**Iteration:** `iterate(f,x0,n)` → `fⁿ(x0)`, `scan(f,x0,n)` → orbit `[x0,…,fⁿ(x0)]` (flat loop, O(1) stack; scalar states → 1-D, vector states → 2-D rows)
 
 **Spectral:** `fft(v)`, `ifft(v)` — 1-D FFT/IFFT on a 1-D tensor; `fftn(T)`, `ifftn(T)` — n-D FFT on tensors
 

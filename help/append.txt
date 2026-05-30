@@ -1,6 +1,7 @@
 [1;4mappend[0m
 
-Appends an element to a 1-D tensor or tuple.
+Appends an element to a 1-D tensor or tuple. A scalar first argument is
+treated as a length-1 vector, so append(x, y) yields the tensor [x, y].
 
 [1mExamples:[0m
 [0m> append((1,2,3), 4)

@@ -230,6 +230,7 @@ impl Env {
             "len", "length",
             "linspace", "range",
             "sort", "zip", "dot", "append", "concat", "flatten", "argmin", "argmax",
+            "cumsum", "cumprod", "diff",
             "mean", "median", "mode", "std", "var",
             "compose", "partial",
             "gaussian", "gaussian_cdf",
@@ -242,6 +243,7 @@ impl Env {
             "if",
             "fft", "ifft",
             "sum", "prod", "integral", "deriv", "map",
+            "iterate", "scan",
             "cell", "get", "set",
             // Tensor ops
             "tensor", "matrix", "zeros", "ones", "eye", "diag",
@@ -483,6 +485,8 @@ pub fn builtin_sig(name: &str) -> Option<&'static str> {
         "prod"   => Some("prod(f: fn, a: real, b: real) | prod(T: tensor)"),
         "integral" => Some("integral(f: fn, a: real, b: real, n: nat) -> real"),
         "deriv"  => Some("deriv(f: fn, x: real, dx: real) -> real"),
+        "iterate" => Some("iterate(f: fn, x0: any, n: nat) -> any"),
+        "scan"   => Some("scan(f: fn, x0: any, n: nat) -> tensor"),
         "fft"    => Some("fft(T: tensor) -> complex tensor"),
         "ifft"   => Some("ifft(T: complex tensor) -> complex tensor"),
         "cell"   => Some("cell(init: any) -> cell"),
@@ -523,6 +527,9 @@ pub fn builtin_sig(name: &str) -> Option<&'static str> {
         "append"  => Some("append(t: any, x: any) -> any"),
         "concat"  => Some("concat(a: any, b: any) -> any"),
         "flatten" => Some("flatten(T: tensor) -> tensor"),
+        "cumsum"  => Some("cumsum(t: tensor) -> tensor"),
+        "cumprod" => Some("cumprod(t: tensor) -> tensor"),
+        "diff"    => Some("diff(t: tensor) -> tensor"),
         "argmin"  => Some("argmin(t: tensor) -> nat"),
         "argmax"  => Some("argmax(t: tensor) -> nat"),
         "zip"     => Some("zip(a: tensor, b: tensor) -> tensor"),
@@ -596,6 +603,7 @@ pub fn is_protected(name: &str) -> bool {
         | "len" | "length"
         | "linspace" | "range"
         | "sort" | "zip" | "dot" | "append" | "concat" | "flatten" | "argmin" | "argmax"
+        | "cumsum" | "cumprod" | "diff"
         | "mean" | "median" | "mode" | "std" | "var"
         | "compose" | "partial"
         | "gaussian" | "gaussian_cdf"
@@ -607,6 +615,7 @@ pub fn is_protected(name: &str) -> bool {
         | "if"
         | "fft" | "ifft"
         | "sum" | "prod" | "integral" | "deriv" | "map"
+        | "iterate" | "scan"
         | "cell" | "get" | "set"
         | "tensor" | "matrix" | "zeros" | "ones" | "eye" | "diag"
         | "shape" | "rows" | "cols" | "transpose" | "trace" | "norm"
@@ -1549,13 +1558,16 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             let first = it.next().unwrap();
             let elem  = it.next().unwrap();
             match first {
-                Val::Tensor { mut data, shape } if shape.len() == 1 => {
+                Val::Tensor { mut data, shape } if shape.len() <= 1 => {
                     data.push(elem.num("append")?);  // DerefMut CoW-clones only if Arc has multiple owners
                     let n = data.len();
                     Ok(Val::Tensor { data, shape: vec![n] })
                 }
                 Val::Tuple(mut v) => { v.push(elem); Ok(Val::Tuple(v)) }
-                _ => Err("append: first arg must be a 1D tensor or tuple".into()),
+                // Scalar seed: append(x, y) → the 1-D tensor [x, y]. Makes singleton
+                // accumulator base cases work without boilerplate (FEAT-E).
+                Val::Num(x) => Ok(Val::Tensor { data: TData::new(vec![x, elem.num("append")?]), shape: vec![2] }),
+                _ => Err("append: first arg must be a number, 1D tensor, or tuple".into()),
             }
         }
         "concat" => {
@@ -1565,14 +1577,22 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             let av = it.next().unwrap();
             let bv = it.next().unwrap();
             match (av, bv) {
-                (Val::Tensor { mut data, shape: sa }, Val::Tensor { data: bd, shape: sb })
-                    if sa.len() == 1 && sb.len() == 1 => {
-                    data.extend(bd.into_iter());  // DerefMut CoW + IntoIterator
-                    let n = data.len();
-                    Ok(Val::Tensor { data, shape: vec![n] })
-                }
                 (Val::Tuple(mut a), Val::Tuple(b)) => { a.extend(b); Ok(Val::Tuple(a)) }
-                _ => Err("concat: args must both be 1D tensors or both be tuples".into()),
+                // Numeric path: accept scalars, 1-D tensors, and empty operands (FEAT-E).
+                (a, b) => {
+                    fn as_vec1(v: Val) -> Result<Vec<f64>, String> {
+                        match v {
+                            Val::Num(x) => Ok(vec![x]),
+                            Val::Tensor { data, shape } if shape.len() <= 1 => Ok(data.into_vec()),
+                            Val::Tensor { shape, .. } => Err(format!("concat: expected a 1-D tensor, got {}-D", shape.len())),
+                            other => Err(format!("concat: cannot concat {}", fmt_val(&other))),
+                        }
+                    }
+                    let mut a = as_vec1(a)?;
+                    a.extend(as_vec1(b)?);
+                    let n = a.len();
+                    Ok(Val::Tensor { data: TData::new(a), shape: vec![n] })
+                }
             }
         }
         "flatten" => {
@@ -1587,6 +1607,65 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
                     other             => vec![other],
                 }).collect())),
                 _ => Err("flatten: argument must be a tensor or tuple".into()),
+            }
+        }
+        "cumsum" | "cumprod" => {
+            // Running sum/product of a 1-D tensor or tuple; output length == input.
+            arity(name, 1, vals.len())?;
+            let product = name == "cumprod";
+            match vals.into_iter().next().unwrap() {
+                Val::Tensor { data, shape } if shape.len() <= 1 => {
+                    let mut acc = if product { 1.0 } else { 0.0 };
+                    let out: Vec<f64> = data.iter().map(|&x| {
+                        if product { acc *= x; } else { acc += x; }
+                        acc
+                    }).collect();
+                    let n = out.len();
+                    Ok(Val::Tensor { data: TData::new(out), shape: vec![n] })
+                }
+                Val::Tuple(items) => {
+                    let mut acc_re = if product { 1.0 } else { 0.0 };
+                    let mut acc_im = 0.0;
+                    let mut out = Vec::with_capacity(items.len());
+                    for it in items {
+                        let (r, i) = to_complex(it)?;
+                        if product {
+                            let nr = acc_re * r - acc_im * i;
+                            let ni = acc_re * i + acc_im * r;
+                            acc_re = nr; acc_im = ni;
+                        } else {
+                            acc_re += r; acc_im += i;
+                        }
+                        out.push(make_complex(acc_re, acc_im));
+                    }
+                    Ok(Val::Tuple(out))
+                }
+                _ => Err(format!("{name}: argument must be a 1-D tensor or tuple")),
+            }
+        }
+        "diff" => {
+            // First difference: out[k] = t[k+1] - t[k]; length == input - 1.
+            arity("diff", 1, vals.len())?;
+            match vals.into_iter().next().unwrap() {
+                Val::Tensor { data, shape } if shape.len() <= 1 => {
+                    if data.len() < 2 {
+                        return Ok(Val::Tensor { data: TData::new(vec![]), shape: vec![0] });
+                    }
+                    let out: Vec<f64> = data.windows(2).map(|w| w[1] - w[0]).collect();
+                    let n = out.len();
+                    Ok(Val::Tensor { data: TData::new(out), shape: vec![n] })
+                }
+                Val::Tuple(items) => {
+                    if items.len() < 2 { return Ok(Val::Tuple(vec![])); }
+                    let mut out = Vec::with_capacity(items.len() - 1);
+                    for w in items.windows(2) {
+                        let (ar, ai) = to_complex(w[0].clone())?;
+                        let (br, bi) = to_complex(w[1].clone())?;
+                        out.push(make_complex(br - ar, bi - ai));
+                    }
+                    Ok(Val::Tuple(out))
+                }
+                _ => Err("diff: argument must be a 1-D tensor or tuple".into()),
             }
         }
         "argmin" | "argmax" => {
@@ -2580,40 +2659,34 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
 
         // ── Tensor construction / reshaping ───────────────────────────────────
         "hstack" => {
+            // Concatenate side-by-side. 1-D vectors are treated as columns [n,1];
+            // scalars as [1,1]; matrices kept as-is (rank-promoting, FEAT-E).
             arity("hstack", 2, vals.len())?;
             let mut it = vals.into_iter();
-            match (it.next().unwrap(), it.next().unwrap()) {
-                (Val::Tensor { data: ad, shape: ash }, Val::Tensor { data: bd, shape: bsh })
-                    if ash.len() == 2 && bsh.len() == 2 =>
-                {
-                    let (ar, ac) = (ash[0], ash[1]);
-                    let (br, bc) = (bsh[0], bsh[1]);
-                    if ar != br { return Err(format!("hstack: row count mismatch ({ar} vs {br})")); }
-                    let mut out = Vec::with_capacity(ar * (ac + bc));
-                    for i in 0..ar {
-                        out.extend_from_slice(&ad[i*ac..(i+1)*ac]);
-                        out.extend_from_slice(&bd[i*bc..(i+1)*bc]);
-                    }
-                    Ok(Val::Tensor { data: TData::new(out), shape: vec![ar, ac + bc] })
-                }
-                _ => Err("hstack: both arguments must be 2D tensors".into()),
+            let (are, aim, ar, ac) = to_block(it.next().unwrap(), false, "hstack")?;
+            let (bre, bim, br, bc) = to_block(it.next().unwrap(), false, "hstack")?;
+            if ar != br { return Err(format!("hstack: row count mismatch ({ar} vs {br})")); }
+            let mut re = Vec::with_capacity(ar * (ac + bc));
+            let mut im = Vec::with_capacity(ar * (ac + bc));
+            for i in 0..ar {
+                re.extend_from_slice(&are[i*ac..(i+1)*ac]);
+                re.extend_from_slice(&bre[i*bc..(i+1)*bc]);
+                im.extend_from_slice(&aim[i*ac..(i+1)*ac]);
+                im.extend_from_slice(&bim[i*bc..(i+1)*bc]);
             }
+            Ok(maybe_real(re, im, vec![ar, ac + bc]))
         }
         "vstack" => {
+            // Stack vertically. 1-D vectors are treated as rows [1,n]; scalars as
+            // [1,1]; matrices kept as-is (rank-promoting, FEAT-E).
             arity("vstack", 2, vals.len())?;
             let mut it = vals.into_iter();
-            match (it.next().unwrap(), it.next().unwrap()) {
-                (Val::Tensor { data: mut ad, shape: ash }, Val::Tensor { data: bd, shape: bsh })
-                    if ash.len() == 2 && bsh.len() == 2 =>
-                {
-                    let (ar, ac) = (ash[0], ash[1]);
-                    let (br, bc) = (bsh[0], bsh[1]);
-                    if ac != bc { return Err(format!("vstack: column count mismatch ({ac} vs {bc})")); }
-                    ad.extend(bd.into_iter());
-                    Ok(Val::Tensor { data: ad, shape: vec![ar + br, ac] })
-                }
-                _ => Err("vstack: both arguments must be 2D tensors".into()),
-            }
+            let (mut are, mut aim, ar, ac) = to_block(it.next().unwrap(), true, "vstack")?;
+            let (bre, bim, br, bc) = to_block(it.next().unwrap(), true, "vstack")?;
+            if ac != bc { return Err(format!("vstack: column count mismatch ({ac} vs {bc})")); }
+            are.extend(bre);
+            aim.extend(bim);
+            Ok(maybe_real(are, aim, vec![ar + br, ac]))
         }
         "tomat" => {
             arity("tomat", 3, vals.len())?;
@@ -3161,7 +3234,8 @@ impl<'a> Compiler<'a> {
                         }
                         // Special forms that require unevaluated Expr args — unsupported.
                         "sum" | "prod" | "integral" | "deriv"
-                        | "map"   | "filter"    | "reduce" => return Err(()),
+                        | "map"   | "filter"    | "reduce"
+                        | "iterate" | "scan" => return Err(()),
                         _ => {}
                     }
                     // Treat as builtin when not shadowed by a param/local.
@@ -4081,6 +4155,8 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                     "prod"     => return eval_agg(arg_exprs, env, true),
                     "integral" => return eval_integral(arg_exprs, env),
                     "deriv"    => return eval_deriv(arg_exprs, env),
+                    "iterate"  => return eval_iterate(arg_exprs, env),
+                    "scan"     => return eval_scan(arg_exprs, env),
                     "map" => {
                         if arg_exprs.len() != 2 {
                             return Err("map(f, tuple) expects 2 args".into());
@@ -4649,6 +4725,146 @@ pub fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> 
         accum(&mut acc_re, &mut acc_im, r, i, product);
     }
     Ok(make_complex(acc_re, acc_im))
+}
+
+// iterate(f, x0, n) — apply f to x0 n times (f^n(x0)). Flat loop, O(1) stack:
+// the safe, scalable replacement for the recursive evolve()/step() idiom.
+pub fn eval_iterate(args: &[Expr], env: &Env) -> Result<Val, String> {
+    if args.len() != 3 {
+        return Err("iterate(f, x0, n) expects 3 args".into());
+    }
+    // Evaluate f once so the bytecode cache is shared across the whole loop.
+    let f_val = eval(&args[0], env)?;
+    let mut state = eval(&args[1], env)?;
+    let n = eval(&args[2], env)?.num("iterate")? as i64;
+    if n < 0 {
+        return Err(format!("iterate: count must be non-negative, got {n}"));
+    }
+    for _ in 0..n {
+        state = apply_val(f_val.clone(), vec![state], env)?;
+    }
+    Ok(state)
+}
+
+// scan(f, x0, n) — the whole orbit [x0, f(x0), …, f^n(x0)] stacked into a tensor.
+// Scalar states → a 1-D tensor of length n+1; vector states (length d) → a 2-D
+// tensor [n+1, d] with each state as a row. Flat loop, O(1) stack besides output.
+pub fn eval_scan(args: &[Expr], env: &Env) -> Result<Val, String> {
+    if args.len() != 3 {
+        return Err("scan(f, x0, n) expects 3 args".into());
+    }
+    let f_val = eval(&args[0], env)?;
+    let mut state = eval(&args[1], env)?;
+    let n = eval(&args[2], env)?.num("scan")? as i64;
+    if n < 0 {
+        return Err(format!("scan: count must be non-negative, got {n}"));
+    }
+    let mut states: Vec<Val> = Vec::with_capacity(n as usize + 1);
+    states.push(state.clone());
+    for _ in 0..n {
+        state = apply_val(f_val.clone(), vec![state], env)?;
+        states.push(state.clone());
+    }
+    stack_rows(states, "scan")
+}
+
+// Stack a list of states as the rows of a tensor (used by scan, and the engine
+// behind a vector trajectory). All-scalar states → a 1-D tensor [k]; equal-length
+// 1-D vectors/tuples → a 2-D tensor [k, d]. Real fast path; complex via maybe_real.
+fn stack_rows(states: Vec<Val>, who: &str) -> Result<Val, String> {
+    if states.is_empty() {
+        return Ok(Val::Tensor { data: TData::new(vec![]), shape: vec![0] });
+    }
+    if matches!(states[0], Val::Num(_) | Val::Complex(..)) {
+        let mut re = Vec::with_capacity(states.len());
+        let mut im = Vec::with_capacity(states.len());
+        let mut complex = false;
+        for s in states {
+            match s {
+                Val::Num(x)        => { re.push(x); im.push(0.0); }
+                Val::Complex(a, b) => { re.push(a); im.push(b); complex = true; }
+                other => return Err(format!(
+                    "{who}: states must all be scalars or all be equal-length vectors (got {})",
+                    fmt_val(&other))),
+            }
+        }
+        let n = re.len();
+        return Ok(if complex { maybe_real(re, im, vec![n]) }
+                  else        { Val::Tensor { data: TData::new(re), shape: vec![n] } });
+    }
+    // Vector/tuple mode: every state is a row of width d.
+    let mut re: Vec<f64> = Vec::new();
+    let mut im: Vec<f64> = Vec::new();
+    let mut complex = false;
+    let mut width: Option<usize> = None;
+    let k = states.len();
+    for s in states {
+        let (r, i): (Vec<f64>, Vec<f64>) = match s {
+            Val::Tensor { data, shape } if shape.len() == 1 => {
+                let d = data.len();
+                (data.into_vec(), vec![0.0; d])
+            }
+            Val::ComplexTensor { re, im, shape } if shape.len() == 1 => {
+                complex = true;
+                (re.into_vec(), im.into_vec())
+            }
+            Val::Tuple(items) => {
+                let mut r = Vec::with_capacity(items.len());
+                let mut i = Vec::with_capacity(items.len());
+                for it in items {
+                    let (a, b) = to_complex(it)?;
+                    if b != 0.0 { complex = true; }
+                    r.push(a); i.push(b);
+                }
+                (r, i)
+            }
+            other => return Err(format!(
+                "{who}: states must all be scalars or all be equal-length 1-D vectors (got {})",
+                fmt_val(&other))),
+        };
+        match width {
+            None => width = Some(r.len()),
+            Some(w) if w != r.len() =>
+                return Err(format!("{who}: inconsistent state length ({w} vs {})", r.len())),
+            _ => {}
+        }
+        re.extend(r);
+        im.extend(i);
+    }
+    let d = width.unwrap_or(0);
+    Ok(if complex { maybe_real(re, im, vec![k, d]) }
+       else        { Val::Tensor { data: TData::new(re), shape: vec![k, d] } })
+}
+
+// Promote a value to a 2-D block (re, im, rows, cols) for the stacking family.
+// A 1-D vector becomes a row [1,n] when `as_row`, else a column [n,1]; a scalar
+// becomes [1,1]; a 2-D tensor is kept as-is. Lets vstack/hstack accept scalars,
+// vectors, and matrices uniformly (FEAT-E rank promotion).
+fn to_block(v: Val, as_row: bool, who: &str) -> Result<(Vec<f64>, Vec<f64>, usize, usize), String> {
+    let vec_dims = |n: usize| if as_row { (1, n) } else { (n, 1) };
+    match v {
+        Val::Num(x)        => Ok((vec![x], vec![0.0], 1, 1)),
+        Val::Complex(a, b) => Ok((vec![a], vec![b], 1, 1)),
+        Val::Tensor { data, shape } => match shape.len() {
+            0 | 1 => { let n = data.len(); let (r, c) = vec_dims(n); Ok((data.into_vec(), vec![0.0; n], r, c)) }
+            2     => { let (r, c) = (shape[0], shape[1]); let n = data.len(); Ok((data.into_vec(), vec![0.0; n], r, c)) }
+            _     => Err(format!("{who}: tensors must be 1-D or 2-D, got {}-D", shape.len())),
+        },
+        Val::ComplexTensor { re, im, shape } => match shape.len() {
+            0 | 1 => { let n = re.len(); let (r, c) = vec_dims(n); Ok((re.into_vec(), im.into_vec(), r, c)) }
+            2     => { let (r, c) = (shape[0], shape[1]); Ok((re.into_vec(), im.into_vec(), r, c)) }
+            _     => Err(format!("{who}: tensors must be 1-D or 2-D, got {}-D", shape.len())),
+        },
+        Val::Tuple(items) => {
+            let n = items.len();
+            let mut re = Vec::with_capacity(n);
+            let mut im = Vec::with_capacity(n);
+            for it in items { let (a, b) = to_complex(it)?; re.push(a); im.push(b); }
+            let (r, c) = vec_dims(n);
+            Ok((re, im, r, c))
+        }
+        other => Err(format!("{who}: cannot stack {}", fmt_val(&other))),
+    }
 }
 
 // Simpson's rule: integral(f, a, b) or integral(f, a, b, n)

@@ -1,12 +1,17 @@
 [1;4mvstack[0m
 
-Stacks two 2-D matrices vertically (row-wise).
+Stacks two arrays vertically (row-wise). Ranks are promoted: a 1-D vector
+is treated as a single row, and a scalar as a 1x1 block, so a vector can be
+stacked onto a matrix. Column counts must match.
 
 [1mExamples:[0m
-[0m> vstack(eye(2), eye(2))
+[0m> vstack((1,2,3), (4,5,6))
 result =
-⎡ 1  0 ⎤
-⎢ 0  1 ⎥
-⎢ 1  0 ⎥
-⎣ 0  1 ⎦
+⎡ 1  2  3 ⎤
+⎣ 4  5  6 ⎦
+> vstack((1,2;3,4), (5,6))
+result =
+⎡ 1  2 ⎤
+⎢ 3  4 ⎥
+⎣ 5  6 ⎦
 [0m

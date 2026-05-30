@@ -1,0 +1,9 @@
+[1;4mcumprod[0m
+
+Running (cumulative) product of a 1-D tensor or tuple; output length
+equals the input length.
+
+[1mExamples:[0m
+[0m> cumprod([1, 2, 3, 4])
+result = [1, 2, 6, 24]
+[0m
