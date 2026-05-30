@@ -1,0 +1,82 @@
+# integrators.math — symplectic & explicit integrators, written in pure mathlang.
+#
+# The point of this file: mathlang already has everything you need to build
+# time-steppers — first-class functions, tuple state, `cell` for mutable state,
+# and the flat-loop builtins `iterate`/`scan`. No special integrator builtins are
+# required. Each integrator here is just a *step* function; the looping is done by
+# `iterate` (final state, O(1) stack) or `scan` (the whole orbit). Both compile to
+# a single VM `Loop`, so these stay fast and are GPU-safe.
+#
+# Usage:
+#   !include integrators.math
+#   step = verletStep(q -> q, p -> p, 0.05)     # SHO: dH/dq = q, dH/dp = p
+#   orbit = scan(step, (1.0, 0.0), 200)         # 201 states, [201, 2] (cols q, p)
+#   final = iterate(step, (1.0, 0.0), 200)      # just the endpoint, (q, p)
+#   gen   = verlet(q->q, p->p, 1.0, 0.0, 0.05)  # stateful generator for animate
+#
+# State convention: phase-space state is the tuple (q, p). q and p may be scalars
+# (1 DOF) or vectors (N DOF). For scalar q,p, `scan` row-packs the orbit into a
+# [n+1, 2] matrix (column 0 = q, column 1 = p). For vector q,p, `scan` keeps the
+# fields apart and returns a tuple (Q, P), each a [n+1, N] matrix.
+
+# ── Velocity-Verlet (leapfrog) — symplectic, for separable H(q,p) = T(p)+V(q) ──
+#
+# Hamilton's equations: dq/dt = ∂H/∂p,  dp/dt = -∂H/∂q.
+#   dHdq = ∂H/∂q  (a function of q — the force term -dp/dt)
+#   dHdp = ∂H/∂p  (a function of p — the velocity dq/dt)
+# One step is the kick-drift-kick (KDK) sequence. Pure and time-reversible.
+verletStep(dHdq, dHdp, dt) = s -> {
+  q = s[0];  p = s[1];
+  ph = p  - dt/2 * dHdq(q);    # half kick
+  qn = q  + dt   * dHdp(ph);   # drift
+  pn = ph - dt/2 * dHdq(qn);   # half kick
+  (qn, pn)
+}
+
+# Whole phase-space orbit [(q0,p0) … (qn,pn)] via scan (flat loop, O(1) stack).
+verletOrbit(dHdq, dHdp, q0, p0, dt, n) = scan(verletStep(dHdq, dHdp, dt), (q0, p0), n)
+
+# Final state (q, p) after n steps via iterate — no intermediate storage.
+verletFinal(dHdq, dHdp, q0, p0, dt, n) = iterate(verletStep(dHdq, dHdp, dt), (q0, p0), n)
+
+# Stateful generator: returns a 0-arg-style stepper. Each call returns the current
+# state, then advances by one dt (first call returns (q0, p0)). The argument is
+# ignored — same convention as heat.math's solver, so it plugs into animate.
+verlet(dHdq, dHdp, q0, p0, dt) = {
+  st   = cell((q0, p0));
+  step = verletStep(dHdq, dHdp, dt);
+  _ -> { s = get(st); set(st, step(s)); s }
+}
+
+# Total energy H(q,p) = T(p) + V(q) for diagnostics — pass the potentials directly.
+# (kept separate from the step so you can monitor drift without re-deriving H.)
+hamiltonian(T, V) = s -> T(s[1]) + V(s[0])
+
+# ── Classic explicit RK4 — for a general first-order ODE  y' = f(t, y) ─────────
+#
+# y may be a scalar or a vector. f(t, y) returns dy/dt. Not symplectic — use Verlet
+# for long Hamiltonian runs — but 4th-order accurate and the workhorse for non-
+# Hamiltonian systems.
+rk4Step(f, t, y, h) = {
+  k1 = f(t,       y);
+  k2 = f(t + h/2, y + h/2*k1);
+  k3 = f(t + h/2, y + h/2*k2);
+  k4 = f(t + h,   y + h*k3);
+  y + h/6*(k1 + 2*k2 + 2*k3 + k4)
+}
+
+# RK4 orbit carrying (t, y). scan returns the times and states stacked: for scalar
+# y, a [n+1, 2] matrix (cols t, y); for vector y, a tuple (T, Y).
+rk4Orbit(f, t0, y0, h, n) = scan(s -> (s[0] + h, rk4Step(f, s[0], s[1], h)), (t0, y0), n)
+
+# Final y after n RK4 steps from t0 (drops the time bookkeeping).
+rk4Final(f, t0, y0, h, n) = iterate(s -> (s[0] + h, rk4Step(f, s[0], s[1], h)), (t0, y0), n)[1]
+
+# ── Demo: simple harmonic oscillator  H(q,p) = (q² + p²)/2 ─────────────────────
+#
+# dH/dq = q (restoring force), dH/dp = p (velocity). Analytic solution is a unit
+# circle in phase space with period 2π; energy E = (q²+p²)/2 ≡ 0.5 from (1,0).
+shoEnergy = s -> (s[0]^2 + s[1]^2) / 2               # H(q,p) = (q²+p²)/2
+shoStep   = verletStep(q -> q, p -> p, 0.05)
+shoOrbit  = scan(shoStep, (1.0, 0.0), 200)           # ~1.6 periods, [201, 2]
+shoDrift  = shoEnergy(iterate(shoStep, (1.0, 0.0), 200)) - 0.5   # energy drift ≈ 0

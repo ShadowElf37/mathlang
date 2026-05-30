@@ -3,6 +3,10 @@
 Returns the whole orbit [x0, f(x0), ..., f^n(x0)] stacked into a tensor.
 Scalar states give a 1-D tensor of length n+1; vector states (length d)
 give a 2-D tensor [n+1, d] with one state per row. Flat loop, O(1) stack.
+A structured tuple state -- one whose elements are themselves vectors, e.g.
+phase-space (q, p) with vector q, p -- is stacked field by field, giving a
+tuple (Q, P) of [n+1, d] matrices. A flat numeric tuple (a, b) stays row-
+packed into [n+1, 2].
 
 [1mExamples:[0m
 [0m> scan(x -> 2*x, 1, 4)

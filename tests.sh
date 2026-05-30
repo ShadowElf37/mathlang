@@ -52,6 +52,19 @@ run_err() {
     fi
 }
 
+# run_lib: like `run`, but loads a mathlang library file first (m -f lib 'expr').
+LIB_INT="${MATHLANG_LIB_INT:-examples/integrators.math}"
+run_lib() {
+    local label="$1" lib="$2" expr="$3" expected="$4" got
+    got=$("$M" -f "$lib" "$expr" 2>&1)
+    if [ "$(norm "$got")" = "$(norm "$expected")" ]; then
+        PASS=$((PASS+1))
+    else
+        FAIL=$((FAIL+1))
+        FAILS+=("$label | lib='$lib' expr='$expr' | expected='$(norm "$expected")' | got='$(norm "$got")'")
+    fi
+}
+
 section() { echo; echo "=== $1 ==="; }
 
 # ── Arithmetic ────────────────────────────────────────────────────────────────
@@ -572,6 +585,12 @@ run       "scan.vec_first"   "scan(v->(v[1], -v[0]), (1,0), 3)[0]"         "[1, 
 run       "scan.complex"     "scan(z->z*i, 1, 4)"                          "[1, i, -1, -i, 1]"
 run       "scan.len"         "len(scan(x->x+1, 0, 100))"                   "101"
 run_err   "scan.neg"         "scan(x->x, 0, -1)"
+# structured tuple state (q,p with vector q,p) → componentwise tuple of stacks
+run       "scan.struct.shapeQ" "shape(scan(s->(s[0]+s[1], s[1]), ((1,2),(3,4)), 2)[0])" "[3, 2]"
+run       "scan.struct.shapeP" "shape(scan(s->(s[0]+s[1], s[1]), ((1,2),(3,4)), 2)[1])" "[3, 2]"
+run       "scan.struct.rowQ"   "scan(s->(s[0]+s[1], s[1]), ((1,2),(3,4)), 2)[0][2]"     "[7, 10]"
+run       "scan.struct.rowP"   "scan(s->(s[0]+s[1], s[1]), ((1,2),(3,4)), 2)[1][0]"     "[3, 4]"
+run_err   "scan.struct.bad"    "scan(s->5, ((1,2),(3,4)), 2)"
 
 section "CUMSUM / CUMPROD / DIFF"
 run       "cumsum.basic"     "cumsum([1,2,3,4])"                           "[1, 3, 6, 10]"
@@ -1228,6 +1247,22 @@ run "vm.loop.scan.vrow"   "orbit(n)=scan(v->(v[0]+v[1], v[1]), (1,1), n); orbit(
 run "vm.loop.nested"     "f(n)=sum(j->iterate(x->x+1, 0, j), 1, n); f(4)"     "10"
 run "vm.loop.sum.range"  "f(n)=sum(k->2*k, 0, n); f(100)"                     "10100"
 run_err "vm.loop.iter.neg" "f(n)=iterate(g->g, 0, n); f(-1)"
+
+# ── stdlib: examples/integrators.math (verlet / rk4, built in pure mathlang) ──
+section "stdlib.integrators"
+run_lib "int.load"        "$LIB_INT" "1+1"                                          "2"
+# Velocity-Verlet SHO (dH/dq=q, dH/dp=p): energy (q²+p²)/2 ≈ 0.5, bounded drift
+run_lib "int.verlet.efinal" "$LIB_INT" "f=verletFinal(q->q,p->p,1.0,0.0,0.05,200); round((f[0]^2+f[1]^2)/2, 2)" "0.5"
+run_lib "int.verlet.shape" "$LIB_INT" "shape(verletOrbit(q->q,p->p,1.0,0.0,0.05,200))" "[201, 2]"
+run_lib "int.verlet.seed"  "$LIB_INT" "verletOrbit(q->q,p->p,1.0,0.0,0.05,3)[0]"      "[1, 0]"
+# Generator: first call returns the seed, then advances; cells are independent
+run_lib "int.gen.seed"     "$LIB_INT" "{ g=verlet(q->q,p->p,1.0,0.0,0.05); g(0)[0] }" "1"
+run_lib "int.gen.advances" "$LIB_INT" "{ g=verlet(q->q,p->p,1.0,0.0,0.05); g(0); round(g(0)[0], 5) }" "0.99875"
+run_lib "int.gen.indep"    "$LIB_INT" "{ g=verlet(q->q,p->p,1.0,0.0,0.05); h=verlet(q->q,p->p,1.0,0.0,0.05); g(0); h(0)[0] }" "1"
+# RK4: y'=y, y(0)=1 → e at t=1 ; vector RK4 returns (T, Y) with separate shapes
+run_lib "int.rk4.exp"      "$LIB_INT" "round(rk4Final((t,y)->y, 0.0, 1.0, 0.001, 1000), 5)" "2.71828"
+run_lib "int.rk4.vshapeT"  "$LIB_INT" "shape(rk4Orbit((t,y)->(y[1],-y[0]), 0.0, (1.0,0.0), 0.01, 50)[0])" "[51]"
+run_lib "int.rk4.vshapeY"  "$LIB_INT" "shape(rk4Orbit((t,y)->(y[1],-y[0]), 0.0, (1.0,0.0), 0.01, 50)[1])" "[51, 2]"
 
 # ── HDF5 (skipped unless built with --features hdf5) ─────────────────────────
 section "HDF5"

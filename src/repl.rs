@@ -395,13 +395,16 @@ pub fn import_file(path: &str, display: &str, env: &mut Env, verbose: bool) {
             for line in src.lines() {
                 let trimmed = line.trim();
                 if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
-                // Count braces only on the code portion (before any # comment)
-                let code = if let Some(i) = trimmed.find('#') { &trimmed[..i] } else { trimmed };
+                // Strip any trailing # comment: brace-count and buffer only the code
+                // portion, so inline comments inside a multi-line { } block don't
+                // swallow the lines joined after them.
+                let code = (if let Some(i) = trimmed.find('#') { &trimmed[..i] } else { trimmed }).trim_end();
+                if code.is_empty() { continue; }
                 for ch in code.chars() {
                     if ch == '{' { depth += 1; }
                     else if ch == '}' { depth -= 1; }
                 }
-                if buf.is_empty() { buf.push_str(trimmed); } else { buf.push(' '); buf.push_str(trimmed); }
+                if buf.is_empty() { buf.push_str(code); } else { buf.push(' '); buf.push_str(code); }
                 if depth <= 0 {
                     if buf.starts_with('!') {
                         bang_command(buf[1..].trim_start(), env);

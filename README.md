@@ -191,6 +191,27 @@ field, and timestep and returns a stateful solver; `heatSolverDisk(N, dx, dt,
 T_disk, T_air, a_disk, a_air)` is the convenience constructor used for `solver_demo`.
 Uses energy-conserving divergence-form FD with Neumann BCs.
 
+#### `integrators.math`
+
+Symplectic and explicit ODE integrators, built in pure mathlang on top of
+`iterate`/`scan` (no special builtins).
+
+```
+verletStep(dHdq, dHdp, dt)              — one velocity-Verlet step, (q,p) -> (q,p)
+verletOrbit(dHdq, dHdp, q0, p0, dt, n)  — whole phase-space orbit via scan
+verletFinal(dHdq, dHdp, q0, p0, dt, n)  — endpoint via iterate, O(1) stack
+verlet(dHdq, dHdp, q0, p0, dt)          — stateful generator (cell), for animate
+rk4Step / rk4Orbit / rk4Final           — classic RK4 for y' = f(t, y)
+```
+
+```zsh
+m -f integrators.math 'shape(verletOrbit(q->q, p->p, 1.0, 0.0, 0.05, 200))'  # [201, 2]
+```
+
+For a separable Hamiltonian `H(q,p) = T(p) + V(q)`, pass `dHdq = ∂H/∂q` (force) and
+`dHdp = ∂H/∂p` (velocity). The simple harmonic oscillator is `dHdq = q`, `dHdp = p`.
+Verlet is symplectic, so energy stays bounded over long runs.
+
 #### `conversions.math`
 
 Unit conversion factors and functions for physics, chemistry, and engineering.
@@ -520,6 +541,27 @@ step of `y' = (y₁, -y₀)`, traced for the full orbit:
 ```
 > rk4(f,y,h) = {k1=f(y); k2=f(y+h/2*k1); k3=f(y+h/2*k2); k4=f(y+h*k3); y+h/6*(k1+2*k2+2*k3+k4)}
 > scan(y -> rk4(v -> (v[1], -v[0]), y, 0.1), (1,0), 100)   # 101×2 trajectory
+```
+
+A **structured** tuple state — one whose fields are themselves vectors, such as a
+phase-space state `(q, p)` with vector `q`, `p` — is stacked field by field, so
+`scan` returns a tuple `(Q, P)` of `[n+1, d]` matrices rather than trying to flatten
+the state into one row. (A flat numeric tuple like `(a, b)` is still row-packed into
+`[n+1, 2]`.) This is what lets `scan(verletStep, (q0, p0), n)` trace a multi-DOF
+Hamiltonian trajectory directly.
+
+`examples/integrators.math` builds **symplectic and explicit integrators in pure
+mathlang** on top of these primitives — `verletStep`/`verletOrbit`/`verletFinal`
+(velocity-Verlet for separable Hamiltonians), `rk4Step`/`rk4Orbit`, and a stateful
+`verlet(…)` *generator* (a closure over a `cell`, the same pattern as `heat.math`)
+for use with `animate`. No special integrator builtins are needed — the step is a
+plain function and `iterate`/`scan` do the looping:
+
+```
+> !include integrators.math
+> step = verletStep(q -> q, p -> p, 0.05)    # SHO: dH/dq = q, dH/dp = p
+> shape(scan(step, (1.0, 0.0), 200))         # phase-space orbit
+result = [201, 2]
 ```
 
 `cumsum`, `cumprod`, and `diff` are running scans over a 1-D tensor or tuple

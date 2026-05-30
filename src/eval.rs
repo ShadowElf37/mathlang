@@ -4804,10 +4804,34 @@ pub fn scan_vals(args: Vec<Val>, env: &Env) -> Result<Val, String> {
 
 // Stack a list of states as the rows of a tensor (used by scan, and the engine
 // behind a vector trajectory). All-scalar states → a 1-D tensor [k]; equal-length
-// 1-D vectors/tuples → a 2-D tensor [k, d]. Real fast path; complex via maybe_real.
+// 1-D vectors / flat numeric tuples → a 2-D tensor [k, d]. A *structured* tuple
+// (one whose elements are themselves vectors/tensors, e.g. phase-space (q, p) with
+// vector q, p) is stacked component-wise: each field is scanned independently and
+// the result is a tuple of stacks, (Q, P). Real fast path; complex via maybe_real.
 fn stack_rows(states: Vec<Val>, who: &str) -> Result<Val, String> {
     if states.is_empty() {
         return Ok(Val::Tensor { data: TData::new(vec![]), shape: vec![0] });
+    }
+    // Structured tuple state: keep the fields apart and stack each one. A flat
+    // tuple of numbers stays in row mode below (so (a,b) → [k,2], as before).
+    if let Val::Tuple(first) = &states[0] {
+        if first.iter().any(|x| !matches!(x, Val::Num(_) | Val::Complex(..))) {
+            let arity = first.len();
+            let mut columns: Vec<Vec<Val>> = (0..arity).map(|_| Vec::with_capacity(states.len())).collect();
+            for s in states {
+                match s {
+                    Val::Tuple(items) if items.len() == arity => {
+                        for (j, it) in items.into_iter().enumerate() { columns[j].push(it); }
+                    }
+                    other => return Err(format!(
+                        "{who}: structured states must all be {arity}-tuples (got {})", fmt_val(&other))),
+                }
+            }
+            let fields = columns.into_iter()
+                .map(|c| stack_rows(c, who))
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(Val::Tuple(fields));
+        }
     }
     if matches!(states[0], Val::Num(_) | Val::Complex(..)) {
         let mut re = Vec::with_capacity(states.len());

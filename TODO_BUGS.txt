@@ -30,3 +30,16 @@ RECURSION GUARD; example files load-tested).
   replaced the recursion-only time-stepping idiom with both recursion (now noting
   the depth cap) and the scalable cell+sum flat-loop pattern, and corrected the
   "no mutable state" / negative-index gotchas.
+
+----------------------------------------------------------------------------
+Found later (2026-05-30, v0.21.1):
+
+[OPEN] BUG-6 zero-arg application of a non-zero-arity function silently returns
+  an empty tensor instead of erroring (or currying). `f = x -> x+1; f()` yields
+  `[]` (shape [0]) rather than an arity error. Surfaces in heat.math's *comment*
+  `mean(solver_demo())` (zero args) — the real animate path passes a frame index,
+  so `mean(solver_demo(0))` = 449.375 works. The integrators.math generators are
+  likewise meant to be called with an (ignored) argument. Same family as BUG-1:
+  a silent empty/garbage value instead of a clean error. Decide: error on arity
+  mismatch, or curry (partial application). Until fixed, always pass the ignored
+  arg to generator closures. (The heat.math comment was corrected to use an arg.)

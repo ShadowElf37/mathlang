@@ -82,7 +82,7 @@ heatSolverDisk(N, dx, dt, T_disk, T_air, a_disk, a_air) = {
 #
 # animate2D(solver_demo, 100)          — 100 frames at dt=0.2  (t = 0 … 20)
 # animate2D(solver_demo, 100, 15)      — same at 15 fps
-# mean(solver_demo())                  — advance one step, check mean ≈ 449.375
+# mean(solver_demo(0))                 — advance one step, check mean ≈ 449.375
 
 N_demo      = 20
 dx_demo     = 1.0
