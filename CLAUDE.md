@@ -1,1 +1,1 @@
-Any time we add a feature, write tests in tests.sh for it. Update the README and !help. Bump the version when large features or many features have been added. Bump the minor version on any finished bug fix or minor feature. Commit and push changes often.
+Any time we add a feature, write tests in tests.sh for it. Update the README and !help. Bump the minor version when large features or many features have been added. Bump the minor-minor version on any finished bug fix or minor feature. Commit and push changes often.
