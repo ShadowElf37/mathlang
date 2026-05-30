@@ -1273,6 +1273,21 @@ run    "bug7.matrix_shape_correct" 'shape(zeros(2,2))' "[2, 2]"
 _repl_check "bug7.matrix_display_newline" "zeros(2,2)" "result =
 "
 
+# ── !help <name> ──────────────────────────────────────────────────────────────
+# Builtin help: shows description and injected type signature
+_repl_check "help.builtin.sin"       "!help sin"          "sin\(x: num\) -> num"
+_repl_check "help.builtin.map"       "!help map"          "map\(f: fn"
+_repl_check "help.builtin.zeros"     "!help zeros"        "zeros"
+# Bang command help works with and without leading !
+_repl_check "help.bang.graph"        "!help !graph"       "!graph"
+_repl_check "help.bang.graph_nob"    "!help graph"        "!graph"
+_repl_check "help.bang.animate2D"    "!help !animate2D"   "animate2D"
+_repl_check "help.bang.type"         "!help !type"        "!type"
+_repl_check "help.bang.include"      "!help include"      "!include"
+_repl_check "help.bang.quit"         "!help !quit"        "quit"
+# Unknown name gives error message
+_repl_check "help.unknown"           "!help nosuchfn"     "no help for"
+
 # ── print summary ─────────────────────────────────────────────────────────────
 echo
 echo "================================"

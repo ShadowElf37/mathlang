@@ -78,6 +78,7 @@ result = 10
 | Command | Effect |
 |---------|--------|
 | `!help` | show syntax reference |
+| `!help <name>` | show detailed help for a builtin function or `!command` |
 | `!defs` | list all user-defined names |
 | `!include <file>` | load a `.math` file into the current session |
 | `!clear` | clear all user definitions |
