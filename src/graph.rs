@@ -99,6 +99,7 @@ pub fn eval_graph(args: &[Expr], env: &Env) -> Result<Val, String> {
 
 fn open_in_animator(rgb_buf: &[u8], w: u32, h: u32, label: &str) {
     let animator = find_animator();
+    eprintln!("graph: spawning '{animator}'");
     let mut child = match std::process::Command::new(&animator)
         .args(["--stdin", "--bare", "--title", label])
         .stdin(std::process::Stdio::piped())
@@ -107,6 +108,7 @@ fn open_in_animator(rgb_buf: &[u8], w: u32, h: u32, label: &str) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("graph: could not spawn animator '{animator}': {e}");
+            eprintln!("  hint: set WGPU_ANIMATOR=/path/to/wgpu_animator");
             return;
         }
     };

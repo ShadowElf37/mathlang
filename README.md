@@ -84,6 +84,11 @@ result = 10
 | `!version` | show version |
 | `!type <expr>` | show the type of a value, expression, or function |
 | `!print [text with {expr}]` | print text with interpolated expressions |
+| `!graph f [, a, b]` | plot f over [a,b] (default -10..10); saves PNG and opens animator |
+| `!animate2D T [fps]` | animate a 3-D tensor `[frames,H,W]`; spawns animator |
+| `!animate2D f n [fps]` | animate f(t) for t=0..n-1 |
+| `!animate2D f t0 t1 n [fps]` | animate f(t) over linspace(t0,t1,n) |
+| `!animate2D_raw …` | write MXFR frames to stdout (for piping) |
 | `!savetensor <var> <file>` | save tensor to binary `.mlt` file |
 | `!loadtensor <var> <file>` | load tensor from `.mlt` file |
 | `!savehdf5 <var> <file> …` | save tensor to HDF5 (requires `--features hdf5`) |
@@ -94,7 +99,7 @@ result = 10
 
 ## `.math` files
 
-A `.math` file is plain text: one expression or definition per line. Lines starting with `#` are comments. Braces `{ }` can span multiple lines. **All `!commands` work in `.math` files** — `!include`, `!print`, `!savetensor`, `!loadtensor`, `!savehdf5`, `!loadhdf5`, `!defs`, `!version`, etc.
+A `.math` file is plain text: one expression or definition per line. Lines starting with `#` are comments. Braces `{ }` can span multiple lines. **All `!commands` work in `.math` files** — `!include`, `!print`, `!savetensor`, `!loadtensor`, `!savehdf5`, `!loadhdf5`, `!defs`, `!version`, `!graph`, `!animate2D`, etc.
 
 ```
 # my_lib.math

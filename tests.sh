@@ -1234,6 +1234,45 @@ run "typehint.ret_hint"          'f(x: real): real = x^2; f(3)'  "9"
 run_err "typehint.ret_complex"   'f(x): real = x+1i; f(3)'
 run "typehint.num_any"           'f(x: num) = re(x); f(3+2i)'      "3"
 
+# ── Bug fixes (TODO_BUGS) ────────────────────────────────────────────────────
+section "BUG FIXES"
+
+# Bug 1a: bare single-arg typed lambda (f = x: tensor -> x)
+run "bug1a.bare_typed_lambda"        'f = x: tensor -> len(x); f([1,2,3])'     "3"
+run "bug1a.bare_typed_lambda_real"   'f = x: real -> x^2; f(3)'                "9"
+run "bug1a.bare_typed_lambda_nat"    'f = n: nat -> n+1; f(5)'                 "6"
+run_err "bug1a.bare_typed_lambda_reject" 'f = x: nat -> x; f(-1)'
+
+# Bug 1b: 1-element tensor should NOT be destructured when param has tensor hint
+run    "bug1b.tensor_hint_no_destruct"   'f = (x: tensor) -> len(x); f([5])'          "1"
+run    "bug1b.tensor_hint_multi_elem"    'f = (x: tensor) -> sum(x); f([1,2,3])'      "6"
+run_ok "bug1b.no_hint_still_works"      'f = (x, y) -> x + y; f([3, 4])'
+
+# Bug 2: !type <fn> shows the function name
+_repl_check "bug2.type_shows_name" "f = (x: tensor) -> x
+!type f" "^f\("
+
+_repl_check "bug2.type_builtin_name" "!type sin" "^sin\("
+
+# Bug 3: rand help text is accurate (rand(a,b) does NOT mean range [a,b])
+run    "bug3.rand_2args_shape"  'shape(rand(3,4))'   "[3, 4]"
+run    "bug3.rand_1arg_len"     'len(rand(5))'        "5"
+run_ok "bug3.rand_scalar"       'rand()'
+
+# Bug 4: tensordot has a builtin_sig entry
+_repl_check "bug4.tensordot_sig" "!type tensordot" "tensordot"
+
+# Bug 5: graph/animate2D moved to ! commands; calling as functions is now an error
+run_err "bug5.graph_fn_gone"        'graph(sin)'
+run_err "bug5.animate2D_fn_gone"    'animate2D([1,2;3,4])'
+
+# Bug 7: matrix display – value is correct regardless of display formatting
+run    "bug7.matrix_val_correct"   'zeros(2,2)[0,0]'   "0"
+run    "bug7.matrix_shape_correct" 'shape(zeros(2,2))' "[2, 2]"
+# Verify the REPL multiline display starts a new line before the matrix
+_repl_check "bug7.matrix_display_newline" "zeros(2,2)" "result =
+"
+
 # ── print summary ─────────────────────────────────────────────────────────────
 echo
 echo "================================"

@@ -32,7 +32,6 @@ pub const BUILTIN_FNS: &[&str] = &[
     "fft", "ifft",
     "sum", "prod", "integral", "deriv", "map",
     "sinc", "sech", "csch", "erf", "erfc", "j0", "j1", "jinc",
-    "graph", "animate2D", "animate2D_raw",
     "cell", "get", "set",
     // Tensor ops
     "tensor", "matrix", "zeros", "ones", "eye", "diag",
@@ -166,7 +165,7 @@ impl rustyline::completion::Completer for MathHelper {
         -> rustyline::Result<(usize, Vec<String>)>
     {
         if line.starts_with('!') {
-            let cmds = ["!clear", "!defs", "!exit", "!help", "!include ", "!loadhdf5 ", "!loadnpy ", "!loadtensor ", "!print ", "!q", "!quit", "!savehdf5 ", "!savenpy ", "!savetensor ", "!type ", "!version"];
+            let cmds = ["!animate2D ", "!animate2D_raw ", "!clear", "!defs", "!exit", "!graph ", "!help", "!include ", "!loadhdf5 ", "!loadnpy ", "!loadtensor ", "!print ", "!q", "!quit", "!savehdf5 ", "!savenpy ", "!savetensor ", "!type ", "!version"];
             return Ok((0, cmds.iter().filter(|&&c| c.starts_with(line)).map(|s| s.to_string()).collect()));
         }
         let start = line[..pos].rfind(|c: char| !c.is_alphanumeric() && c != '_').map_or(0, |i| i+1);
@@ -276,7 +275,12 @@ pub fn eval_line(line: &str, env: &mut Env, repl: bool) -> bool {
     if !vals.is_empty() {
         let v = if vals.len() == 1 { vals.into_iter().next().unwrap() } else { Val::Tuple(vals) };
         if repl {
-            println!("\x1b[2mresult = \x1b[0m{}", fmt_repl(&v));
+            let formatted = fmt_repl(&v);
+            if formatted.contains('\n') {
+                println!("\x1b[2mresult =\x1b[0m\n{formatted}");
+            } else {
+                println!("\x1b[2mresult = \x1b[0m{formatted}");
+            }
             env.define("result".into(), v);
         } else {
             println!("{}", fmt_val(&v));
@@ -757,6 +761,11 @@ fn bang_command(cmd: &str, env: &mut Env) {
         "help" => print!(concat!(
             "Commands:  !help  !include <file>  !defs  !clear  !version\n",
             "           !type <name>  — show type signature of a function or builtin\n",
+            "           !graph f [, a, b]  — plot f over [a,b] (default -10..10); opens animator\n",
+            "           !animate2D T [fps]  — animate 3-D tensor [frames,H,W]; spawns animator\n",
+            "           !animate2D f n [fps]  — animate f(t) for t=0..n-1\n",
+            "           !animate2D f t0 t1 n [fps]  — animate f(t) over linspace(t0,t1,n)\n",
+            "           !animate2D_raw …  — write MXFR to stdout (for manual piping)\n",
             "           !print [text with {{expr}} interpolation]  — print formatted output\n",
             "           !savetensor <var> <file>  — save tensor to binary .mlt file\n",
             "           !loadtensor <var> <file>  — load tensor from .mlt file\n",
@@ -781,7 +790,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "           lt leq gt geq eq neq  — comparison fns for use with map/filter\n",
             "Aggregates: sum(f,a,b)  prod(f,a,b)  sum(f,n)  sum(T)  sum(T,axis)\n",
             "           integral(f,a,b[,n])  deriv(f,x[,dx])\n",
-            "Grapher:   graph(f[,a,b])  saves graph_N.png to cwd\n\n",
+            "Grapher:   !graph f [, a, b]  — plot f, saves graph_N.png and opens animator\n",
             "Trig:      sin cos tan  asin acos atan atan2\n",
             "           sinh cosh tanh  sec csc cot\n",
             "Algebra:   sqrt cbrt abs sign heaviside  floor ceil round(x[,n]) trunc frac\n",
@@ -797,7 +806,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "Control:   if(cond,a,b)\n",
             "Spectral:  fft(T[,axes])  ifft(T[,axes])  — n-D DFT / inverse DFT on tensors\n",
             "           fft/ifft also accept (Re,Im[,axes]) for explicit complex input\n",
-            "Random:    rand()  rand(a,b)\n",
+            "Random:    rand()  rand(n)  rand(n1,n2,…)  — scalar, 1-D or n-D tensor in [0,1)\n",
             "Bitwise:   and or xor nand nor xnor not shl shr\n",
             "Complex:   i  re im abs arg conj  (all operators work on complex numbers)\n",
             "Constants: pi e phi inf i\n",
@@ -822,8 +831,6 @@ fn bang_command(cmd: &str, env: &mut Env) {
             "           T[..]  = all  T[n..]  = from n  T[..n]  = to n (tuples too)\n",
             "           sum(T,axis)  prod(T,axis)  mean std var on tensors\n",
             "           flatten(T)→1D  reduce(f,T)  map(f,T)  norm(T)\n",
-            "Animate:   animate2D(f,t0,t1,n[,fps])  animate2D(T[,fps])  — spawn animator\n",
-            "           animate2D_raw(…)  — write MXFR to stdout for manual piping\n",
         )),
         "include" | "import" => {
             if arg.is_empty() { eprintln!("usage: !include <file>"); return; }
@@ -837,6 +844,51 @@ fn bang_command(cmd: &str, env: &mut Env) {
                 } else {
                     import_file(&path, arg, env, true);
                 }
+            }
+        }
+        "graph" => {
+            if arg.is_empty() { eprintln!("usage: !graph f [, a, b]"); return; }
+            let toks = Lexer::new(arg).tokenize();
+            match Parser::new(toks).parse_repl() {
+                Ok((_, exprs)) if !exprs.is_empty() => {
+                    if let Err(e) = crate::graph::eval_graph(&exprs, env) {
+                        eprintln!("graph: {e}");
+                    }
+                }
+                Ok(_) => eprintln!("usage: !graph f [, a, b]"),
+                Err(e) => eprintln!("!graph: {e}"),
+            }
+        }
+        "animate2D" => {
+            if arg.is_empty() {
+                eprintln!("usage: !animate2D T [fps] | !animate2D f n [fps] | !animate2D f t0 t1 n [fps]");
+                return;
+            }
+            let toks = Lexer::new(arg).tokenize();
+            match Parser::new(toks).parse_repl() {
+                Ok((_, exprs)) if !exprs.is_empty() => {
+                    if let Err(e) = crate::animate::eval_animate2d(&exprs, env) {
+                        eprintln!("animate2D: {e}");
+                    }
+                }
+                Ok(_) => eprintln!("usage: !animate2D T [fps] | !animate2D f n [fps] | ..."),
+                Err(e) => eprintln!("!animate2D: {e}"),
+            }
+        }
+        "animate2D_raw" => {
+            if arg.is_empty() {
+                eprintln!("usage: !animate2D_raw T | !animate2D_raw f n | !animate2D_raw f t_vals | !animate2D_raw f t0 t1 n");
+                return;
+            }
+            let toks = Lexer::new(arg).tokenize();
+            match Parser::new(toks).parse_repl() {
+                Ok((_, exprs)) if !exprs.is_empty() => {
+                    if let Err(e) = crate::animate::eval_animate2d_raw(&exprs, env) {
+                        eprintln!("animate2D_raw: {e}");
+                    }
+                }
+                Ok(_) => eprintln!("usage: !animate2D_raw T | !animate2D_raw f n | ..."),
+                Err(e) => eprintln!("!animate2D_raw: {e}"),
             }
         }
         "version" => println!("mathlang v{}", env!("CARGO_PKG_VERSION")),
@@ -1079,7 +1131,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
                             Some(h) => h.display().to_string(),
                             None    => infer_type(body, &pmap, env).display().to_string(),
                         };
-                        println!("({}) -> {ret}", param_strs.join(", "));
+                        println!("{name}({}) -> {ret}", param_strs.join(", "));
                         return;
                     }
                     Val::Builtin(bname) => {

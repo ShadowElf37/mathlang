@@ -203,7 +203,7 @@ impl Env {
             "lt", "leq", "gt", "geq", "eq", "neq",
             "if",
             "fft", "ifft",
-            "sum", "prod", "integral", "deriv", "map", "graph", "animate2D", "animate2D_raw",
+            "sum", "prod", "integral", "deriv", "map",
             "cell", "get", "set",
             // Tensor ops
             "tensor", "matrix", "zeros", "ones", "eye", "diag",
@@ -450,8 +450,8 @@ pub fn builtin_sig(name: &str) -> Option<&'static str> {
         "cell"   => Some("cell(init: any) -> cell"),
         "get"    => Some("get(c: cell) -> any"),
         "set"    => Some("set(c: cell, val: any) -> any"),
-        "graph"  => Some("graph(f: fn, a: real, b: real) -> any"),
-        "animate2D" => Some("animate2D(T: tensor, fps: real) | animate2D(f: fn, n: nat, fps: real)"),
+        "rand"   => Some("rand() -> real | rand(n: nat) -> tensor | rand(n1: nat, n2: nat, …) -> tensor"),
+        "tensordot" => Some("tensordot(T1: tensor, T2: tensor, n: nat) | tensordot(T1, T2, (a, b)) | tensordot(T1, T2, ((a1,…),(b1,…)))"),
         _ => None,
     }
 }
@@ -483,7 +483,7 @@ pub fn is_protected(name: &str) -> bool {
         | "lt" | "leq" | "gt" | "geq" | "eq" | "neq"
         | "if"
         | "fft" | "ifft"
-        | "sum" | "prod" | "integral" | "deriv" | "map" | "graph" | "animate2D" | "animate2D_raw"
+        | "sum" | "prod" | "integral" | "deriv" | "map"
         | "cell" | "get" | "set"
         | "tensor" | "matrix" | "zeros" | "ones" | "eye" | "diag"
         | "shape" | "rows" | "cols" | "transpose" | "trace" | "norm"
@@ -3005,7 +3005,6 @@ impl<'a> Compiler<'a> {
                         }
                         // Special forms that require unevaluated Expr args — unsupported.
                         "sum" | "prod" | "integral" | "deriv"
-                        | "graph" | "animate2D" | "animate2D_raw"
                         | "map"   | "filter"    | "reduce" => return Err(()),
                         _ => {}
                     }
@@ -3532,9 +3531,9 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                 let arg0 = &args[0];
                 let destructured: Option<Vec<Val>> = match arg0 {
                     Val::Tuple(items) if items.len() == n => Some(items.clone()),
-                    Val::Tensor { data, shape } if shape.len() == 1 && data.len() == n
+                    Val::Tensor { data, shape } if shape.len() == 1 && data.len() == n && n > 1
                         => Some(data.iter().map(|&x| Val::Num(x)).collect()),
-                    Val::ComplexTensor { re, im, shape } if shape.len() == 1 && re.len() == n
+                    Val::ComplexTensor { re, im, shape } if shape.len() == 1 && re.len() == n && n > 1
                         => Some(re.iter().zip(im.iter()).map(|(&r, &i)| make_complex(r, i)).collect()),
                     _ => None,
                 };
@@ -3925,9 +3924,6 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                     "prod"     => return eval_agg(arg_exprs, env, true),
                     "integral" => return eval_integral(arg_exprs, env),
                     "deriv"    => return eval_deriv(arg_exprs, env),
-                    "graph"      => return crate::graph::eval_graph(arg_exprs, env),
-                    "animate2D"     => return crate::animate::eval_animate2d(arg_exprs, env),
-                    "animate2D_raw" => return crate::animate::eval_animate2d_raw(arg_exprs, env),
                     "map" => {
                         if arg_exprs.len() != 2 {
                             return Err("map(f, tuple) expects 2 args".into());

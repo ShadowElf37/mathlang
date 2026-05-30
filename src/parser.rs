@@ -556,6 +556,17 @@ impl Parser {
                 if *self.peek() == Token::Arrow {
                     self.bump();
                     Ok(Expr::Lambda(vec![Param { name, hint: None }], None, self.expr()?.into()))
+                } else if *self.peek() == Token::Colon {
+                    // `name: type -> body` — bare single-arg typed lambda
+                    let after_hint = Self::skip_colon_hint(&self.toks, self.pos);
+                    if matches!(self.toks.get(after_hint), Some(Token::Arrow)) {
+                        self.bump(); // consume ':'
+                        let hint = self.parse_type_hint()?;
+                        self.bump(); // consume '->'
+                        Ok(Expr::Lambda(vec![Param { name, hint: Some(hint) }], None, self.expr()?.into()))
+                    } else {
+                        Ok(Expr::Var(name))
+                    }
                 } else if *self.peek() == Token::LParen {
                     self.bump();
                     let mut args = vec![];
