@@ -13,7 +13,7 @@
    1g. LoadBuffer instruction: GPU-side tensor indexing for captured buffers inside
        GPU lambda bodies (v2 GPU feature, see CONSIDERATIONS.md §15)
 
-2. [SEPARATE BRANCH] GPU backend (see CONSIDERATIONS.md)
+2. [SEPARATE BRANCH] GPU backend (see CONSIDERATIONS.md) + PDE solvers
 
 2.5. Split eval.rs — it is too large; defer until the GPU eval path (gpu_eval.rs) is
    designed, so the split boundary is clear.
@@ -26,7 +26,9 @@
 4. aur package that puts animator and m executables in bin; hdf5 option?
 
 
-CONTINUAL:
+CONTINUAL FOR CLAUDE OPUS:
 
-0.1. Claude Opus try to tackle a complex project in pure mathlang, and see what's too difficult, awkward, unintuitive, verbose, messy, etc. from the perspective of an engineer/physicist/mathematician -- mark those as new bugs or feature requests
-0.2. Claude Opus search codebase for performance optimizations, bugs, unwise features, excessively delicate or complex code, technical debt, very old features that dont fit the style of the language, bad ergonomics or things that "should work" but don't, poor documentation
+0.1. Try to tackle a complex project in pure mathlang, and see what's too difficult, awkward, unintuitive, verbose, messy, unperformant, etc. from the perspective of an engineer/physicist/mathematician -- mark those as new bugs or feature requests
+0.2. Search codebase for performance optimizations, bugs, unwise features, excessively delicate or complex code, technical debt and dead code, very old features that dont fit the style of the language, bad ergonomics or things that "should work" but don't, poor or outdated documentation, idiotic ideas
+0.3. Recommend features that would improve the language, consistent with the style and goals of the language so far
+0.4. Generate a markdown report with your findings and opinions
