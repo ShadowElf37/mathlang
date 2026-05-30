@@ -124,7 +124,7 @@ fn highlight_print_args(arg: &str, user_fns: &[String], user_vars: &[String]) ->
             out.push(ch);
         }
     }
-    close_yellow!();
+    if in_yellow { out.push_str("\x1b[0m"); }
     out
 }
 
