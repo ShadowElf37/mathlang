@@ -1,6 +1,7 @@
 mod lexer;
 mod ast;
 mod parser;
+mod vm;
 mod eval;
 mod repl;
 mod graph;

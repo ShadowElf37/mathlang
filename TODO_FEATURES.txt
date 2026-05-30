@@ -6,10 +6,17 @@
    1b. Ranges in compiled bodies: lo..hi currently falls back; produces a 1-D tensor
    1c. Tensor literals: (1,2; 3,4) currently falls back; straightforward to compile
    1d. Recursive local functions: needs MakeRecFn or a Cell-based two-pass trick
-   1e. Loop instruction: bounded iteration (sum(f, lo, hi) style) compiled to a flat
-       loop in the VM — also the only recursion-analogue that is GPU-safe
-   1f. Move Instruction enum to src/vm.rs so src/gpu/ can import it without pulling
-       in all of eval.rs (deferred until eval.rs is split, see item 9)
+   1e. [DONE v0.21.1] Loop instruction: bounded iteration (sum/prod/iterate/scan)
+       compiled to a flat loop in the VM (Instruction::Loop(LoopForm, argc)) — the
+       only recursion-analogue that is GPU-safe. The compiler pushes the operands
+       (function + bounds/seed/count) and emits one Loop; run_vm drains them and
+       calls the shared Val-based cores (agg_vals/iterate_vals/scan_vals), so
+       results and errors are identical to tree-walk. These no longer force a
+       fallback when used inside a compiled lambda body. (integral/deriv/map/filter/
+       reduce still fall back — they need unevaluated args / bespoke handling.)
+   1f. [DONE v0.21.1] Moved the Instruction enum (+ new LoopForm) to src/vm.rs; it
+       depends only on crate::ast (Op, Expr), never on Val, so src/gpu/ can import
+       it without pulling in eval.rs. run_vm/Compiler stay in eval.rs (they need Val).
    1g. LoadBuffer instruction: GPU-side tensor indexing for captured buffers inside
        GPU lambda bodies (v2 GPU feature, see CONSIDERATIONS.md §15)
 
@@ -35,9 +42,9 @@
    5e. [DONE] Generalized stacking: vstack/hstack rank-promote (a 1-D vector becomes a
        row/column when stacked onto a matrix; scalar -> 1x1) via the to_block helper;
        append accepts a scalar seed; concat accepts scalars and empty operands.
-   Still open: 1e (VM Loop instruction) would let iterate/scan/sum compile *inside*
-   lambda bodies instead of forcing a tree-walk fallback — a perf/GPU concern tied to
-   the deferred gpu_eval path (item 2/2.5), not a correctness gap. Left for that work.
+   Follow-up: 1e (VM Loop instruction) — DONE v0.21.1 — now lets iterate/scan/sum/prod
+   compile *inside* lambda bodies via Instruction::Loop instead of forcing a tree-walk
+   fallback. FEAT-F is therefore complete.
 
 3. [PARTIAL] MXFR protocol: added channels field (C=1 scalar, C=3 RGB).
     Rgba32Float texture path in renderer; shader RGB passthrough branch.

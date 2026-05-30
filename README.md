@@ -486,7 +486,9 @@ result = 10
 
 For time-stepping and fixed-point iteration, `iterate` and `scan` apply a step
 function repeatedly in a **flat internal loop** — O(1) stack, scaling to millions
-of steps where deep recursion would overflow.
+of steps where deep recursion would overflow. They (along with `sum`/`prod`'s
+function forms) compile to a single bytecode loop, so they stay fast even when
+called from inside another user function.
 
 `iterate(f, x0, n)` returns `fⁿ(x0)` (f applied n times):
 

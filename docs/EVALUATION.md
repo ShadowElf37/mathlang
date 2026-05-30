@@ -6,9 +6,10 @@
 > `TODO_BUGS.txt`. All six feature recommendations (0.3/0.4 — FEAT-A…FEAT-E plus the
 > singleton literal) shipped in **v0.21.0**: `iterate`/`scan`, `cumsum`/`cumprod`/
 > `diff`, the `(x,)` singleton literal, and rank-promoting `vstack`/`hstack`/
-> `append`/`concat`. See `TODO_FEATURES.txt` §5. Only FEAT-F (the VM `Loop`
-> instruction, TODO 1e) is deferred — it's a perf/GPU concern tied to the separate
-> gpu_eval path, not a correctness gap.
+> `append`/`concat`. See `TODO_FEATURES.txt` §5. FEAT-F (the VM `Loop` instruction,
+> TODO 1e/1f) shipped in **v0.21.1**: `sum`/`prod`/`iterate`/`scan` now compile to a
+> flat `Instruction::Loop` even inside lambda bodies (no tree-walk fallback), and the
+> instruction set moved to `src/vm.rs` so the GPU path can import it standalone.
 
 This report covers the "CONTINUAL FOR CLAUDE OPUS" items: build something real in
 pure mathlang and note what's awkward (0.1), hunt for bugs / tech debt / outdated

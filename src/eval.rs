@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::cell::{Cell as StdCell, RefCell};
 use crate::ast::{Expr, BlockStmt, Op, Def, TypeHint};
+use crate::vm::{Instruction, LoopForm};
 
 // ── Recursion guard ───────────────────────────────────────────────────────────
 // User-function calls all funnel through apply_fn_direct. A thread-local depth
@@ -41,36 +42,9 @@ impl Drop for DepthGuard {
     }
 }
 
-// ── Bytecode instructions ─────────────────────────────────────────────────────
-// Flat instruction set for the stack-based bytecode VM.
-// Val::Fn lazily compiles its body to Vec<Instruction> on first call.
-
-#[derive(Debug, Clone)]
-pub enum Instruction {
-    PushNum(f64),
-    PushComplex(f64, f64),
-    LoadParam(usize),           // bind from args[i]
-    LoadCaptured(String),       // live env lookup (Cells, Fns, Tensors)
-    BinOp(Op),                  // pop 2, push 1
-    Neg,                        // pop 1, push 1
-    CallBuiltin(String, usize), // pop argc args, call builtin, push result
-    CallVal(usize),             // pop callee then argc args, call, push result
-    MakeTuple(usize),           // pop n, promote to Tensor if all-numeric
-    MakeArray(usize),           // pop n, always produce Tensor ([] syntax)
-    JumpIfFalse(usize),         // pop cond, jump to absolute pc if 0.0
-    Jump(usize),                // unconditional absolute jump
-    StoreLocal(usize),          // pop → locals[slot]
-    LoadLocal(usize),           // push locals[slot]
-    Pop,                        // discard top of stack
-    Return,                     // result is top of stack
-    Index,                      // pop idx then base → element (scalar indices only, no slices)
-    MakeClosure {               // build Val::Fn capturing free vars from the stack
-        params:    Vec<String>,
-        body:      Arc<Expr>,
-        code:      Arc<Vec<Instruction>>, // eagerly pre-compiled; empty = lazy fallback
-        free_vars: Vec<String>,           // names to pop from stack into captured env
-    },
-}
+// The bytecode instruction set (`Instruction`, `LoopForm`) lives in `src/vm.rs`
+// so the GPU backend can import it without pulling in this whole module (TODO 1f).
+// The VM executor (`run_vm`) and compiler (`Compiler`) stay here — they need `Val`.
 
 // ── TData: Arc-wrapped tensor data ────────────────────────────────────────────
 //
@@ -3232,10 +3206,24 @@ impl<'a> Compiler<'a> {
                             self.code[jmp_pos]  = Instruction::Jump(end_pc);
                             return Ok(());
                         }
-                        // Special forms that require unevaluated Expr args — unsupported.
-                        "sum" | "prod" | "integral" | "deriv"
-                        | "map"   | "filter"    | "reduce"
-                        | "iterate" | "scan" => return Err(()),
+                        // Bounded-iteration special forms compile to a flat VM Loop:
+                        // push the operands (function + bounds/seed/count), then a
+                        // single Loop instruction runs the iteration with no native-
+                        // stack growth — the only GPU-safe recursion analogue (TODO 1e).
+                        // f is evaluated once, exactly as the tree-walk front-end does.
+                        "sum" | "prod" | "iterate" | "scan" => {
+                            let form = match name.as_str() {
+                                "sum"     => LoopForm::Sum,
+                                "prod"    => LoopForm::Prod,
+                                "iterate" => LoopForm::Iterate,
+                                _         => LoopForm::Scan,
+                            };
+                            for a in arg_exprs { self.compile(a)?; }
+                            self.code.push(Instruction::Loop(form, arg_exprs.len()));
+                            return Ok(());
+                        }
+                        // Still need unevaluated Expr args / bespoke handling — fall back.
+                        "integral" | "deriv" | "map" | "filter" | "reduce" => return Err(()),
                         _ => {}
                     }
                     // Treat as builtin when not shadowed by a param/local.
@@ -3606,6 +3594,20 @@ fn run_vm(
                         Ok(items[i].clone())
                     }
                     other => Err(format!("vm []: cannot index {}", fmt_val(other))),
+                }?;
+                stack.push(result);
+            }
+            Instruction::Loop(form, argc) => {
+                // Operands were evaluated left-to-right onto the stack; pop them and
+                // run the loop in the same Val-based core the tree-walk path uses, so
+                // results and errors are identical — only the call frame is flat.
+                let start = stack.len() - *argc;
+                let call_args: Vec<Val> = stack.drain(start..).collect();
+                let result = match form {
+                    LoopForm::Sum     => agg_vals(call_args, env, false),
+                    LoopForm::Prod    => agg_vals(call_args, env, true),
+                    LoopForm::Iterate => iterate_vals(call_args, env),
+                    LoopForm::Scan    => scan_vals(call_args, env),
                 }?;
                 stack.push(result);
             }
@@ -4578,7 +4580,15 @@ fn resolve_index_item(item: &Expr, dim: usize, k: usize, env: &Env) -> Result<(b
     }
 }
 
+// Front-end: evaluate the argument expressions (left-to-right, so cell side
+// effects sequence as written) and hand off to the Val-based core. The VM's
+// `Loop` instruction calls `agg_vals` directly with operands already on the stack.
 pub fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> {
+    let vals = args.iter().map(|a| eval(a, env)).collect::<Result<Vec<_>, _>>()?;
+    agg_vals(vals, env, product)
+}
+
+pub fn agg_vals(args: Vec<Val>, env: &Env, product: bool) -> Result<Val, String> {
     let label = if product { "prod" } else { "sum" };
 
     /// Accumulate (acc_re, acc_im) with (r, i), either summing or multiplying.
@@ -4597,7 +4607,7 @@ pub fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> 
 
     // 1-arg form: sum(tuple), sum(tensor), sum(ComplexTensor)
     if args.len() == 1 {
-        return match eval(&args[0], env)? {
+        return match args.into_iter().next().unwrap() {
             Val::Tuple(items) => {
                 let mut acc_re = if product { 1.0 } else { 0.0 };
                 let mut acc_im = 0.0;
@@ -4625,10 +4635,13 @@ pub fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> 
     }
     // 2-arg form: sum(T, axis), sum(CT, axis), or sum(f, n)
     if args.len() == 2 {
-        return match eval(&args[0], env)? {
+        let mut it = args.into_iter();
+        let v0 = it.next().unwrap();
+        let v1 = it.next().unwrap();
+        return match v0 {
             // sum(T, axis) — reduce real tensor along one axis
             Val::Tensor { data, shape } => {
-                let axis = eval(&args[1], env)?.num(label)? as usize;
+                let axis = v1.num(label)? as usize;
                 if axis >= shape.len() {
                     return Err(format!("{label}: axis {axis} out of range for {}-D tensor", shape.len()));
                 }
@@ -4660,7 +4673,7 @@ pub fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> 
             }
             // sum(CT, axis) — reduce complex tensor along one axis
             Val::ComplexTensor { re, im, shape } => {
-                let axis = eval(&args[1], env)?.num(label)? as usize;
+                let axis = v1.num(label)? as usize;
                 if axis >= shape.len() {
                     return Err(format!("{label}: axis {axis} out of range for {}-D tensor", shape.len()));
                 }
@@ -4692,7 +4705,7 @@ pub fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> 
             }
             // sum(f, n) — sum f(k) for k in 0..n; f may return complex
             f @ (Val::Fn(..) | Val::Builtin(_)) => {
-                let n = eval(&args[1], env)?.num(label)? as i64;
+                let n = v1.num(label)? as i64;
                 if n < 0 {
                     return Err(format!("{label}: count must be non-negative, got {n}"));
                 }
@@ -4712,10 +4725,11 @@ pub fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> 
     if args.len() != 3 {
         return Err(format!("{label} expects {label}(T), {label}(T,axis), {label}(f,n), or {label}(f,lo,hi)"));
     }
-    // Evaluate f once so the bytecode cache is shared across the summation loop.
-    let f_val = eval(&args[0], env)?;
-    let start = eval(&args[1], env)?.num("start")? as i64;
-    let stop  = eval(&args[2], env)?.num("stop")?  as i64;
+    // f is already evaluated once (shared bytecode cache across the summation loop).
+    let mut it = args.into_iter();
+    let f_val = it.next().unwrap();
+    let start = it.next().unwrap().num("start")? as i64;
+    let stop  = it.next().unwrap().num("stop")?  as i64;
     let (init_re, init_im) = if product { (1.0, 0.0) } else { (0.0, 0.0) };
     let mut acc_re = init_re;
     let mut acc_im = init_im;
@@ -4734,9 +4748,19 @@ pub fn eval_iterate(args: &[Expr], env: &Env) -> Result<Val, String> {
         return Err("iterate(f, x0, n) expects 3 args".into());
     }
     // Evaluate f once so the bytecode cache is shared across the whole loop.
-    let f_val = eval(&args[0], env)?;
-    let mut state = eval(&args[1], env)?;
-    let n = eval(&args[2], env)?.num("iterate")? as i64;
+    let vals = args.iter().map(|a| eval(a, env)).collect::<Result<Vec<_>, _>>()?;
+    iterate_vals(vals, env)
+}
+
+// Val-based core, shared by the tree-walk front-end and the VM `Loop` instruction.
+pub fn iterate_vals(args: Vec<Val>, env: &Env) -> Result<Val, String> {
+    if args.len() != 3 {
+        return Err("iterate(f, x0, n) expects 3 args".into());
+    }
+    let mut it = args.into_iter();
+    let f_val = it.next().unwrap();
+    let mut state = it.next().unwrap();
+    let n = it.next().unwrap().num("iterate")? as i64;
     if n < 0 {
         return Err(format!("iterate: count must be non-negative, got {n}"));
     }
@@ -4753,9 +4777,19 @@ pub fn eval_scan(args: &[Expr], env: &Env) -> Result<Val, String> {
     if args.len() != 3 {
         return Err("scan(f, x0, n) expects 3 args".into());
     }
-    let f_val = eval(&args[0], env)?;
-    let mut state = eval(&args[1], env)?;
-    let n = eval(&args[2], env)?.num("scan")? as i64;
+    let vals = args.iter().map(|a| eval(a, env)).collect::<Result<Vec<_>, _>>()?;
+    scan_vals(vals, env)
+}
+
+// Val-based core, shared by the tree-walk front-end and the VM `Loop` instruction.
+pub fn scan_vals(args: Vec<Val>, env: &Env) -> Result<Val, String> {
+    if args.len() != 3 {
+        return Err("scan(f, x0, n) expects 3 args".into());
+    }
+    let mut it = args.into_iter();
+    let f_val = it.next().unwrap();
+    let mut state = it.next().unwrap();
+    let n = it.next().unwrap().num("scan")? as i64;
     if n < 0 {
         return Err(format!("scan: count must be non-negative, got {n}"));
     }

@@ -1208,6 +1208,27 @@ run "vm.deffunc.maplocal" "f(n) = { h(x) = x*n; map(h, [1,2,3]) }; f(5)"      "[
 run "vm.deffunc.chain"    "f(n) = { a(x) = x+1; b(x) = a(x)*n; b(2) }; f(4)"  "12"
 run "vm.deffunc.rec"      "f(n) = { g(x) = if(x<=0,0,x+g(x-1)); g(n) }; f(4)" "10"
 
+# ── VM: Loop instruction (sum/prod/iterate/scan compiled in lambda bodies) ───
+# These exercise the in-VM flat loop (TODO 1e): the special forms no longer force
+# a tree-walk fallback. Results must match the tree-walk path exactly.
+section "vm.loop"
+run "vm.loop.sum3"       "g(n) = sum(k->k*k, 1, n); g(10)"                     "385"
+run "vm.loop.sum2"       "g(n) = sum(k->k, n); g(5)"                           "10"
+run "vm.loop.sum1"       "h(t) = sum(t); h((1,2,3,4))"                         "10"
+run "vm.loop.prod3"      "f(n) = prod(k->k, 1, n); f(5)"                       "120"
+run "vm.loop.prod2"      "f(n) = prod(k->k+1, n); f(4)"                        "24"
+run "vm.loop.sumcap"     "f(n,m) = sum(k->k*m, 1, n); f(4, 10)"                "100"
+run "vm.loop.sumcplx"    "f(n) = sum(k->k*1i, 1, n); f(3)"                     "6i"
+run "vm.loop.iter"       "step(x)=x*2+1; go(n)=iterate(step, 0, n); go(5)"     "31"
+run "vm.loop.iter.cap"   "go(a,n)=iterate(x->x+a, 0, n); go(3, 4)"             "12"
+run "vm.loop.iter.big"   "f(n)=iterate(x->x+1, 0, n); f(1000000)"             "1000000"
+run "vm.loop.scan"       "go(n)=scan(k->k+1, 0, n); go(4)"                     "[0, 1, 2, 3, 4]"
+run "vm.loop.scan.vshape" "orbit(n)=scan(v->(v[0]+v[1], v[1]), (1,1), n); shape(orbit(2))" "[3, 2]"
+run "vm.loop.scan.vrow"   "orbit(n)=scan(v->(v[0]+v[1], v[1]), (1,1), n); orbit(2)[2]"     "[3, 1]"
+run "vm.loop.nested"     "f(n)=sum(j->iterate(x->x+1, 0, j), 1, n); f(4)"     "10"
+run "vm.loop.sum.range"  "f(n)=sum(k->2*k, 0, n); f(100)"                     "10100"
+run_err "vm.loop.iter.neg" "f(n)=iterate(g->g, 0, n); f(-1)"
+
 # ── HDF5 (skipped unless built with --features hdf5) ─────────────────────────
 section "HDF5"
 _H5F=$(mktemp /tmp/mlt_test_XXXXXX.h5)
