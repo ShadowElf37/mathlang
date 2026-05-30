@@ -1,9 +1,8 @@
-## diagonalize
+[1;4mdiagonalize[0m
 
 Diagonalizes a square matrix: returns (V, D, V_inv) where V @ D @ V_inv = A.
 
-**Examples:**
-```
-> diagonalize((4,1; 1,3))
+[1mExamples:[0m
+[2m> diagonalize((4,1; 1,3))
 result = (V, D, V_inv)
-```
+[0m

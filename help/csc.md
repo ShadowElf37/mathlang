@@ -1,11 +1,10 @@
-## csc
+[1;4mcsc[0m
 
 Computes the cosecant: 1/sin(x).
 
-**Examples:**
-```
-> csc(pi/2)
+[1mExamples:[0m
+[2m> csc(pi/2)
 result = 1
 > csc(pi/6)
 result = 2
-```
+[0m

@@ -1,11 +1,10 @@
-## squeeze
+[1;4msqueeze[0m
 
 Removes dimensions of size 1 from a tensor.
 
-**Examples:**
-```
-> squeeze(zeros(1, 3, 1))
+[1mExamples:[0m
+[2m> squeeze(zeros(1, 3, 1))
 result = [0, 0, 0]
 > shape(squeeze(zeros(1, 3, 1)))
 result = [3]
-```
+[0m

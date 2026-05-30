@@ -1,11 +1,10 @@
-## log10
+[1;4mlog10[0m
 
 Computes the base-10 logarithm.
 
-**Examples:**
-```
-> log10(100)
+[1mExamples:[0m
+[2m> log10(100)
 result = 2
 > log10(1000)
 result = 3
-```
+[0m

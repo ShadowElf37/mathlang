@@ -1,12 +1,11 @@
-## !savenpy
+[1;4m!savenpy[0m
 
-Save a tensor variable to a NumPy `.npy` file. Real tensors are saved as `f64`; complex tensors as `c128`.
+Save a tensor variable to a NumPy [33m.npy[0m file. Real tensors are saved as [33mf64[0m; complex tensors as [33mc128[0m.
 
-**Usage:** `!savenpy <var> <file.npy>`
+[1mUsage:[0m [33m!savenpy <var> <file.npy>[0m
 
-**Examples:**
-```
-> T = linspace(0, 1, 100)
+[1mExamples:[0m
+[2m> T = linspace(0, 1, 100)
 > !savenpy T data.npy
 saved T (100 elements) to data.npy
-```
+[0m

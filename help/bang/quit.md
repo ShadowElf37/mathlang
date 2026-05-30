@@ -1,5 +1,5 @@
-## !quit
+[1;4m!quit[0m
 
-Exit the mathlang REPL. Aliases: `!q`, `!exit`, or Ctrl-D.
+Exit the mathlang REPL. Aliases: [33m!q[0m, [33m!exit[0m, or Ctrl-D.
 
-**Usage:** `!q` | `!quit` | `!exit`
+[1mUsage:[0m [33m!q[0m | [33m!quit[0m | [33m!exit[0m

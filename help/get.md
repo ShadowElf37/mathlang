@@ -1,10 +1,9 @@
-## get
+[1;4mget[0m
 
 Reads the current value stored in a mutable cell.
 
-**Examples:**
-```
-> c = cell(42)
+[1mExamples:[0m
+[2m> c = cell(42)
 > get(c)
 result = 42
-```
+[0m

@@ -1,9 +1,8 @@
-## sech
+[1;4msech[0m
 
 Computes the hyperbolic secant: 1/cosh(x).
 
-**Examples:**
-```
-> sech(0)
+[1mExamples:[0m
+[2m> sech(0)
 result = 1
-```
+[0m

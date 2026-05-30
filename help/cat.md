@@ -1,13 +1,12 @@
-## cat
+[1;4mcat[0m
 
 Concatenates tensors along a specified axis.
 
-**Examples:**
-```
-> cat(0, eye(2), eye(2))
+[1mExamples:[0m
+[2m> cat(0, eye(2), eye(2))
 result =
 ⎡ 1  0 ⎤
 ⎢ 0  1 ⎥
 ⎢ 1  0 ⎥
 ⎣ 0  1 ⎦
-```
+[0m

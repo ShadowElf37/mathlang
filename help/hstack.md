@@ -1,11 +1,10 @@
-## hstack
+[1;4mhstack[0m
 
 Stacks two 2-D matrices horizontally (column-wise).
 
-**Examples:**
-```
-> hstack(eye(2), eye(2))
+[1mExamples:[0m
+[2m> hstack(eye(2), eye(2))
 result =
 ⎡ 1  0  1  0 ⎤
 ⎣ 0  1  0  1 ⎦
-```
+[0m

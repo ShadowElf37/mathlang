@@ -1,14 +1,13 @@
-## !animate2D_raw
+[1;4m!animate2D_raw[0m
 
-Like `!animate2D` but writes MXFR frames to stdout instead of opening the animator. Useful for piping to an external viewer or recording.
+Like [33m!animate2D[0m but writes MXFR frames to stdout instead of opening the animator. Useful for piping to an external viewer or recording.
 
-**Usage:**
-- `!animate2D_raw T` — stream a [frames, nx, ny] tensor as MXFR frames
-- `!animate2D_raw f n` — stream f(t) for t = 0..n-1
-- `!animate2D_raw f t0 t1 n` — stream f(t) over linspace(t0, t1, n)
+[1mUsage:[0m
+- [33m!animate2D_raw T[0m — stream a [frames, nx, ny] tensor as MXFR frames
+- [33m!animate2D_raw f n[0m — stream f(t) for t = 0..n-1
+- [33m!animate2D_raw f t0 t1 n[0m — stream f(t) over linspace(t0, t1, n)
 
-**Examples:**
-```
-> T = tensor((t,x,y) -> sin(x+t), 60, 50, 50)
+[1mExamples:[0m
+[2m> T = tensor((t,x,y) -> sin(x+t), 60, 50, 50)
 > !animate2D_raw T | wgpu_animator
-```
+[0m

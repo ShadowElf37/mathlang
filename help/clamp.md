@@ -1,11 +1,10 @@
-## clamp
+[1;4mclamp[0m
 
 Clamps values to a range [lo, hi]. Works element-wise on tensors.
 
-**Examples:**
-```
-> clamp(5, 0, 10)
+[1mExamples:[0m
+[2m> clamp(5, 0, 10)
 result = 5
 > clamp(15, 0, 10)
 result = 10
-```
+[0m

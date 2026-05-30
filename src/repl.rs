@@ -905,15 +905,21 @@ fn bang_command(cmd: &str, env: &mut Env) {
                 if let Some(text) = bang_text {
                     print!("{text}");
                 } else if let Ok(text) = std::fs::read_to_string(format!("help/{topic}.md")) {
-                    // Inject type signature before **Examples:**
+                    // Inject type signature on its own line before the Examples section.
+                    // The files are ANSI-encoded, so find "Examples:", then back up to
+                    // the preceding \n\n to insert cleanly outside any escape sequences.
                     let sig_line = builtin_sig(topic)
-                        .map(|s| format!("**Usage:** `{s}`\n\n"))
+                        .map(|s| format!("\x1b[1mUsage:\x1b[0m \x1b[33m{s}\x1b[0m\n\n"))
                         .unwrap_or_default();
-                    if let Some(idx) = text.find("**Examples:**") {
-                        print!("{}{}{}", &text[..idx], sig_line, &text[idx..]);
+                    if !sig_line.is_empty() {
+                        if let Some(ex) = text.find("Examples:") {
+                            let inject = text[..ex].rfind("\n\n").map(|p| p + 2).unwrap_or(ex);
+                            print!("{}{}{}", &text[..inject], sig_line, &text[inject..]);
+                        } else {
+                            print!("{text}\n{sig_line}");
+                        }
                     } else {
                         print!("{text}");
-                        if !sig_line.is_empty() { print!("\n{sig_line}"); }
                     }
                 } else {
                     eprintln!("no help for '{topic}'  (try !help with no argument)");

@@ -1,11 +1,10 @@
-## lcm
+[1;4mlcm[0m
 
 Computes the least common multiple of two integers.
 
-**Examples:**
-```
-> lcm(12, 18)
+[1mExamples:[0m
+[2m> lcm(12, 18)
 result = 36
 > lcm(4, 6)
 result = 12
-```
+[0m

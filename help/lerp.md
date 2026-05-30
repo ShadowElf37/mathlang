@@ -1,11 +1,10 @@
-## lerp
+[1;4mlerp[0m
 
 Linear interpolation: computes a*(1-t) + b*t. Works element-wise on tensors.
 
-**Examples:**
-```
-> lerp(0, 10, 0.5)
+[1mExamples:[0m
+[2m> lerp(0, 10, 0.5)
 result = 5
 > lerp((0, 0), (10, 10), 0.5)
 result = [5, 5]
-```
+[0m

@@ -1,11 +1,10 @@
-## !version
+[1;4m!version[0m
 
 Print the current mathlang version string.
 
-**Usage:** `!version`
+[1mUsage:[0m [33m!version[0m
 
-**Examples:**
-```
-> !version
+[1mExamples:[0m
+[2m> !version
 mathlang v0.19.1
-```
+[0m

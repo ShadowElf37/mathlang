@@ -1,9 +1,8 @@
-## csch
+[1;4mcsch[0m
 
 Computes the hyperbolic cosecant: 1/sinh(x).
 
-**Examples:**
-```
-> csch(1)
+[1mExamples:[0m
+[2m> csch(1)
 result = 0.8509...
-```
+[0m
