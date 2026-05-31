@@ -126,7 +126,7 @@ pub enum Val {
     /// Created with cell(v); read with get(c); written with set(c, v).
     Cell(Arc<RefCell<Val>>),
     /// A namespace: a map from member name to value, accessed with `ns.member`.
-    /// Builtin namespaces (operators, special, …) are registered in Env::new;
+    /// Builtin namespaces (ops, special, …) are registered in Env::new;
     /// user namespaces are built by an `!namespace`-headed included file.
     Namespace(Arc<HashMap<String, Val>>),
 }
@@ -236,7 +236,7 @@ impl Env {
         ] {
             vars.insert(name.to_string(), Val::Builtin(name.to_string()));
         }
-        // Standard namespaces (operators, solver, special, bits, …) — loaded by force.
+        // Standard namespaces (ops, solver, special, bits, …) — loaded by force.
         crate::ns::register_all(&mut vars);
         Self { vars: Arc::new(vars) }
     }
@@ -603,8 +603,8 @@ pub fn is_protected(name: &str) -> bool {
         | "lingrid"
         | "reshape" | "permute" | "cat" | "squeeze" | "unsqueeze"
         | "dim"
-        // Standard namespace names (operators, special, bits, …) are reserved too.
-        | "operators" | "solver" | "special" | "bits" | "stats" | "linalg" | "vec"
+        // Standard namespace names (ops, special, bits, …) are reserved too.
+        | "ops" | "solver" | "special" | "bits" | "stats" | "linalg" | "vec"
     )
 }
 
@@ -1237,7 +1237,7 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
         }};
     }
 
-    // New namespaced PDE functions (operators.*, solver.*) carry their own
+    // New namespaced PDE functions (ops.*, solver.*) carry their own
     // implementations in src/ns/. Route them out before the flat match (guarded
     // so the flat match still owns `vals` for every other name).
     if crate::ns::is_ns_builtin(name) {

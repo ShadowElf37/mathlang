@@ -863,7 +863,7 @@ The standard namespaces are:
 | `stats`   | `median mode var` (mean, std are flat) |
 | `linalg`  | `qr diagonalize tensordot outer eig_top eig_bot` |
 | `vec`     | `lerp clamp` |
-| `operators` / `solver` | differential operators and integrators — see below |
+| `ops` / `solver` | differential operators and integrators — see below |
 
 A namespace is a first-class value (`f = bits.xor; f(6,3)`). Names placed in a
 namespace are **not** reserved words, so `xor`, `lerp`, `var`, … are free to use
@@ -885,21 +885,21 @@ area(r) = k * r^2          # geo.area(2) → 12.566
 
 ## Differential operators and solvers
 
-The `operators` and `solver` namespaces provide gridded calculus for PDE work.
+The `ops` and `solver` namespaces provide gridded calculus for PDE work.
 Every finite-difference operator takes the physical grid spacing `dx` as a
 **required** argument — forgetting it (i.e. differentiating in index units) is a
 classic and silent source of wrong results.
 
-**`operators`** — spatial operators on a periodic grid:
+**`ops`** — spatial operators on a periodic grid:
 
 ```
-> operators.grad(T, dx)          # central diff along every axis → trailing component axis
-> operators.grad(T, dx, axis)    # derivative along one axis (same shape as T)
-> operators.div(V, dx)           # divergence of a vector field (trailing component axis)
-> operators.curl(V, dx)          # 2-D scalar curl
-> operators.lap(T, dx)           # Laplacian (periodic); operators.lap(T, dx, operators.neumann) for no-flux
-> operators.poisson(rhs, dx)     # spectral solve of ∇²u = rhs (zero-mean), returns a real field
-> operators.specgrad(T, dx)      # spectral derivative via i·k (machine-precision on smooth fields)
+> ops.grad(T, dx)          # central diff along every axis → trailing component axis
+> ops.grad(T, dx, axis)    # derivative along one axis (same shape as T)
+> ops.div(V, dx)           # divergence of a vector field (trailing component axis)
+> ops.curl(V, dx)          # 2-D scalar curl
+> ops.lap(T, dx)           # Laplacian (periodic); ops.lap(T, dx, ops.neumann) for no-flux
+> ops.poisson(rhs, dx)     # spectral solve of ∇²u = rhs (zero-mean), returns a real field
+> ops.specgrad(T, dx)      # spectral derivative via i·k (machine-precision on smooth fields)
 ```
 
 **`solver`** — time integration and stability diagnostics:

@@ -1448,10 +1448,10 @@ run "ns.flat.mean"       "mean((1,2,3,4))"           "2.5"
 # Namespace as a value, member errors, not callable
 run_match "ns.value.display" "bits"                  "namespace\{"
 run_err "ns.member.missing"  "bits.nope"             ""
-run_err "ns.not.callable"    "operators(3)"          ""
+run_err "ns.not.callable"    "ops(3)"          ""
 run_err "ns.protected"       "bits = 3"              ""
 # Member help + REPL guard
-_repl_check "ns.help.operators" "!help operators"    "grad"
+_repl_check "ns.help.ops" "!help ops"    "grad"
 _repl_check "ns.help.bits"      "!help bits"         "xor"
 _repl_check "ns.namespace.repl" "!namespace foo"     "only valid at the top"
 
@@ -1475,20 +1475,20 @@ rm -rf "$NSDIR"
 # ── PDE operators / solver ──────────────────────────────────────────────────────
 section "PDE OPERATORS"
 # d/dx sin = cos (central diff, O(dx^2)) and spectral (machine precision)
-run_match "op.grad.sin"    "N=64; dx=2*pi/N; x=tensor(k->2*pi*k/N,N); max(abs(operators.grad(map(sin,x),dx,0)-map(cos,x)))" "0.001[0-9]"
-run "op.specgrad.exact"    "N=64; dx=2*pi/N; x=tensor(k->2*pi*k/N,N); round(max(abs(operators.specgrad(map(sin,x),dx,0)-map(cos,x))),9)" "0"
+run_match "op.grad.sin"    "N=64; dx=2*pi/N; x=tensor(k->2*pi*k/N,N); max(abs(ops.grad(map(sin,x),dx,0)-map(cos,x)))" "0.001[0-9]"
+run "op.specgrad.exact"    "N=64; dx=2*pi/N; x=tensor(k->2*pi*k/N,N); round(max(abs(ops.specgrad(map(sin,x),dx,0)-map(cos,x))),9)" "0"
 # lap sin = -sin
-run_match "op.lap.sin"     "N=64; dx=2*pi/N; x=tensor(k->2*pi*k/N,N); max(abs(operators.lap(map(sin,x),dx)+map(sin,x)))" "0.000[0-9]"
+run_match "op.lap.sin"     "N=64; dx=2*pi/N; x=tensor(k->2*pi*k/N,N); max(abs(ops.lap(map(sin,x),dx)+map(sin,x)))" "0.000[0-9]"
 # poisson recovers the potential (machine precision); returns a REAL tensor
-run "op.poisson.real"      "N=32; dx=2*pi/N; x=tensor(k->2*pi*k/N,N); round(max(abs(operators.poisson(map(k-> -sin(k),x),dx)-map(sin,x))),9)" "0"
+run "op.poisson.real"      "N=32; dx=2*pi/N; x=tensor(k->2*pi*k/N,N); round(max(abs(ops.poisson(map(k-> -sin(k),x),dx)-map(sin,x))),9)" "0"
 # grad all-axes adds a trailing component axis
-run "op.grad.allaxes.shape" "shape(operators.grad(zeros(8,8),0.1))" "[8, 8, 2]"
-run "op.curl.const"        "N=16; dx=1.0; V=tensor((a,b,c)->if(c==0,-b*dx,a*dx),N,N,2); operators.curl(V,dx)[8,8]" "2"
+run "op.grad.allaxes.shape" "shape(ops.grad(zeros(8,8),0.1))" "[8, 8, 2]"
+run "op.curl.const"        "N=16; dx=1.0; V=tensor((a,b,c)->if(c==0,-b*dx,a*dx),N,N,2); ops.curl(V,dx)[8,8]" "2"
 # solver: y'=y → e
 run_match "solver.rk4.exp"  "solver.rk4((t,y)->y, 1, 0, 1, 100)" "2.71828182"
 run "solver.odeint.shape"   "shape(solver.odeint((t,y)->y, 1, linspace(0,1,11)))" "[11]"
 run "solver.cfl"            "solver.cfl((1,2,3), 0.1, 0.02)" "0.6"
-run_err "op.grad.needs.dx"  "operators.grad(zeros(4,4))" ""
+run_err "op.grad.needs.dx"  "ops.grad(zeros(4,4))" ""
 
 # ── iterate/scan non-finite guard + BUG-6 ───────────────────────────────────────
 section "GUARDS"

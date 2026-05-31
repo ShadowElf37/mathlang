@@ -1,4 +1,4 @@
-// operators — differential operators on gridded fields (PDE_ERGONOMICS §1, §3).
+// ops — differential operators on gridded fields (PDE_ERGONOMICS §1, §3).
 //
 // All finite-difference operators take the physical grid spacing `dx` as a
 // REQUIRED argument (never defaulted to 1) — the missing-dx mistake is exactly
@@ -19,7 +19,7 @@ pub fn members() -> std::collections::HashMap<String, Val> {
     let mut m: std::collections::HashMap<String, Val> =
         NAMES.iter().map(|n| (n.to_string(), Val::Builtin(n.to_string()))).collect();
     // Named BC sentinels (mathlang has no string type):
-    //   operators.lap(T, dx, operators.neumann)
+    //   ops.lap(T, dx, ops.neumann)
     m.insert("periodic".into(), Val::Num(0.0));
     m.insert("neumann".into(),  Val::Num(1.0));
     m
@@ -91,7 +91,7 @@ pub fn dispatch(name: &str, vals: Vec<Val>, _env: &crate::eval::Env) -> Result<V
         "curl"     => curl(vals),
         "lap"      => lap(vals),
         "poisson" | "invlap" => poisson(vals),
-        _ => Err(format!("operators: unknown member '{name}'")),
+        _ => Err(format!("ops: unknown member '{name}'")),
     }
 }
 
@@ -101,16 +101,16 @@ pub fn dispatch(name: &str, vals: Vec<Val>, _env: &crate::eval::Env) -> Result<V
 //              output shape = shape(T) ++ [ndim].
 fn grad(vals: Vec<Val>) -> Result<Val, String> {
     if vals.len() < 2 || vals.len() > 3 {
-        return Err("operators.grad(T, dx [, axis]) expects 2 or 3 args".into());
+        return Err("ops.grad(T, dx [, axis]) expects 2 or 3 args".into());
     }
     let mut it = vals.into_iter();
-    let (data, shape) = real_tensor(it.next().unwrap(), "operators.grad")?;
-    let dx = it.next().unwrap().num("operators.grad dx")?;
+    let (data, shape) = real_tensor(it.next().unwrap(), "ops.grad")?;
+    let dx = it.next().unwrap().num("ops.grad dx")?;
     let ndim = shape.len();
-    if ndim == 0 { return Err("operators.grad: need a tensor of rank >= 1".into()); }
+    if ndim == 0 { return Err("ops.grad: need a tensor of rank >= 1".into()); }
     if let Some(axv) = it.next() {
-        let axis = axv.num("operators.grad axis")? as usize;
-        if axis >= ndim { return Err(format!("operators.grad: axis {axis} out of range for rank-{ndim} tensor")); }
+        let axis = axv.num("ops.grad axis")? as usize;
+        if axis >= ndim { return Err(format!("ops.grad: axis {axis} out of range for rank-{ndim} tensor")); }
         return Ok(Val::Tensor { data: TData::new(central(&data, &shape, dx, axis)), shape });
     }
     stack_per_axis(&data, &shape, |d, s, a| central(d, s, dx, a))
@@ -119,16 +119,16 @@ fn grad(vals: Vec<Val>) -> Result<Val, String> {
 // specgrad(T, dx [, axis]) — spectral derivative via i*k.
 fn specgrad(vals: Vec<Val>) -> Result<Val, String> {
     if vals.len() < 2 || vals.len() > 3 {
-        return Err("operators.specgrad(T, dx [, axis]) expects 2 or 3 args".into());
+        return Err("ops.specgrad(T, dx [, axis]) expects 2 or 3 args".into());
     }
     let mut it = vals.into_iter();
-    let (data, shape) = real_tensor(it.next().unwrap(), "operators.specgrad")?;
-    let dx = it.next().unwrap().num("operators.specgrad dx")?;
+    let (data, shape) = real_tensor(it.next().unwrap(), "ops.specgrad")?;
+    let dx = it.next().unwrap().num("ops.specgrad dx")?;
     let ndim = shape.len();
-    if ndim == 0 { return Err("operators.specgrad: need a tensor of rank >= 1".into()); }
+    if ndim == 0 { return Err("ops.specgrad: need a tensor of rank >= 1".into()); }
     if let Some(axv) = it.next() {
-        let axis = axv.num("operators.specgrad axis")? as usize;
-        if axis >= ndim { return Err(format!("operators.specgrad: axis {axis} out of range for rank-{ndim} tensor")); }
+        let axis = axv.num("ops.specgrad axis")? as usize;
+        if axis >= ndim { return Err(format!("ops.specgrad: axis {axis} out of range for rank-{ndim} tensor")); }
         return Ok(spec_deriv(&data, &shape, dx, axis));
     }
     // all axes → trailing component axis. spec_deriv returns a Val; reduce to data.
@@ -166,13 +166,13 @@ fn spec_deriv(data: &[f64], shape: &[usize], dx: f64, axis: usize) -> Val {
 // div(V, dx) — divergence of a vector field. V shape = base ++ [ndim],
 // the trailing axis indexing the components; div = sum_a dV[..,a]/dx_a.
 fn div(vals: Vec<Val>) -> Result<Val, String> {
-    if vals.len() != 2 { return Err("operators.div(V, dx) expects 2 args".into()); }
+    if vals.len() != 2 { return Err("ops.div(V, dx) expects 2 args".into()); }
     let mut it = vals.into_iter();
-    let (data, shape) = real_tensor(it.next().unwrap(), "operators.div")?;
-    let dx = it.next().unwrap().num("operators.div dx")?;
+    let (data, shape) = real_tensor(it.next().unwrap(), "ops.div")?;
+    let dx = it.next().unwrap().num("ops.div dx")?;
     let (base, comps) = split_trailing(&shape)?;
     if comps != base.len() {
-        return Err(format!("operators.div: vector field has {comps} components but base is {}-D", base.len()));
+        return Err(format!("ops.div: vector field has {comps} components but base is {}-D", base.len()));
     }
     let base_total: usize = base.iter().product();
     let mut acc = vec![0.0; base_total];
@@ -186,13 +186,13 @@ fn div(vals: Vec<Val>) -> Result<Val, String> {
 
 // curl(V, dx) — 2-D scalar curl: dV_y/dx - dV_x/dy. V shape = (r,c,2).
 fn curl(vals: Vec<Val>) -> Result<Val, String> {
-    if vals.len() != 2 { return Err("operators.curl(V, dx) expects 2 args".into()); }
+    if vals.len() != 2 { return Err("ops.curl(V, dx) expects 2 args".into()); }
     let mut it = vals.into_iter();
-    let (data, shape) = real_tensor(it.next().unwrap(), "operators.curl")?;
-    let dx = it.next().unwrap().num("operators.curl dx")?;
+    let (data, shape) = real_tensor(it.next().unwrap(), "ops.curl")?;
+    let dx = it.next().unwrap().num("ops.curl dx")?;
     let (base, comps) = split_trailing(&shape)?;
     if base.len() != 2 || comps != 2 {
-        return Err("operators.curl: only the 2-D scalar curl is supported (V shape [r, c, 2])".into());
+        return Err("ops.curl: only the 2-D scalar curl is supported (V shape [r, c, 2])".into());
     }
     let base_total: usize = base.iter().product();
     let vx = extract_component(&data, base_total, 2, 0);
@@ -206,17 +206,17 @@ fn curl(vals: Vec<Val>) -> Result<Val, String> {
 // lap(T, dx [, bc]) — Laplacian. bc: 0=periodic (default), 1=neumann (no-flux).
 fn lap(vals: Vec<Val>) -> Result<Val, String> {
     if vals.len() < 2 || vals.len() > 3 {
-        return Err("operators.lap(T, dx [, bc]) expects 2 or 3 args".into());
+        return Err("ops.lap(T, dx [, bc]) expects 2 or 3 args".into());
     }
     let mut it = vals.into_iter();
-    let (data, shape) = real_tensor(it.next().unwrap(), "operators.lap")?;
-    let dx = it.next().unwrap().num("operators.lap dx")?;
+    let (data, shape) = real_tensor(it.next().unwrap(), "ops.lap")?;
+    let dx = it.next().unwrap().num("ops.lap dx")?;
     let neumann = match it.next() {
-        Some(v) => v.num("operators.lap bc")? != 0.0,
+        Some(v) => v.num("ops.lap bc")? != 0.0,
         None => false,
     };
     let ndim = shape.len();
-    if ndim == 0 { return Err("operators.lap: need a tensor of rank >= 1".into()); }
+    if ndim == 0 { return Err("ops.lap: need a tensor of rank >= 1".into()); }
     let total = data.len();
     let inv = 1.0 / (dx * dx);
     let mut out = vec![0.0; total];
@@ -235,13 +235,13 @@ fn lap(vals: Vec<Val>) -> Result<Val, String> {
 // poisson(rhs, dx) / invlap(T, dx) — spectral solve of  ∇²u = rhs  on the
 // periodic box, returning the zero-mean solution (k=0 mode set to 0).
 fn poisson(vals: Vec<Val>) -> Result<Val, String> {
-    if vals.len() != 2 { return Err("operators.poisson(rhs, dx) expects 2 args".into()); }
+    if vals.len() != 2 { return Err("ops.poisson(rhs, dx) expects 2 args".into()); }
     let mut it = vals.into_iter();
     let (mut re, mut im, shape) = as_complex_tensor(it.next().unwrap())
-        .map_err(|_| "operators.poisson: first arg must be a tensor".to_string())?;
-    let dx = it.next().unwrap().num("operators.poisson dx")?;
+        .map_err(|_| "ops.poisson: first arg must be a tensor".to_string())?;
+    let dx = it.next().unwrap().num("ops.poisson dx")?;
     let ndim = shape.len();
-    if ndim == 0 { return Err("operators.poisson: need a tensor of rank >= 1".into()); }
+    if ndim == 0 { return Err("ops.poisson: need a tensor of rank >= 1".into()); }
     fftn(&mut re, &mut im, &shape, true);
     for p in 0..re.len() {
         let multi = unravel(p, &shape);

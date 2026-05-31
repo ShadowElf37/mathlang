@@ -9,7 +9,7 @@
 # inverse-cascades upscale, so the field reaches a statistically-steady turbulent
 # state instead of decaying or blowing up. Visualises the vorticity ω directly.
 #
-# This version is built on the `operators` namespace — operators.grad / lap /
+# This version is built on the `ops` namespace — ops.grad / lap /
 # poisson all carry the physical grid spacing dx, which is what makes the
 # advection the right size. (An earlier hand-rolled version used bare index
 # differences with no dx, making advection ~dx²≈0.01× too weak: the forcing then
@@ -29,14 +29,14 @@ forcing = tensor((i,j) -> {
 }, N, N)
 
 # Streamfunction from vorticity: solve ∇²ψ = −ω on the periodic box.
-streamfn(w) = operators.poisson(-w, dx)
+streamfn(w) = ops.poisson(-w, dx)
 
 fluidStep(w) = {
   psi = streamfn(w);
   # advection −J(ψ,ω) via central differences along each axis
-  adv = operators.grad(psi, dx, 1) * operators.grad(w, dx, 0)
-      - operators.grad(psi, dx, 0) * operators.grad(w, dx, 1);
-  w + dt*(-adv + nu*operators.lap(w, dx) - mu*w + fa*forcing)
+  adv = ops.grad(psi, dx, 1) * ops.grad(w, dx, 0)
+      - ops.grad(psi, dx, 0) * ops.grad(w, dx, 1);
+  w + dt*(-adv + nu*ops.lap(w, dx) - mu*w + fa*forcing)
 }
 
 # Taylor-Green-like IC: clear vortex pairs seeded with noise

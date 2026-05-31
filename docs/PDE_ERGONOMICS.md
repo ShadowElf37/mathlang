@@ -1,7 +1,7 @@
 # PDE / field-computation ergonomics — proposed builtins
 
 > **Status (v0.22.0): implemented.** §1 (grad/div/curl/lap with required `dx`) and
-> §3 (poisson/invlap/specgrad) shipped in the `operators` namespace; §4 (rk4,
+> §3 (poisson/invlap/specgrad) shipped in the `ops` namespace; §4 (rk4,
 > odeint, cfl) in the `solver` namespace; §5's non-finite guard is in iterate/scan.
 > Deferred: the §2 grid-field type, and the IMEX/integrating-factor stepper (it
 > can't be made generic without knowing the stiff linear operator). See README

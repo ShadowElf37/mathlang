@@ -69,7 +69,7 @@ f = x, y -> x * y              # same, parens optional
 
 - **Parameter shadowing**: parameter names override globals. `f(pi)=pi+1; f(2)` → `3` (pi inside body is the parameter, not 3.14…).  
 - You **cannot** redefine the core built-in names (`step`, `sort`, `sin`, etc.) or the
-  namespace names (`operators`, `bits`, …). But names that live in a namespace are no
+  namespace names (`ops`, `bits`, …). But names that live in a namespace are no
   longer reserved, so `xor`, `lerp`, `var`, `qr`, … are free to use as your own variables.
 - Functions are first-class: pass as arguments, return from functions, store in variables.
 
@@ -311,11 +311,11 @@ vec.{lerp clamp}
 **Differential operators / solvers** (for PDE work — `dx` is always required):
 
 ```
-operators.grad(T, dx [, axis])     # central difference; all-axes form adds trailing component axis
-operators.div(V, dx)  operators.curl(V, dx)            # vector-field ops
-operators.lap(T, dx [, operators.neumann])             # Laplacian; default periodic, neumann = no-flux
-operators.poisson(rhs, dx)         # spectral ∇²u = rhs (zero-mean), returns a real field
-operators.specgrad(T, dx [, axis]) # spectral derivative via i·k
+ops.grad(T, dx [, axis])     # central difference; all-axes form adds trailing component axis
+ops.div(V, dx)  ops.curl(V, dx)            # vector-field ops
+ops.lap(T, dx [, ops.neumann])             # Laplacian; default periodic, neumann = no-flux
+ops.poisson(rhs, dx)         # spectral ∇²u = rhs (zero-mean), returns a real field
+ops.specgrad(T, dx [, axis]) # spectral derivative via i·k
 solver.rk4(f, y0, t0, t1, n)       # fixed-step RK4; f is dy/dt = f(t, y)
 solver.odeint(f, y0, ts)           # RK4 sampled at the times in ts → stacked trajectory
 solver.cfl(V, dx, dt)              # Courant number dt·max|V|/dx
