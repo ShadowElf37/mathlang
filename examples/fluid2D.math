@@ -48,4 +48,4 @@ omega0 = tensor((i,j) -> {
 st    = cell(omega0)
 frame = _ -> { w = get(st); set(st, fluidStep(w)); w }
 
-!animate2D frame, 2000, 30
+!animate2D frame, 2000, 60
