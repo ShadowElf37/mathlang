@@ -1358,6 +1358,13 @@ run "typehint.num_any"           'f(x: num) = re(x); f(3+2i)'      "3"
 # ── Bug fixes (TODO_BUGS) ────────────────────────────────────────────────────
 section "BUG FIXES"
 
+# Bug 8: block reassignment — variables can be updated within a block
+run "bug8.block_reassign_simple"   'f(x) = { y = x; y = y + 1; y }'           ""   # just define
+run "bug8.block_reassign_value"    'f(x) = { y = x; y = y + 1; y }; f(3)'     "4"
+run "bug8.block_reassign_chain"    'f(x) = { x = x + 1; x = x * 2; x }; f(3)' "8"
+run "bug8.block_reassign_treelike" '{ a = 1; a = 2; a }'                       "2"
+run "bug8.block_reassign_func"     '(x -> { y = x; y = y*y; y })(5)'           "25"
+
 # Bug 1a: bare single-arg typed lambda (f = x: tensor -> x)
 run "bug1a.bare_typed_lambda"        'f = x: tensor -> len(x); f([1,2,3])'     "3"
 run "bug1a.bare_typed_lambda_real"   'f = x: real -> x^2; f(3)'                "9"

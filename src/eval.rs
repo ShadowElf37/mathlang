@@ -3160,10 +3160,11 @@ impl<'a> Compiler<'a> {
             Expr::ImagLit(n) => self.code.push(Instruction::PushComplex(0.0, *n)),
 
             Expr::Var(name) => {
-                if let Some(i) = self.param_index(name) {
-                    self.code.push(Instruction::LoadParam(i));
-                } else if let Some(i) = self.local_index(name) {
+                // Locals shadow params (enables reassignment of params inside blocks).
+                if let Some(i) = self.local_index(name) {
                     self.code.push(Instruction::LoadLocal(i));
+                } else if let Some(i) = self.param_index(name) {
+                    self.code.push(Instruction::LoadParam(i));
                 } else if let Some(v) = self.captured.get(name.as_str()) {
                     match v {
                         // Inline scalar constants — avoids a HashMap lookup on every call.
@@ -3270,8 +3271,15 @@ impl<'a> Compiler<'a> {
                     match stmt {
                         BlockStmt::Def(Def::Var(name, body)) => {
                             self.compile(body)?;
-                            let slot = self.locals.len();
-                            self.locals.push(name.clone());
+                            // Reuse the existing slot if this name was already defined in
+                            // this block — enables in-order reassignment (x = 1; x = 2).
+                            let slot = if let Some(existing) = self.local_index(name) {
+                                existing
+                            } else {
+                                let s = self.locals.len();
+                                self.locals.push(name.clone());
+                                s
+                            };
                             self.code.push(Instruction::StoreLocal(slot));
                         }
                         // Non-recursive Def::Func compiles as a lambda stored in a local.
@@ -3280,8 +3288,13 @@ impl<'a> Compiler<'a> {
                         BlockStmt::Def(Def::Func(name, params, _ret, body)) => {
                             if expr_contains_var(body, name) { return Err(()); }
                             self.compile(&Expr::Lambda(params.clone(), None, Box::new(body.clone())))?;
-                            let slot = self.locals.len();
-                            self.locals.push(name.clone());
+                            let slot = if let Some(existing) = self.local_index(name) {
+                                existing
+                            } else {
+                                let s = self.locals.len();
+                                self.locals.push(name.clone());
+                                s
+                            };
                             self.code.push(Instruction::StoreLocal(slot));
                         }
                         BlockStmt::Expr(e) => {
@@ -3310,10 +3323,10 @@ impl<'a> Compiler<'a> {
                     self.captured,
                 );
                 for name in &free_vars {
-                    if let Some(i) = self.param_index(name) {
-                        self.code.push(Instruction::LoadParam(i));
-                    } else if let Some(i) = self.local_index(name) {
+                    if let Some(i) = self.local_index(name) {
                         self.code.push(Instruction::LoadLocal(i));
+                    } else if let Some(i) = self.param_index(name) {
+                        self.code.push(Instruction::LoadParam(i));
                     } else {
                         return Err(());
                     }

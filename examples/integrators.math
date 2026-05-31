@@ -9,7 +9,7 @@
 #
 # Usage:
 #   !include integrators.math
-#   step = verletStep(q -> q, p -> p, 0.05)     # SHO: dH/dq = q, dH/dp = p
+#   step = verletStep(q -> q, p -> p, 0.05)  # SHO: dV/dq = q, dT/dp = p
 #   orbit = scan(step, (1.0, 0.0), 200)         # 201 states, [201, 2] (cols q, p)
 #   final = iterate(step, (1.0, 0.0), 200)      # just the endpoint, (q, p)
 #   gen   = verlet(q->q, p->p, 1.0, 0.0, 0.05)  # stateful generator for animate
@@ -25,32 +25,103 @@
 #   dHdq = ∂H/∂q  (a function of q — the force term -dp/dt)
 #   dHdp = ∂H/∂p  (a function of p — the velocity dq/dt)
 # One step is the kick-drift-kick (KDK) sequence. Pure and time-reversible.
-verletStep(dHdq, dHdp, dt) = s -> {
+verletStep(dVdq, dTdp, dt) = s -> {
   q = s[0];  p = s[1];
-  ph = p  - dt/2 * dHdq(q);    # half kick
-  qn = q  + dt   * dHdp(ph);   # drift
-  pn = ph - dt/2 * dHdq(qn);   # half kick
+  ph = p  - dt/2 * dVdq(q);    # half kick
+  qn = q  + dt   * dTdp(ph);   # drift
+  pn = ph - dt/2 * dVdq(qn);   # half kick
   (qn, pn)
 }
 
 # Whole phase-space orbit [(q0,p0) … (qn,pn)] via scan (flat loop, O(1) stack).
-verletOrbit(dHdq, dHdp, q0, p0, dt, n) = scan(verletStep(dHdq, dHdp, dt), (q0, p0), n)
+verletOrbit(dVdq, dTdp, q0, p0, dt, n) = scan(verletStep(dVdq, dTdp, dt), (q0, p0), n)
 
 # Final state (q, p) after n steps via iterate — no intermediate storage.
-verletFinal(dHdq, dHdp, q0, p0, dt, n) = iterate(verletStep(dHdq, dHdp, dt), (q0, p0), n)
+verletFinal(dVdq, dTdp, q0, p0, dt, n) = iterate(verletStep(dVdq, dTdp, dt), (q0, p0), n)
 
 # Stateful generator: returns a 0-arg-style stepper. Each call returns the current
 # state, then advances by one dt (first call returns (q0, p0)). The argument is
 # ignored — same convention as heat.math's solver, so it plugs into animate.
-verlet(dHdq, dHdp, q0, p0, dt) = {
+verlet(dVdq, dTdp, q0, p0, dt) = {
   st   = cell((q0, p0));
-  step = verletStep(dHdq, dHdp, dt);
+  step = verletStep(dVdq, dTdp, dt);
   _ -> { s = get(st); set(st, step(s)); s }
 }
 
 # Total energy H(q,p) = T(p) + V(q) for diagnostics — pass the potentials directly.
 # (kept separate from the step so you can monitor drift without re-deriving H.)
 hamiltonian(T, V) = s -> T(s[1]) + V(s[0])
+
+
+# ── Tao's explicit symplectic integrator for nonseparable H(q,p) ───────────────
+#
+# Verlet's kick-drift-kick only works when H splits as T(p)+V(q). For a genuinely
+# nonseparable H — anything with a q·p cross-coupling, e.g. H = (1+q²)(1+p²)/2 —
+# neither the kick nor the drift is exactly solvable, so Verlet does not apply.
+#
+# Tao (2016, "Explicit symplectic approximation of nonseparable Hamiltonians",
+# Phys. Rev. E 94, 043303) makes ANY H explicitly integrable by doubling the phase
+# space: a shadow copy (x, y) mirrors (q, p), and an artificial spring of strength
+# ω binds the two copies so they track the true trajectory together. The extended
+# Hamiltonian H̄ = Hₐ + H_b + ω·H_c splits into three pieces, each with a closed-form
+# flow, so the whole step is explicit AND symplectic:
+#     Hₐ = H(q, y):              p -= t·∂qH(q,y);   x += t·∂pH(q,y)     (q,y frozen)
+#     H_b = H(x, p):             q += t·∂pH(x,p);   y -= t·∂qH(x,p)     (x,p frozen)
+#     H_c = ½‖q-x‖² + ½‖p-y‖²:   rotate the gap (q-x, p-y) by angle 2ωt, centroid fixed
+#
+# You supply the GRADIENT of H as two 2-arg functions of (q, p):
+#     dHdq(q, p) = ∂H/∂q,   dHdp(q, p) = ∂H/∂p
+# and the coupling ω. Larger ω binds the copies tighter (less splitting error) but
+# the φ_c rotation then needs ω·dt to stay modest for accuracy — ω in the tens with
+# a small dt is a sane starting point; tune ω·dt down until the energy drift is flat.
+#
+# Extended state is the 4-tuple (q, p, x, y), seeded with (q0, p0, q0, p0). One step
+# is the symmetric (2nd-order) Strang splitting φₐ(δ/2)∘φ_b(δ/2)∘φ_c(δ)∘φ_b(δ/2)∘φₐ(δ/2).
+# Works for scalar or vector q,p — the rotation broadcasts componentwise.
+taoStep(dHdq, dHdp, omega, dt) = {
+  c  = cos(2*omega*dt);
+  sn = sin(2*omega*dt);
+  s -> {
+    q = s[0];  p = s[1];  x = s[2];  y = s[3];
+    # φₐ(dt/2): q,y frozen — kick p, drift x
+    p = p - dt/2 * dHdq(q, y);
+    x = x + dt/2 * dHdp(q, y);
+    # φ_b(dt/2): x,p frozen — drift q, kick y
+    q = q + dt/2 * dHdp(x, p);
+    y = y - dt/2 * dHdq(x, p);
+    # φ_c(dt): rotate the gap (q-x, p-y) by 2ω·dt about the fixed centroid
+    dq = q - x;  dp = p - y;   sq = q + x;  sp = p + y;
+    rq = dq*c + dp*sn;   rp = dp*c - dq*sn;
+    q = (sq + rq)/2;  x = (sq - rq)/2;
+    p = (sp + rp)/2;  y = (sp - rp)/2;
+    # φ_b(dt/2)
+    q = q + dt/2 * dHdp(x, p);
+    y = y - dt/2 * dHdq(x, p);
+    # φₐ(dt/2)
+    p = p - dt/2 * dHdq(q, y);
+    x = x + dt/2 * dHdp(q, y);
+    (q, p, x, y)
+  }
+}
+
+# Whole orbit via scan. Extended scalar state row-packs into [n+1, 4]; columns 0,1
+# are the physical (q, p) trajectory (columns 2,3 are the shadow copy x,y).
+taoOrbit(dHdq, dHdp, omega, q0, p0, dt, n) = scan(taoStep(dHdq, dHdp, omega, dt), (q0, p0, q0, p0), n)
+
+# Final physical state (q, p) after n steps via iterate — drops the shadow copy.
+taoFinal(dHdq, dHdp, omega, q0, p0, dt, n) = {
+  s = iterate(taoStep(dHdq, dHdp, omega, dt), (q0, p0, q0, p0), n);
+  (s[0], s[1])
+}
+
+# Stateful generator (same animate-friendly convention as verlet): each
+# call returns the current physical (q, p), then advances one dt; first call yields
+# (q0, p0). The shadow copy is carried internally and never exposed.
+tao(dHdq, dHdp, omega, q0, p0, dt) = {
+  st   = cell((q0, p0, q0, p0));
+  step = taoStep(dHdq, dHdp, omega, dt);
+  _ -> { s = get(st); set(st, step(s)); (s[0], s[1]) }
+}
 
 # ── Classic explicit RK4 — for a general first-order ODE  y' = f(t, y) ─────────
 #
@@ -80,3 +151,14 @@ shoEnergy = s -> (s[0]^2 + s[1]^2) / 2               # H(q,p) = (q²+p²)/2
 shoStep   = verletStep(q -> q, p -> p, 0.05)
 shoOrbit  = scan(shoStep, (1.0, 0.0), 200)           # ~1.6 periods, [201, 2]
 shoDrift  = shoEnergy(iterate(shoStep, (1.0, 0.0), 200)) - 0.5   # energy drift ≈ 0
+
+# ── Demo: a nonseparable Hamiltonian  H(q,p) = (1 + q²)(1 + p²) / 2 ─────────────
+#
+# The q·p coupling makes H nonseparable, so Verlet cannot touch it — but Tao's
+# method handles it. Gradient: ∂H/∂q = q(1+p²),  ∂H/∂p = p(1+q²). Starting from
+# (q,p) = (1,0) the energy is H = (2)(1)/2 = 1; a good symplectic step keeps H
+# bounded near 1 with no secular drift.
+nonsepEnergy = s -> (1 + s[0]^2) * (1 + s[1]^2) / 2     # H(q,p) = (1+q²)(1+p²)/2
+nonsepStep   = taoStep((q,p) -> q*(1+p^2), (q,p) -> p*(1+q^2), 40.0, 0.01)
+nonsepOrbit  = scan(nonsepStep, (1.0, 0.0, 1.0, 0.0), 500)        # [501, 4], cols q,p,x,y
+nonsepDrift  = nonsepEnergy(iterate(nonsepStep, (1.0, 0.0, 1.0, 0.0), 500)) - 1.0  # ≈ 0
