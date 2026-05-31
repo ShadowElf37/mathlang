@@ -53,11 +53,24 @@
 
 4. aur package that puts animator and m executables in bin; hdf5 option?
 
-6. Tame the builtin namespace. The global builtin table has ~150 names, and every
-   one is a reserved word: is_protected() (src/eval.rs ~563) bars the user from
-   binding any of them as a variable. Two distinct costs — discoverability (the
-   flat !help list is a wall) and namespace pollution (the reserved-word set). Do
-   them in two stages, lowest-risk first:
+6. [DONE v0.22.0] Tame the builtin namespace — done via Rust-backed namespaces with
+   `.` syntax instead of the prelude-extraction route below. Implemented (see
+   src/ns/, docs/CODEBASE.md §Namespaces):
+   - Val::Namespace + Expr::Member (Token::Dot in the parser postfix loop); the VM
+     falls back to tree-walk on Member.
+   - Standard namespaces registered by force in Env::new (crate::ns::register_all):
+     special, bits, stats, linalg, vec (relocated niche builtins, exposed as
+     Val::Builtin("<bare>") so the giant eval_builtin match is untouched), plus
+     operators/solver (NEW PDE functions implemented in their own module files,
+     routed from eval_builtin via crate::ns::dispatch).
+   - Curated relocation (kept common names flat — inv det solve fft ifft mean std
+     norm sort roll shift eig eigvals …): the moved names left both the flat
+     Env::new table and is_protected, so they are no longer reserved words.
+   - User namespaces: `!namespace <name>` at the top of an included .math file +
+     `private` to keep a definition internal (import_file / NsBuild).
+   The original two-stage plan (6a prelude extraction in .math, 6b additive
+   namespace values) is kept below for history; we did the Rust-namespace variant
+   of 6b directly (and went beyond it by relocating, not just aliasing).
 
    6a. [PRIMARY] Prelude extraction. Move the "library tier" builtins — special
        functions and niche stats (erf, erfc, j0/j1, jinc, gaussian_cdf, sinc,

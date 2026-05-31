@@ -251,14 +251,14 @@ run "agg.reduce_max"  "reduce((a,b) -> if(a>b,a,b), (3,1,4,1,5))" "5"
 section "STATISTICS"
 run "stat.mean"       "mean((1,2,3,4,5))"    "3"
 run "stat.mean_even"  "mean((1,2,3,4))"      "2.5"
-run "stat.median_odd" "median((3,1,4,1,5))"  "3"
-run "stat.median_even" "median((1,2,3,4))"   "2.5"
-run "stat.mode"       "mode((1,2,2,3))"      "2"
+run "stat.median_odd" "stats.median((3,1,4,1,5))"  "3"
+run "stat.median_even" "stats.median((1,2,3,4))"   "2.5"
+run "stat.mode"       "stats.mode((1,2,2,3))"      "2"
 run "stat.min_tup"    "min((3,1,4,1,5))"     "1"
 run "stat.max_tup"    "max((3,1,4,1,5))"     "5"
 run "stat.sum_tup"    "sum((1,2,3,4,5))"     "15"
 run_match "stat.std"  "std((2,4,4,4,5,5,7,9))" "^2"
-run_match "stat.var"  "var((2,4,4,4,5,5,7,9))" "^4"
+run_match "stat.var"  "stats.var((2,4,4,4,5,5,7,9))" "^4"
 
 # ── Higher-order functions ────────────────────────────────────────────────────
 section "HIGHER-ORDER"
@@ -321,7 +321,7 @@ run_match "trig.csc_pi2"  "csc(pi/2)"    "^1"
 run_match "trig.cot_pi4"  "cot(pi/4)"    "^0\\.9999|^1"
 run       "trig.deg"      "deg(pi)"      "180"
 run_match "trig.rad"      "rad(180)"     "3.14159"
-run_match "trig.sinc0"    "sinc(0)"      "^1"
+run_match "trig.sinc0"    "special.sinc(0)"      "^1"
 
 # ── Algebra functions ─────────────────────────────────────────────────────────
 section "ALGEBRA"
@@ -368,34 +368,34 @@ run "nt.fact0"        "fact(0)"       "1"
 run "nt.fact1"        "fact(1)"       "1"
 run "nt.fact5"        "fact(5)"       "120"
 run "nt.fact10"       "10!"           "3628800"
-run "nt.delta0"       "delta(0)"      "1"
-run "nt.delta_nz"     "delta(5)"      "0"
+run "nt.delta0"       "special.delta(0)"      "1"
+run "nt.delta_nz"     "special.delta(5)"      "0"
 
 # ── Bitwise ───────────────────────────────────────────────────────────────────
 section "BITWISE"
-run "bit.and"   "and(12,10)"   "8"
-run "bit.or"    "or(12,10)"    "14"
-run "bit.xor"   "xor(12,10)"   "6"
-run "bit.shl"   "shl(1,8)"     "256"
-run "bit.shr"   "shr(256,4)"   "16"
-run "bit.nor"   "nor(0,0)"     "1"
-run "bit.nor2"  "nor(1,0)"     "0"
-run "bit.xnor"  "xnor(5,5)"    "1"
-run "bit.xnor2" "xnor(5,3)"    "0"
+run "bit.and"   "bits.and(12,10)"   "8"
+run "bit.or"    "bits.or(12,10)"    "14"
+run "bit.xor"   "bits.xor(12,10)"   "6"
+run "bit.shl"   "bits.shl(1,8)"     "256"
+run "bit.shr"   "bits.shr(256,4)"   "16"
+run "bit.nor"   "bits.nor(0,0)"     "1"
+run "bit.nor2"  "bits.nor(1,0)"     "0"
+run "bit.xnor"  "bits.xnor(5,5)"    "1"
+run "bit.xnor2" "bits.xnor(5,3)"    "0"
 
 # ── Special functions ─────────────────────────────────────────────────────────
 section "SPECIAL FUNCTIONS"
-run_match "spec.erf0"    "erf(0)"      "^0"
-run_match "spec.erf1"    "erf(1)"      "0.84270"
-run_match "spec.erfc0"   "erfc(0)"     "^1"
-run_match "spec.erfc1"   "erfc(1)"     "0.15729"
-run       "spec.sinc0"   "sinc(0)"     "1"
-run_match "spec.sinc1"   "sinc(1)"     "0.84147"
-run_match "spec.j0_0"    "j0(0)"       "^1"
-run_match "spec.j0_z"    "j0(2.4048)"  "^0\\.00|^-0\\.00"
-run_match "spec.j1_0"    "j1(0)"       "^0"
-run_match "spec.sech0"   "sech(0)"     "^1"
-run_match "spec.csch1"   "csch(1)"     "0.8509"
+run_match "spec.erf0"    "special.erf(0)"      "^0"
+run_match "spec.erf1"    "special.erf(1)"      "0.84270"
+run_match "spec.erfc0"   "special.erfc(0)"     "^1"
+run_match "spec.erfc1"   "special.erfc(1)"     "0.15729"
+run       "spec.sinc0"   "special.sinc(0)"     "1"
+run_match "spec.sinc1"   "special.sinc(1)"     "0.84147"
+run_match "spec.j0_0"    "special.j0(0)"       "^1"
+run_match "spec.j0_z"    "special.j0(2.4048)"  "^0\\.00|^-0\\.00"
+run_match "spec.j1_0"    "special.j1(0)"       "^0"
+run_match "spec.sech0"   "special.sech(0)"     "^1"
+run_match "spec.csch1"   "special.csch(1)"     "0.8509"
 
 # ── linspace / range ─────────────────────────────────────────────────────────
 section "LINSPACE / RANGE"
@@ -521,9 +521,9 @@ run "cmpfn.map"   "map(partial(lt,3), (1,2,3,4,5))" "[0, 0, 0, 1, 1]"
 
 # ── gaussian ──────────────────────────────────────────────────────────────────
 section "GAUSSIAN"
-run_match "gauss.peak"   "gaussian(0,0,1)"   "0.39894"
-run_match "gauss.cdf_0"  "gaussian_cdf(0,0,1)" "^0\\.5"
-run_match "gauss.cdf_inf" "gaussian_cdf(100,0,1)" "^1"
+run_match "gauss.peak"   "special.gaussian(0,0,1)"   "0.39894"
+run_match "gauss.cdf_0"  "special.gaussian_cdf(0,0,1)" "^0\\.5"
+run_match "gauss.cdf_inf" "special.gaussian_cdf(100,0,1)" "^1"
 
 # ── eps (Levi-Civita) ─────────────────────────────────────────────────────────
 section "EPSILON"
@@ -694,36 +694,36 @@ run     "eigvals.diag"       "eigvals((4,0; 0,3))"                        "[4, 3
 run     "eigvals.diag3"      "eigvals((5,0,0; 0,3,0; 0,0,1))"            "[5, 3, 1]"
 run_match "eigvals.trace"    "sum(eigvals((4,1; 1,3)))"                   "^7|^6\.9"
 run_match "eigvals.det"      "prod(eigvals((4,1; 1,3)))"                  "^11|^10\.9"
-run     "eig_top.diag.val"   "eig_top((9,0; 0,1))[0]"                    "9"
-run     "eig_bot.diag.val"   "eig_bot((9,0; 0,1))[0]"                    "1"
-run_match "eig_top.val"      "eig_top((4,1; 1,3))[0]"                    "^4\\.6"
-run_match "eig_bot.val"      "eig_bot((4,1; 1,3))[0]"                    "^2\\.3"
-run_match "eig_top.residual" "norm((4,1; 1,3) @ eig_top((4,1; 1,3))[1] - eig_top((4,1; 1,3))[0] * eig_top((4,1; 1,3))[1])" "^0|^[0-9]e-"
-run_match "eig_bot.residual" "norm((4,1; 1,3) @ eig_bot((4,1; 1,3))[1] - eig_bot((4,1; 1,3))[0] * eig_bot((4,1; 1,3))[1])" "^0|^[0-9]e-"
+run     "eig_top.diag.val"   "linalg.eig_top((9,0; 0,1))[0]"                    "9"
+run     "eig_bot.diag.val"   "linalg.eig_bot((9,0; 0,1))[0]"                    "1"
+run_match "eig_top.val"      "linalg.eig_top((4,1; 1,3))[0]"                    "^4\\.6"
+run_match "eig_bot.val"      "linalg.eig_bot((4,1; 1,3))[0]"                    "^2\\.3"
+run_match "eig_top.residual" "norm((4,1; 1,3) @ linalg.eig_top((4,1; 1,3))[1] - linalg.eig_top((4,1; 1,3))[0] * linalg.eig_top((4,1; 1,3))[1])" "^0|^[0-9]e-"
+run_match "eig_bot.residual" "norm((4,1; 1,3) @ linalg.eig_bot((4,1; 1,3))[1] - linalg.eig_bot((4,1; 1,3))[0] * linalg.eig_bot((4,1; 1,3))[1])" "^0|^[0-9]e-"
 run_match "eig.ortho"        "dot(col(eig((4,1; 1,3))[1], 0), col(eig((4,1; 1,3))[1], 1))" "^0|-?0\\.0000"
 run     "eig.consistency"    "norm(eig((4,1; 1,3))[0] - eigvals((4,1; 1,3)))"  "0"
 run_err "eigvals.nonsquare"  "eigvals((1,2; 3,4; 5,6))"
 run_err "eig.nonsquare"      "eig((1,2,3; 4,5,6))"
-run_err "eig_top.nonsquare"  "eig_top((1,2,3; 4,5,6))"
-run_err "eig_bot.nonsquare"  "eig_bot((1,2,3; 4,5,6))"
+run_err "eig_top.nonsquare"  "linalg.eig_top((1,2,3; 4,5,6))"
+run_err "eig_bot.nonsquare"  "linalg.eig_bot((1,2,3; 4,5,6))"
 
 # ── QR decomposition ──────────────────────────────────────────────────────────
 section "QR DECOMPOSITION"
-run_match "qr.roundtrip"   "norm(qr((3,1; 1,2))[0] @ qr((3,1; 1,2))[1] - (3,1; 1,2))"           "^0|^[0-9]e-"
-run_match "qr.orthogonal"  "norm(transpose(qr((3,1; 1,2))[0]) @ qr((3,1; 1,2))[0] - eye(2))"    "^0|^[0-9]e-"
-run       "qr.q_shape"     "shape(qr((3,1; 1,2))[0])"                                            "[2, 2]"
-run       "qr.r_shape"     "shape(qr((3,1; 1,2))[1])"                                            "[2, 2]"
-run       "qr.rect_q"      "shape(qr((1,2; 3,4; 5,6))[0])"                                       "[3, 3]"
-run       "qr.rect_r"      "shape(qr((1,2; 3,4; 5,6))[1])"                                       "[3, 2]"
-run_match "qr.rect_roundtrip" "norm(qr((1,2; 3,4; 5,6))[0] @ qr((1,2; 3,4; 5,6))[1] - (1,2; 3,4; 5,6))" "^0|^[0-9]e-"
-run_err   "qr.fat"         "qr((1,2,3; 4,5,6))"
+run_match "qr.roundtrip"   "norm(linalg.qr((3,1; 1,2))[0] @ linalg.qr((3,1; 1,2))[1] - (3,1; 1,2))"           "^0|^[0-9]e-"
+run_match "qr.orthogonal"  "norm(transpose(linalg.qr((3,1; 1,2))[0]) @ linalg.qr((3,1; 1,2))[0] - eye(2))"    "^0|^[0-9]e-"
+run       "qr.q_shape"     "shape(linalg.qr((3,1; 1,2))[0])"                                            "[2, 2]"
+run       "qr.r_shape"     "shape(linalg.qr((3,1; 1,2))[1])"                                            "[2, 2]"
+run       "qr.rect_q"      "shape(linalg.qr((1,2; 3,4; 5,6))[0])"                                       "[3, 3]"
+run       "qr.rect_r"      "shape(linalg.qr((1,2; 3,4; 5,6))[1])"                                       "[3, 2]"
+run_match "qr.rect_roundtrip" "norm(linalg.qr((1,2; 3,4; 5,6))[0] @ linalg.qr((1,2; 3,4; 5,6))[1] - (1,2; 3,4; 5,6))" "^0|^[0-9]e-"
+run_err   "qr.fat"         "linalg.qr((1,2,3; 4,5,6))"
 
 # ── diagonalize ───────────────────────────────────────────────────────────────
 section "DIAGONALIZE"
-run_match "diag.roundtrip" "norm(diagonalize((4,1; 1,3))[0] @ diagonalize((4,1; 1,3))[1] @ diagonalize((4,1; 1,3))[2] - (4,1; 1,3))" "^0|^[0-9]e-"
-run_match "diag.d_is_diag" "diagonalize((4,1; 1,3))[1][0,1]"                                     "^0|-?0\\.0000"
-run_match "diag.d_eigs"    "diagonalize((4,1; 1,3))[1][0,0]"                                     "^4\\.6"
-run_err   "diag.nonsquare" "diagonalize((1,2,3; 4,5,6))"
+run_match "diag.roundtrip" "norm(linalg.diagonalize((4,1; 1,3))[0] @ linalg.diagonalize((4,1; 1,3))[1] @ linalg.diagonalize((4,1; 1,3))[2] - (4,1; 1,3))" "^0|^[0-9]e-"
+run_match "diag.d_is_diag" "linalg.diagonalize((4,1; 1,3))[1][0,1]"                                     "^0|-?0\\.0000"
+run_match "diag.d_eigs"    "linalg.diagonalize((4,1; 1,3))[1][0,0]"                                     "^4\\.6"
+run_err   "diag.nonsquare" "linalg.diagonalize((1,2,3; 4,5,6))"
 
 # ── hstack / vstack / tomat ───────────────────────────────────────────────────
 section "HSTACK / VSTACK / TOMAT"
@@ -789,10 +789,10 @@ run "sl.tup_range"     "(10,20,30,40)[1..2]"               "[20, 30]"
 
 # ── outer product ─────────────────────────────────────────────────────────────
 section "OUTER PRODUCT"
-run "out.shape_2d"    "shape(outer(ones(2), ones(3)))"             "[2, 3]"
-run "out.sum_ones"    "sum(outer(ones(3), ones(4)))"               "12"
-run "out.vals"        "outer(tensor(i->i+1,2), tensor(i->i+1,3))[1,2]" "6"
-run "out.3d_shape"    "shape(outer(ones(2), outer(ones(3), ones(4))))" "[2, 3, 4]"
+run "out.shape_2d"    "shape(linalg.outer(ones(2), ones(3)))"             "[2, 3]"
+run "out.sum_ones"    "sum(linalg.outer(ones(3), ones(4)))"               "12"
+run "out.vals"        "linalg.outer(tensor(i->i+1,2), tensor(i->i+1,3))[1,2]" "6"
+run "out.3d_shape"    "shape(linalg.outer(ones(2), linalg.outer(ones(3), ones(4))))" "[2, 3, 4]"
 
 # ── reshape ───────────────────────────────────────────────────────────────────
 section "RESHAPE"
@@ -848,8 +848,8 @@ section "TENSOR STATS"
 run "ts.mean_2d"      "mean(ones(3,3))"                            "1"
 run "ts.mean_vals"    "mean(matrix((i,j)->i*2+j, 2, 2))"          "1.5"
 run "ts.std_zeros"    "std(ones(3,3))"                             "0"
-run "ts.var_uniform"  "var(ones(3,3))"                             "0"
-run "ts.median_2d"    "median(matrix((i,j)->i*3+j+1, 2, 3))"      "3.5"
+run "ts.var_uniform"  "stats.var(ones(3,3))"                             "0"
+run "ts.median_2d"    "stats.median(matrix((i,j)->i*3+j+1, 2, 3))"      "3.5"
 
 # ── reduce on tensors ────────────────────────────────────────────────────────
 section "REDUCE TENSOR"
@@ -889,14 +889,14 @@ run "s2.contraction"  "sum(k->tensor(i->i+1,3)[k]*tensor(i->i+1,3)[k], dim(eye(3
 
 # ── tensordot ─────────────────────────────────────────────────────────────────
 section "TENSORDOT"
-run "td.matmul_scalar"  "tensordot(eye(3), eye(3), 1)"                     "⎡ 1  0  0 ⎤ ⎢ 0  1  0 ⎥ ⎣ 0  0  1 ⎦"
-run "td.dot_1d"         "tensordot(tensor(i->i+1,3), tensor(i->i+1,3), 1)" "14"
-run "td.pair_matmul"    "tensordot(eye(3), eye(3), (1,0))"                 "⎡ 1  0  0 ⎤ ⎢ 0  1  0 ⎥ ⎣ 0  0  1 ⎦"
-run "td.pair_dot"       "tensordot(tensor(i->i+1,3), tensor(i->i+1,3), (0,0))" "14"
-run "td.2x3_3x2"        "shape(tensordot(zeros(2,3), zeros(3,2), 1))"      "[2, 2]"
-run "td.outer_via_0"    "shape(tensordot(zeros(2,3), zeros(4,5), 0))"      "[2, 3, 4, 5]"
-run "td.3d_contract"    "shape(tensordot(zeros(2,3,4), zeros(4,5), 1))"    "[2, 3, 5]"
-run "td.scalar_result"  "tensordot(tensor(i->1,4), tensor(i->1,4), 1)"     "4"
+run "td.matmul_scalar"  "linalg.tensordot(eye(3), eye(3), 1)"                     "⎡ 1  0  0 ⎤ ⎢ 0  1  0 ⎥ ⎣ 0  0  1 ⎦"
+run "td.dot_1d"         "linalg.tensordot(tensor(i->i+1,3), tensor(i->i+1,3), 1)" "14"
+run "td.pair_matmul"    "linalg.tensordot(eye(3), eye(3), (1,0))"                 "⎡ 1  0  0 ⎤ ⎢ 0  1  0 ⎥ ⎣ 0  0  1 ⎦"
+run "td.pair_dot"       "linalg.tensordot(tensor(i->i+1,3), tensor(i->i+1,3), (0,0))" "14"
+run "td.2x3_3x2"        "shape(linalg.tensordot(zeros(2,3), zeros(3,2), 1))"      "[2, 2]"
+run "td.outer_via_0"    "shape(linalg.tensordot(zeros(2,3), zeros(4,5), 0))"      "[2, 3, 4, 5]"
+run "td.3d_contract"    "shape(linalg.tensordot(zeros(2,3,4), zeros(4,5), 1))"    "[2, 3, 5]"
+run "td.scalar_result"  "linalg.tensordot(tensor(i->1,4), tensor(i->1,4), 1)"     "4"
 
 # ── ComplexTensor construction ────────────────────────────────────────────────
 section "COMPLEX TENSOR"
@@ -1050,29 +1050,29 @@ run "roll.vs_shift"     "roll([1,2,3], 1, 0)[0]"               "3"
 
 # ── lerp ──────────────────────────────────────────────────────────────────────
 section "LERP"
-run "lerp.scalar_0"     "lerp(0, 10, 0)"                       "0"
-run "lerp.scalar_1"     "lerp(0, 10, 1)"                       "10"
-run "lerp.scalar_half"  "lerp(0, 10, 0.5)"                     "5"
-run "lerp.scalar_frac"  "lerp(2, 8, 0.25)"                     "3.5"
-run "lerp.vec_t"        "lerp(0, 10, [0, 0.5, 1])"             "[0, 5, 10]"
-run "lerp.vec_ab"       "lerp([0,0], [10,20], 0.5)"            "[5, 10]"
-run "lerp.all_vecs"     "lerp([1,2], [3,4], [0,1])"            "[1, 4]"
-run "lerp.mask_blend"   "lerp(500, 250, [0,0,1,1])"            "[500, 500, 250, 250]"
-# lerp(a,b,0)=a and lerp(a,b,1)=b for tensors too
-run "lerp.tensor_t0"    "lerp([1,2,3], [4,5,6], 0)"            "[1, 2, 3]"
-run "lerp.tensor_t1"    "lerp([1,2,3], [4,5,6], 1)"            "[4, 5, 6]"
+run "lerp.scalar_0"     "vec.lerp(0, 10, 0)"                       "0"
+run "lerp.scalar_1"     "vec.lerp(0, 10, 1)"                       "10"
+run "lerp.scalar_half"  "vec.lerp(0, 10, 0.5)"                     "5"
+run "lerp.scalar_frac"  "vec.lerp(2, 8, 0.25)"                     "3.5"
+run "lerp.vec_t"        "vec.lerp(0, 10, [0, 0.5, 1])"             "[0, 5, 10]"
+run "lerp.vec_ab"       "vec.lerp([0,0], [10,20], 0.5)"            "[5, 10]"
+run "lerp.all_vecs"     "vec.lerp([1,2], [3,4], [0,1])"            "[1, 4]"
+run "lerp.mask_blend"   "vec.lerp(500, 250, [0,0,1,1])"            "[500, 500, 250, 250]"
+# vec.lerp(a,b,0)=a and vec.lerp(a,b,1)=b for tensors too
+run "lerp.tensor_t0"    "vec.lerp([1,2,3], [4,5,6], 0)"            "[1, 2, 3]"
+run "lerp.tensor_t1"    "vec.lerp([1,2,3], [4,5,6], 1)"            "[4, 5, 6]"
 
 # ── clamp ─────────────────────────────────────────────────────────────────────
 section "CLAMP"
-run "clamp.above"       "clamp(5, 0, 3)"                       "3"
-run "clamp.below"       "clamp(-1, 0, 3)"                      "0"
-run "clamp.inside"      "clamp(2, 0, 3)"                       "2"
-run "clamp.at_lo"       "clamp(0, 0, 3)"                       "0"
-run "clamp.at_hi"       "clamp(3, 0, 3)"                       "3"
-run "clamp.vec"         "clamp([-1, 0.5, 2], 0, 1)"            "[0, 0.5, 1]"
-run "clamp.vec_lo"      "clamp([-5,-3,-1], -2, 0)"             "[-2, -2, -1]"
-run "clamp.negrange"    "clamp(-1.5, -2, -1)"                  "-1.5"
-run_err "clamp.bad_range"   "clamp(1, 5, 0)"
+run "clamp.above"       "vec.clamp(5, 0, 3)"                       "3"
+run "clamp.below"       "vec.clamp(-1, 0, 3)"                      "0"
+run "clamp.inside"      "vec.clamp(2, 0, 3)"                       "2"
+run "clamp.at_lo"       "vec.clamp(0, 0, 3)"                       "0"
+run "clamp.at_hi"       "vec.clamp(3, 0, 3)"                       "3"
+run "clamp.vec"         "vec.clamp([-1, 0.5, 2], 0, 1)"            "[0, 0.5, 1]"
+run "clamp.vec_lo"      "vec.clamp([-5,-3,-1], -2, 0)"             "[-2, -2, -1]"
+run "clamp.negrange"    "vec.clamp(-1.5, -2, -1)"                  "-1.5"
+run_err "clamp.bad_range"   "vec.clamp(1, 5, 0)"
 
 # ── !savetensor / !loadtensor ─────────────────────────────────────────────────
 section "SAVETENSOR / LOADTENSOR"
@@ -1426,6 +1426,78 @@ _repl_check "help.bang.include"      "!help include"      "!include"
 _repl_check "help.bang.quit"         "!help !quit"        "quit"
 # Unknown name gives error message
 _repl_check "help.unknown"           "!help nosuchfn"     "no help for"
+
+# ── Namespaces ────────────────────────────────────────────────────────────────
+section "NAMESPACES"
+# Relocated builtins are reachable via their namespace…
+run "ns.bits.xor"        "bits.xor(6, 3)"            "5"
+run "ns.bits.shl"        "bits.shl(1, 4)"            "16"
+run "ns.vec.lerp"        "vec.lerp(0, 10, 0.5)"      "5"
+run "ns.vec.clamp"       "vec.clamp(12, 0, 10)"      "10"
+run "ns.stats.median"    "stats.median((3,1,2,5,4))" "3"
+run_match "ns.special.erf" "special.erf(1)"          "0.8427"
+run_match "ns.linalg.outer" "linalg.outer((1,2),(3,4))" "3  4"
+# …and are no longer bound flat (freed as reserved words)
+run_err "ns.flat.xor.gone"   "xor(6,3)"              ""
+run_err "ns.flat.lerp.gone"  "lerp(0,10,0.5)"        ""
+run "ns.freed.reserved"      "xor = 5; xor"          "5"
+# Common builtins stay flat
+run_ok "ns.flat.inv"     "inv(eye(2))"               ""
+run_ok "ns.flat.fft"     "fft((1,0,0,0))"            ""
+run "ns.flat.mean"       "mean((1,2,3,4))"           "2.5"
+# Namespace as a value, member errors, not callable
+run_match "ns.value.display" "bits"                  "namespace\{"
+run_err "ns.member.missing"  "bits.nope"             ""
+run_err "ns.not.callable"    "operators(3)"          ""
+run_err "ns.protected"       "bits = 3"              ""
+# Member help + REPL guard
+_repl_check "ns.help.operators" "!help operators"    "grad"
+_repl_check "ns.help.bits"      "!help bits"         "xor"
+_repl_check "ns.namespace.repl" "!namespace foo"     "only valid at the top"
+
+# ── User-defined namespace (!namespace + private) ───────────────────────────────
+section "USER NAMESPACE"
+NSDIR=$(mktemp -d)
+cat > "$NSDIR/geo.math" <<'GEOEOF'
+!namespace geo
+private k = 3
+area(r) = k * r^2
+tau = 2 * k
+GEOEOF
+run_lib "uns.public.fn"   "$NSDIR/geo.math" "geo.area(2)"  "12"
+run_lib "uns.public.var"  "$NSDIR/geo.math" "geo.tau"      "6"
+# private member is hidden but still usable internally (area uses k)
+run_lib "uns.private.use" "$NSDIR/geo.math" "geo.area(4)"  "48"
+got=$("$M" -f "$NSDIR/geo.math" "geo.k" 2>&1)
+if echo "$got" | grep -qiE 'no member|error'; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); FAILS+=("uns.private.hidden | got='$(norm "$got")'"); fi
+rm -rf "$NSDIR"
+
+# ── PDE operators / solver ──────────────────────────────────────────────────────
+section "PDE OPERATORS"
+# d/dx sin = cos (central diff, O(dx^2)) and spectral (machine precision)
+run_match "op.grad.sin"    "N=64; dx=2*pi/N; x=tensor(k->2*pi*k/N,N); max(abs(operators.grad(map(sin,x),dx,0)-map(cos,x)))" "0.001[0-9]"
+run "op.specgrad.exact"    "N=64; dx=2*pi/N; x=tensor(k->2*pi*k/N,N); round(max(abs(operators.specgrad(map(sin,x),dx,0)-map(cos,x))),9)" "0"
+# lap sin = -sin
+run_match "op.lap.sin"     "N=64; dx=2*pi/N; x=tensor(k->2*pi*k/N,N); max(abs(operators.lap(map(sin,x),dx)+map(sin,x)))" "0.000[0-9]"
+# poisson recovers the potential (machine precision); returns a REAL tensor
+run "op.poisson.real"      "N=32; dx=2*pi/N; x=tensor(k->2*pi*k/N,N); round(max(abs(operators.poisson(map(k-> -sin(k),x),dx)-map(sin,x))),9)" "0"
+# grad all-axes adds a trailing component axis
+run "op.grad.allaxes.shape" "shape(operators.grad(zeros(8,8),0.1))" "[8, 8, 2]"
+run "op.curl.const"        "N=16; dx=1.0; V=tensor((a,b,c)->if(c==0,-b*dx,a*dx),N,N,2); operators.curl(V,dx)[8,8]" "2"
+# solver: y'=y → e
+run_match "solver.rk4.exp"  "solver.rk4((t,y)->y, 1, 0, 1, 100)" "2.71828182"
+run "solver.odeint.shape"   "shape(solver.odeint((t,y)->y, 1, linspace(0,1,11)))" "[11]"
+run "solver.cfl"            "solver.cfl((1,2,3), 0.1, 0.02)" "0.6"
+run_err "op.grad.needs.dx"  "operators.grad(zeros(4,4))" ""
+
+# ── iterate/scan non-finite guard + BUG-6 ───────────────────────────────────────
+section "GUARDS"
+run_match "guard.iterate.nan" "iterate(x->x*x, 2, 100)" "non-finite"
+run_match "guard.scan.nan"    "scan(x->x*x, 2, 100)"    "non-finite"
+run "guard.iterate.ok"        "iterate(x->2*x, 1, 10)"  "1024"
+run_err "bug6.zeroarg.arity1" "f = x -> x+1; f()"       ""
+run_err "bug6.zeroarg.arity2" "h=(x,y)->x+y; h()"       ""
+run "bug6.zeroarg.lambda.ok"  "g = () -> 3; g()"        "3"
 
 # ── print summary ─────────────────────────────────────────────────────────────
 echo

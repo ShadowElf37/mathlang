@@ -3,6 +3,7 @@ mod ast;
 mod parser;
 mod vm;
 mod eval;
+mod ns;
 mod repl;
 mod graph;
 mod animate;

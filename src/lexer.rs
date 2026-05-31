@@ -3,7 +3,7 @@ pub enum Token {
     Num(f64), Imag(f64), Ident(String),
     Plus, Minus, Star, Slash, SlashSlash, Percent, Caret, StarStar,
     LParen, RParen, LBrace, RBrace, LBracket, RBracket,
-    Comma, Colon, Semicolon, Eq, Arrow, DotDot,
+    Comma, Colon, Semicolon, Eq, Arrow, DotDot, Dot,
     Lt, Gt, LtEq, GtEq, EqEq, Bang, BangEq,
     Amp, Pipe, At,
     Eof,
@@ -88,7 +88,7 @@ impl<'a> Lexer<'a> {
                     b'.' => {
                         self.bump();
                         if self.peek() == Some(b'.') { self.bump(); out.push(Token::DotDot); }
-                        else { eprintln!("unexpected '.'"); }
+                        else { out.push(Token::Dot); }
                     }
                     b if b.is_ascii_digit() || (b == b'.' && self.src.get(self.pos + 1).map_or(false, |&n| n.is_ascii_digit())) => {
                         let start = self.pos;

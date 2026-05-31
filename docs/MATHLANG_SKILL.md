@@ -68,7 +68,9 @@ f = x, y -> x * y              # same, parens optional
 ```
 
 - **Parameter shadowing**: parameter names override globals. `f(pi)=pi+1; f(2)` → `3` (pi inside body is the parameter, not 3.14…).  
-- You **cannot** redefine built-in names (`step`, `sort`, `sin`, etc.).
+- You **cannot** redefine the core built-in names (`step`, `sort`, `sin`, etc.) or the
+  namespace names (`operators`, `bits`, …). But names that live in a namespace are no
+  longer reserved, so `xor`, `lerp`, `var`, `qr`, … are free to use as your own variables.
 - Functions are first-class: pass as arguments, return from functions, store in variables.
 
 ---
@@ -224,14 +226,16 @@ tensor(k -> k+k*i, 6)  # ComplexTensor of shape [6]
 
 ## Spectral (FFT)
 
+`fft`/`ifft` are **n-dimensional** and transform over *all* axes by default.
+(There is no `fftn`/`ifftn` — `fft` already does that.)
+
 ```
-fft(v)             # 1-D FFT of 1-D tensor  →  ComplexTensor
-ifft(v)            # 1-D IFFT
-fftn(T)            # n-D FFT over all axes
-fftn(T, axis)      # FFT along one axis
-fftn(T, (a,b))     # FFT along axes a and b
-fftn(Re, Im)       # FFT of Re+i*Im input (same shape tensors)
-ifftn(T)           # n-D IFFT
+fft(T)             # n-D FFT over all axes  →  ComplexTensor
+fft(T, axis)       # FFT along one axis
+fft(T, (a,b))      # FFT along axes a and b
+fft(Re, Im)        # FFT of Re+i*Im input (same-shape real tensors)
+fft(Re, Im, axes)  # same, specified axes
+ifft(T)            # n-D inverse FFT (same argument forms)
 ```
 
 ---
@@ -281,14 +285,45 @@ prod(f, a, b)                  # integer product
 **Trig:** `sin cos tan asin acos atan atan2(y,x) sinh cosh tanh sec csc cot`  
 **Algebra:** `sqrt cbrt abs sign step floor ceil round(x) round(x,n) trunc frac exp ln log log2 log10 log(x,base) pow(x,y) hypot(a,b)`  
 **Angle:** `deg(x)` rad→deg, `rad(x)` deg→rad  
-**Special:** `sinc sech csch erf erfc j0 j1 jinc gaussian(x,mu,sigma) gaussian_cdf delta(x)`  
 **Number theory:** `gcd(a,b) lcm(a,b) fact(n)` / `n!`  
 **Complex:** `re im abs arg conj`  
 **Comparison fns:** `lt leq gt geq eq neq` — 2-arg, return 0/1; good with `map`/`filter`  
-**Bitwise:** `and or xor nand nor xnor not shl(x,n) shr(x,n)`  
 **Misc:** `len(v)` / `length(v)`, `sort(v)`, `zip(a,b)`, `dot(a,b)`, `append(v,x)`, `concat(a,b)`, `flatten(v)`  
 **Array scans:** `cumsum(v)`, `cumprod(v)`, `diff(v)` — running sum/product, first difference (over a 1-D tensor or tuple)  
 **Plotting:** `graph(f)` or `graph(f, a, b)` — saves graph_N.png
+
+---
+
+## Namespaces (`.` access)
+
+Niche functions live in namespaces, accessed as `ns.member`. They are **not**
+reserved words, so the bare names (`xor`, `lerp`, `var`, …) are free for your own
+variables. Browse with `!help <namespace>`.
+
+```
+special.{erf erfc j0 j1 jinc sinc sech csch gaussian gaussian_cdf delta}
+bits.{and or xor nand nor xnor shl shr not}
+stats.{median mode var}            # mean, std stay flat
+linalg.{qr diagonalize tensordot outer eig_top eig_bot}   # det inv solve eig eigvals stay flat
+vec.{lerp clamp}
+```
+
+**Differential operators / solvers** (for PDE work — `dx` is always required):
+
+```
+operators.grad(T, dx [, axis])     # central difference; all-axes form adds trailing component axis
+operators.div(V, dx)  operators.curl(V, dx)            # vector-field ops
+operators.lap(T, dx [, operators.neumann])             # Laplacian; default periodic, neumann = no-flux
+operators.poisson(rhs, dx)         # spectral ∇²u = rhs (zero-mean), returns a real field
+operators.specgrad(T, dx [, axis]) # spectral derivative via i·k
+solver.rk4(f, y0, t0, t1, n)       # fixed-step RK4; f is dy/dt = f(t, y)
+solver.odeint(f, y0, ts)           # RK4 sampled at the times in ts → stacked trajectory
+solver.cfl(V, dx, dt)              # Courant number dt·max|V|/dx
+```
+
+**User namespaces:** `!namespace foo` at the top of an included `.math` file
+collects its public definitions into `foo`; prefix a def with `private` to keep it
+internal. See `examples/fluid2D.math` for operators in action.
 
 ---
 

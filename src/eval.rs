@@ -125,6 +125,10 @@ pub enum Val {
     /// Cloning a Cell shares the same RefCell (identity semantics).
     /// Created with cell(v); read with get(c); written with set(c, v).
     Cell(Arc<RefCell<Val>>),
+    /// A namespace: a map from member name to value, accessed with `ns.member`.
+    /// Builtin namespaces (operators, special, …) are registered in Env::new;
+    /// user namespaces are built by an `!namespace`-headed included file.
+    Namespace(Arc<HashMap<String, Val>>),
 }
 
 impl Val {
@@ -138,6 +142,7 @@ impl Val {
             Val::Tensor { .. }        => Err(format!("{ctx}: expected a number, got a tensor")),
             Val::ComplexTensor { .. } => Err(format!("{ctx}: expected a number, got a complex tensor")),
             Val::Cell(..)             => Err(format!("{ctx}: expected a number, got a cell (use get())")),
+            Val::Namespace(..)        => Err(format!("{ctx}: expected a number, got a namespace")),
         }
     }
 
@@ -188,6 +193,8 @@ impl Env {
         vars.insert("phi".into(), Val::Num(1.618033988749895));
         vars.insert("inf".into(), Val::Num(f64::INFINITY));
         vars.insert("i".into(),   Val::Complex(0.0, 1.0));
+        // Flat (unqualified) builtins — the curated core. Niche functions live in
+        // namespaces instead (see crate::ns): special, bits, stats, linalg, vec.
         for name in &[
             "abs", "re", "im", "arg", "conj", "sqrt", "exp", "ln",
             "sin", "cos", "tan", "asin", "acos", "atan",
@@ -196,23 +203,19 @@ impl Env {
             "floor", "ceil", "round",
             "trunc", "frac",
             "log", "log10", "log2",
-            "sign", "signum", "id", "delta", "fact", "factorial", "ncr", "quadratic", "not", "sinc",
-            "sech", "csch",
-            "erf", "erfc", "j0", "j1", "jinc",
+            "sign", "signum", "id", "fact", "factorial", "ncr", "quadratic",
             "heaviside",
             "deg", "rad",
             "len", "length",
             "linspace", "range",
             "sort", "zip", "dot", "append", "concat", "flatten", "argmin", "argmax",
             "cumsum", "cumprod", "diff",
-            "mean", "median", "mode", "std", "var",
+            "mean", "std",
             "compose", "partial",
-            "gaussian", "gaussian_cdf",
             "filter", "reduce",
             "rand", "eps",
             "atan2", "min", "max", "pow", "hypot",
             "gcd", "lcm",
-            "and", "or", "xor", "nand", "nor", "xnor", "shl", "shr",
             "lt", "leq", "gt", "geq", "eq", "neq",
             "if",
             "fft", "ifft",
@@ -222,18 +225,19 @@ impl Env {
             // Tensor ops
             "tensor", "matrix", "zeros", "ones", "eye", "diag",
             "shape", "rows", "cols", "transpose", "trace", "norm",
-            "row", "col", "matmul", "outer",
+            "row", "col", "matmul",
             "det", "inv", "solve",
-            "eig", "eigvals", "eig_top", "eig_bot",
-            "qr", "diagonalize",
+            "eig", "eigvals",
             "hstack", "vstack", "tomat",
-            "lerp", "clamp", "shift", "roll",
+            "shift", "roll",
             "lingrid",
             "reshape", "permute", "cat", "squeeze", "unsqueeze",
-            "dim", "tensordot",
+            "dim",
         ] {
             vars.insert(name.to_string(), Val::Builtin(name.to_string()));
         }
+        // Standard namespaces (operators, solver, special, bits, …) — loaded by force.
+        crate::ns::register_all(&mut vars);
         Self { vars: Arc::new(vars) }
     }
 }
@@ -250,6 +254,7 @@ pub fn hint_of_val(v: &Val) -> TypeHint {
         Val::Tuple(_)             => TypeHint::Tuple,
         Val::Cell(_)              => TypeHint::Cell,
         Val::Fn(..) | Val::Builtin(_) => TypeHint::Fn,
+        Val::Namespace(_)         => TypeHint::Any,
     }
 }
 
@@ -358,6 +363,7 @@ pub fn infer_type(expr: &Expr, params: &HashMap<String, TypeHint>, env: &Env) ->
             _             => Any,
         },
         Expr::Slice(..)  => Any,
+        Expr::Member(..) => Any,
         Expr::Lambda(..) => Fn,
         Expr::Block(stmts) => {
             let mut p = params.clone();
@@ -569,22 +575,18 @@ pub fn is_protected(name: &str) -> bool {
         | "sec" | "csc" | "cot"
         | "floor" | "ceil" | "round" | "trunc" | "frac"
         | "log" | "log10" | "log2"
-        | "sign" | "signum" | "id" | "delta" | "fact" | "factorial" | "ncr" | "quadratic" | "not" | "sinc"
-        | "sech" | "csch"
-        | "erf" | "erfc" | "j0" | "j1" | "jinc"
+        | "sign" | "signum" | "id" | "fact" | "factorial" | "ncr" | "quadratic"
         | "heaviside"
         | "deg" | "rad"
         | "len" | "length"
         | "linspace" | "range"
         | "sort" | "zip" | "dot" | "append" | "concat" | "flatten" | "argmin" | "argmax"
         | "cumsum" | "cumprod" | "diff"
-        | "mean" | "median" | "mode" | "std" | "var"
+        | "mean" | "std"
         | "compose" | "partial"
-        | "gaussian" | "gaussian_cdf"
         | "filter" | "reduce"
         | "rand" | "eps"
         | "min" | "max" | "pow" | "hypot" | "gcd" | "lcm"
-        | "and" | "or" | "xor" | "nand" | "nor" | "xnor" | "shl" | "shr"
         | "lt" | "leq" | "gt" | "geq" | "eq" | "neq"
         | "if"
         | "fft" | "ifft"
@@ -593,15 +595,16 @@ pub fn is_protected(name: &str) -> bool {
         | "cell" | "get" | "set"
         | "tensor" | "matrix" | "zeros" | "ones" | "eye" | "diag"
         | "shape" | "rows" | "cols" | "transpose" | "trace" | "norm"
-        | "row" | "col" | "matmul" | "outer"
+        | "row" | "col" | "matmul"
         | "det" | "inv" | "solve"
-        | "eig" | "eigvals" | "eig_top" | "eig_bot"
-        | "qr" | "diagonalize"
+        | "eig" | "eigvals"
         | "hstack" | "vstack" | "tomat"
-        | "lerp" | "clamp" | "shift" | "roll"
+        | "shift" | "roll"
         | "lingrid"
         | "reshape" | "permute" | "cat" | "squeeze" | "unsqueeze"
-        | "dim" | "tensordot"
+        | "dim"
+        // Standard namespace names (operators, special, bits, …) are reserved too.
+        | "operators" | "solver" | "special" | "bits" | "stats" | "linalg" | "vec"
     )
 }
 
@@ -675,6 +678,11 @@ pub fn fmt_val(v: &Val) -> String {
         }
         Val::Builtin(name) => format!("<builtin {name}>"),
         Val::Cell(c) => format!("cell({})", fmt_val(&c.borrow())),
+        Val::Namespace(map) => {
+            let mut names: Vec<&String> = map.keys().collect();
+            names.sort();
+            format!("namespace{{{}}}", names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "))
+        }
         Val::Tuple(items) => {
             let parts: Vec<String> = items.iter().map(|item| {
                 let s = fmt_val(item);
@@ -765,12 +773,13 @@ fn to_complex(v: Val) -> Result<(f64, f64), String> {
         Val::Tensor { .. }        => Err("expected a number, got a tensor".into()),
         Val::ComplexTensor { .. } => Err("expected a number, got a complex tensor".into()),
         Val::Cell(..)             => Err("expected a number, got a cell (use get())".into()),
+        Val::Namespace(..)        => Err("expected a number, got a namespace".into()),
     }
 }
 
 /// Return Tensor if all imaginary parts are negligibly zero, else ComplexTensor.
 #[inline]
-fn maybe_real(re: Vec<f64>, im: Vec<f64>, shape: Vec<usize>) -> Val {
+pub(crate) fn maybe_real(re: Vec<f64>, im: Vec<f64>, shape: Vec<usize>) -> Val {
     if im.iter().all(|&x| x == 0.0) {
         Val::Tensor { data: TData::new(re), shape }
     } else {
@@ -858,7 +867,7 @@ fn broadcast1(v: Val, f: impl Fn(Val) -> Result<Val, String>) -> Result<Val, Str
 // ── Tensor helpers ────────────────────────────────────────────────────────────
 
 /// Promote a Tensor or ComplexTensor into (re, im, shape) triple.
-fn as_complex_tensor(v: Val) -> Result<(Vec<f64>, Vec<f64>, Vec<usize>), String> {
+pub(crate) fn as_complex_tensor(v: Val) -> Result<(Vec<f64>, Vec<f64>, Vec<usize>), String> {
     match v {
         Val::Tensor { data, shape } => { let n = data.len(); Ok((data.into_vec(), vec![0.0f64; n], shape)) }
         Val::ComplexTensor { re, im, shape } => Ok((re.into_vec(), im.into_vec(), shape)),
@@ -1134,7 +1143,7 @@ fn inv_power_iter(a: &[f64], n: usize) -> Result<(f64, Vec<f64>), String> {
 // ── Tensor axis utilities ─────────────────────────────────────────────────────
 
 /// Row-major strides for a given shape.
-fn strides(shape: &[usize]) -> Vec<usize> {
+pub(crate) fn strides(shape: &[usize]) -> Vec<usize> {
     let n = shape.len();
     let mut s = vec![1usize; n];
     for k in (0..n.saturating_sub(1)).rev() { s[k] = s[k + 1] * shape[k + 1]; }
@@ -1142,7 +1151,7 @@ fn strides(shape: &[usize]) -> Vec<usize> {
 }
 
 /// Decompose a flat index into a multi-index for the given shape (row-major).
-fn unravel(mut flat: usize, shape: &[usize]) -> Vec<usize> {
+pub(crate) fn unravel(mut flat: usize, shape: &[usize]) -> Vec<usize> {
     let n = shape.len();
     let mut idx = vec![0usize; n];
     for k in (0..n).rev() {
@@ -1174,7 +1183,7 @@ fn apply_permutation(data: Vec<f64>, shape: &[usize], perm: &[usize]) -> Result<
 
 /// Apply a 1-D FFT/IFFT in-place along one axis of a complex tensor stored as
 /// two real arrays (re, im) with the given row-major shape.
-fn fft_axis_inplace(re: &mut [f64], im: &mut [f64], shape: &[usize], axis: usize, forward: bool) {
+pub(crate) fn fft_axis_inplace(re: &mut [f64], im: &mut [f64], shape: &[usize], axis: usize, forward: bool) {
     use rustfft::num_complex::Complex64;
     let n = shape[axis];
     let s = strides(shape);
@@ -1226,6 +1235,13 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
             arity(name, 1, vals.len())?;
             broadcast1(vals.into_iter().next().unwrap(), |v| Ok(Val::Num(v.num(name)?.$method())))
         }};
+    }
+
+    // New namespaced PDE functions (operators.*, solver.*) carry their own
+    // implementations in src/ns/. Route them out before the flat match (guarded
+    // so the flat match still owns `vals` for every other name).
+    if crate::ns::is_ns_builtin(name) {
+        return crate::ns::dispatch(name, vals, env).unwrap();
     }
 
     match name {
@@ -3067,6 +3083,7 @@ fn cfv(
             cfv(base, inner_params, outer_params, outer_locals, outer_captured, vars, seen);
             cfv(idx, inner_params, outer_params, outer_locals, outer_captured, vars, seen);
         }
+        Expr::Member(base, _) => cfv(base, inner_params, outer_params, outer_locals, outer_captured, vars, seen),
         Expr::Lambda(ps, _, body) => {
             let mut new_inner = inner_params.to_vec();
             new_inner.extend(ps.iter().map(|p| p.name.clone()));
@@ -3115,6 +3132,7 @@ fn expr_contains_var(expr: &Expr, target: &str) -> bool {
         Expr::Apply(f, args) => expr_contains_var(f, target) || args.iter().any(|a| expr_contains_var(a, target)),
         Expr::Tuple(es) | Expr::Array(es) => es.iter().any(|e| expr_contains_var(e, target)),
         Expr::Index(b, i)    => expr_contains_var(b, target) || expr_contains_var(i, target),
+        Expr::Member(b, _)   => expr_contains_var(b, target),
         Expr::Lambda(ps, _, body) => !ps.iter().any(|p| p.name == target) && expr_contains_var(body, target),
         Expr::Block(stmts) => {
             for stmt in stmts {
@@ -3766,6 +3784,12 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
         Val::Fn(ref params, ref body, ref captured, ref cache, ref sig) => {
             let n = params.len();
             let k = args.len();
+            // BUG-6: a zero-arg call to an arity>0 function previously fell through
+            // to the mapping branch and vacuously returned an empty tensor. Error
+            // cleanly instead (the n>1 case already did; this closes n==1).
+            if k == 0 && n > 0 {
+                return Err(format!("function expects {n} arg(s), got 0"));
+            }
             // All args are Fn → compose (only single arg supported)
             if k == 1 {
                 if let Val::Fn(..) = &args[0] {
@@ -3881,6 +3905,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                     }
                     Val::Builtin(_) => return Err("cannot scale a builtin function".into()),
                     Val::Cell(..) => return Err("cannot scale a cell (use get/set)".into()),
+                    Val::Namespace(..) => return Err("cannot scale a namespace".into()),
                 }
             }
             let nums: Result<Vec<f64>, _> = args.into_iter().map(|v| v.num("scalar-apply")).collect();
@@ -3903,6 +3928,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
         Val::Tensor { .. } => Err("tensors are not callable".into()),
         Val::ComplexTensor { .. } => Err("complex tensors are not callable".into()),
         Val::Cell(..) => Err("cells are not callable (use get/set)".into()),
+        Val::Namespace(..) => Err("namespaces are not callable (use ns.member)".into()),
     }
 }
 
@@ -4282,6 +4308,17 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
         }
         Expr::Var(n) => env.vars.get(n).cloned()
             .ok_or_else(|| format!("undefined: {n}")),
+        Expr::Member(base, field) => {
+            let base_val = eval(base, env)?;
+            match base_val {
+                Val::Namespace(map) => map.get(field).cloned()
+                    .ok_or_else(|| {
+                        let ns = match base.as_ref() { Expr::Var(n) => n.as_str(), _ => "namespace" };
+                        format!("{ns} has no member '{field}'")
+                    }),
+                other => Err(format!("'.{field}': expected a namespace, got {}", fmt_val(&other))),
+            }
+        }
         Expr::Neg(e) => match eval(e, env)? {
             Val::Num(n)        => Ok(Val::Num(-n)),
             Val::Complex(a, b) => Ok(make_complex(-a, -b)),
@@ -4302,7 +4339,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                               im.into_iter().map(|x| -x).collect(),
                               shape))
             }
-            Val::Fn(..) | Val::Builtin(_) | Val::Cell(..) => Err("unary minus: expected a number".into()),
+            Val::Fn(..) | Val::Builtin(_) | Val::Cell(..) | Val::Namespace(..) => Err("unary minus: expected a number".into()),
         },
         Expr::BinOp(l, op, r) => {
             let lv = eval(l, env)?;
@@ -4777,10 +4814,26 @@ pub fn iterate_vals(args: Vec<Val>, env: &Env) -> Result<Val, String> {
     if n < 0 {
         return Err(format!("iterate: count must be non-negative, got {n}"));
     }
-    for _ in 0..n {
+    for step in 0..n {
         state = apply_val(f_val.clone(), vec![state], env)?;
+        if !state_is_finite(&state) {
+            return Err(format!("iterate: non-finite value (NaN/Inf) at step {}", step + 1));
+        }
     }
     Ok(state)
+}
+
+/// True unless the value contains a NaN/Inf. Used by iterate/scan to abort a
+/// diverging time-step with the step index instead of silently returning NaN.
+pub(crate) fn state_is_finite(v: &Val) -> bool {
+    match v {
+        Val::Num(x)                   => x.is_finite(),
+        Val::Complex(a, b)            => a.is_finite() && b.is_finite(),
+        Val::Tensor { data, .. }      => data.iter().all(|x| x.is_finite()),
+        Val::ComplexTensor { re, im, .. } => re.iter().all(|x| x.is_finite()) && im.iter().all(|x| x.is_finite()),
+        Val::Tuple(items)             => items.iter().all(state_is_finite),
+        _                             => true,
+    }
 }
 
 // scan(f, x0, n) — the whole orbit [x0, f(x0), …, f^n(x0)] stacked into a tensor.
@@ -4808,8 +4861,11 @@ pub fn scan_vals(args: Vec<Val>, env: &Env) -> Result<Val, String> {
     }
     let mut states: Vec<Val> = Vec::with_capacity(n as usize + 1);
     states.push(state.clone());
-    for _ in 0..n {
+    for step in 0..n {
         state = apply_val(f_val.clone(), vec![state], env)?;
+        if !state_is_finite(&state) {
+            return Err(format!("scan: non-finite value (NaN/Inf) at step {}", step + 1));
+        }
         states.push(state.clone());
     }
     stack_rows(states, "scan")

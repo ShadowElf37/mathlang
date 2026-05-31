@@ -34,12 +34,12 @@ RECURSION GUARD; example files load-tested).
 ----------------------------------------------------------------------------
 Found later (2026-05-30, v0.21.1):
 
-[OPEN] BUG-6 zero-arg application of a non-zero-arity function silently returns
-  an empty tensor instead of erroring (or currying). `f = x -> x+1; f()` yields
-  `[]` (shape [0]) rather than an arity error. Surfaces in heat.math's *comment*
-  `mean(solver_demo())` (zero args) — the real animate path passes a frame index,
-  so `mean(solver_demo(0))` = 449.375 works. The integrators.math generators are
-  likewise meant to be called with an (ignored) argument. Same family as BUG-1:
-  a silent empty/garbage value instead of a clean error. Decide: error on arity
-  mismatch, or curry (partial application). Until fixed, always pass the ignored
-  arg to generator closures. (The heat.math comment was corrected to use an arg.)
+[FIXED v0.22.0] BUG-6 zero-arg application of a non-zero-arity function silently
+  returned an empty tensor instead of erroring. `f = x -> x+1; f()` yielded `[]`
+  (shape [0]) rather than an arity error, because the k==0/n==1 case fell into the
+  mapping branch and produced a vacuously-empty result. Decision: error on arity
+  mismatch (not curry). Fixed by an explicit guard in apply_val (eval.rs Val::Fn
+  branch): `if k == 0 && n > 0 { Err("function expects N arg(s), got 0") }`, placed
+  before the k==1/mapping branches. The CallVal VM path already routes through
+  apply_val, so compiled bodies are covered too. Zero-arg lambdas `() -> e` (n==0)
+  still call fine. Regression tests: GUARDS section in tests.sh (bug6.zeroarg.*).

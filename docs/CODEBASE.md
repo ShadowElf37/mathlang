@@ -8,7 +8,12 @@ src/
   lexer.rs         — Tokenizer (Token enum, Lexer struct)
   ast.rs           — AST nodes: Expr, Def, BlockStmt, TypeHint, Param, Op
   parser.rs        — Recursive descent parser (Parser struct)
-  eval.rs          — Evaluator, builtins, VM, type inference (largest file ~4100 lines)
+  eval.rs          — Evaluator, builtins, VM, type inference (largest file ~5000 lines)
+  ns/              — Standard namespaces (`.` access), each in its own module:
+    mod.rs         — register_all (called by Env::new), routing to new-function dispatch
+    operators.rs   — grad/div/curl/lap/poisson/invlap/specgrad (finite-diff + spectral)
+    solver.rs      — rk4/odeint/cfl time integrators
+    special.rs bits.rs stats.rs linalg.rs vec.rs — relocated niche builtins (membership lists)
   repl.rs          — REPL loop, bang commands, syntax highlighting, tab completion
   graph.rs         — !graph command: sample → PNG via plotters → open in animator (bare RGB mode)
   animate.rs       — !animate2D / !animate2D_raw: stream MXFR frames to wgpu_animator
@@ -80,10 +85,21 @@ enum Val {
     ComplexTensor { re: TData, im: TData, shape: Vec<usize> },
     Tuple(Vec<Val>),
     Cell(RefCell<Val>),
+    Namespace(Arc<HashMap<String, Val>>),   // ns.member access
 }
 ```
 
 `TData` is `Arc<Vec<f64>>` with copy-on-write semantics — O(1) clone.
+
+### Namespaces
+
+`Expr::Member(base, field)` (parsed from `base.field` — `Token::Dot` in the postfix
+loop) evaluates `base` to a `Val::Namespace` and looks up `field`. Standard
+namespaces are registered in `Env::new` via `crate::ns::register_all`. Relocated
+builtins are exposed as `Val::Builtin("<bare>")` so they dispatch through the
+unchanged `eval_builtin` match; new PDE functions (operators/solver) route from
+`eval_builtin` via `crate::ns::dispatch` into their module files. User namespaces
+are built by `import_file` from an `!namespace`-headed file (see `NsBuild`).
 
 `FnSig { params: Vec<Option<TypeHint>>, ret: Option<TypeHint> }` stored with each `Val::Fn`.
 

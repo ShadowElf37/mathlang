@@ -70,8 +70,8 @@ diskMask(N, cx_frac, cy_frac, r_frac) = {
 # heatSolverDisk: cold disk in hot air, returns a stateful solver
 heatSolverDisk(N, dx, dt, T_disk, T_air, a_disk, a_air) = {
   mask  = diskMask(N, 0.5, 0.5, 0.25);
-  T0    = lerp(T_air, T_disk, mask);
-  alpha = lerp(a_air, a_disk, mask);
+  T0    = vec.lerp(T_air, T_disk, mask);
+  alpha = vec.lerp(a_air, a_disk, mask);
   heatSolver(T0, alpha, dx, dt)
 }
 

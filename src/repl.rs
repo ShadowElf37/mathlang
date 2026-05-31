@@ -386,48 +386,106 @@ fn expand_path(p: &str) -> String {
     }
 }
 
-pub fn import_file(path: &str, display: &str, env: &mut Env, verbose: bool) {
-    match std::fs::read_to_string(path) {
-        Ok(src) => {
-            let mut n = 0;
-            let mut buf = String::new();
-            let mut depth = 0i32;
-            for line in src.lines() {
-                let trimmed = line.trim();
-                if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
-                // Strip any trailing # comment: brace-count and buffer only the code
-                // portion, so inline comments inside a multi-line { } block don't
-                // swallow the lines joined after them.
-                let code = (if let Some(i) = trimmed.find('#') { &trimmed[..i] } else { trimmed }).trim_end();
-                if code.is_empty() { continue; }
-                for ch in code.chars() {
-                    if ch == '{' { depth += 1; }
-                    else if ch == '}' { depth -= 1; }
-                }
-                if buf.is_empty() { buf.push_str(code); } else { buf.push(' '); buf.push_str(code); }
-                if depth <= 0 {
-                    if buf.starts_with('!') {
-                        bang_command(buf[1..].trim_start(), env);
-                    } else {
-                        eval_line(&buf, env, false);
-                    }
-                    n += 1;
-                    buf.clear();
-                    depth = 0;
-                }
-            }
-            if !buf.is_empty() {
-                if buf.starts_with('!') {
-                    bang_command(buf[1..].trim_start(), env);
-                } else {
-                    eval_line(&buf, env, false);
-                }
-                n += 1;
-            }
-            if verbose { println!("included {n} definition(s) from {display}"); }
-        }
-        Err(e) => eprintln!("include {display}: {e}"),
+// A namespace being built from an `!namespace`-headed included file. Definitions
+// evaluate into a file-local env (seeded from the global env, so builtins and
+// other namespaces resolve); `private`-marked names stay local and only the
+// remaining top-level names are exported as `Val::Namespace` at finalize.
+struct NsBuild {
+    name:    String,
+    env:     Env,
+    private: std::collections::HashSet<String>,
+    public:  Vec<String>,
+}
+
+impl NsBuild {
+    fn new(name: String, global: &Env) -> Self {
+        NsBuild { name, env: global.clone(), private: Default::default(), public: Vec::new() }
     }
+    fn eval_stmt(&mut self, code: &str, is_private: bool) {
+        let before: std::collections::HashSet<String> = self.env.vars.keys().cloned().collect();
+        eval_line(code, &mut self.env, false);
+        for k in self.env.vars.keys() {
+            if before.contains(k) { continue; }
+            if is_private { self.private.insert(k.clone()); }
+            else if k != "result" { self.public.push(k.clone()); }
+        }
+    }
+    fn finalize(self, env: &mut Env) {
+        let mut members: std::collections::HashMap<String, Val> = Default::default();
+        for k in &self.public {
+            if self.private.contains(k) { continue; }
+            if let Some(v) = self.env.vars.get(k) { members.insert(k.clone(), v.clone()); }
+        }
+        env.define(self.name.clone(), Val::Namespace(Arc::new(members)));
+    }
+}
+
+/// Strip a leading `private` visibility keyword from a statement.
+fn strip_private(stmt: &str) -> (bool, &str) {
+    if let Some(rest) = stmt.strip_prefix("private") {
+        if rest.starts_with(char::is_whitespace) {
+            return (true, rest.trim_start());
+        }
+    }
+    (false, stmt)
+}
+
+pub fn import_file(path: &str, display: &str, env: &mut Env, verbose: bool) {
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => { eprintln!("include {display}: {e}"); return; }
+    };
+
+    // Phase A: split into top-level statements (brace-aware, comments stripped).
+    let mut stmts: Vec<String> = vec![];
+    let mut buf = String::new();
+    let mut depth = 0i32;
+    for line in src.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
+        // Strip any trailing # comment: brace-count and buffer only the code
+        // portion, so inline comments inside a multi-line { } block don't
+        // swallow the lines joined after them.
+        let code = (if let Some(i) = trimmed.find('#') { &trimmed[..i] } else { trimmed }).trim_end();
+        if code.is_empty() { continue; }
+        for ch in code.chars() {
+            if ch == '{' { depth += 1; }
+            else if ch == '}' { depth -= 1; }
+        }
+        if buf.is_empty() { buf.push_str(code); } else { buf.push(' '); buf.push_str(code); }
+        if depth <= 0 { stmts.push(std::mem::take(&mut buf)); depth = 0; }
+    }
+    if !buf.is_empty() { stmts.push(buf); }
+
+    // Phase B: execute, optionally collecting into a namespace.
+    let mut n = 0;
+    let mut ns: Option<NsBuild> = None;
+    for stmt in &stmts {
+        if let Some(rest) = stmt.strip_prefix('!') {
+            let cmd = rest.trim_start();
+            // `!namespace <name>` — route the rest of the file into namespace <name>.
+            if let Some(arg) = cmd.strip_prefix("namespace") {
+                let name = arg.trim();
+                if name.is_empty() { eprintln!("!namespace requires a name"); continue; }
+                if let Some(prev) = ns.take() { prev.finalize(env); }
+                ns = Some(NsBuild::new(name.to_string(), env));
+                continue;
+            }
+            match ns.as_mut() {
+                Some(nb) => bang_command(cmd, &mut nb.env),
+                None     => bang_command(cmd, env),
+            }
+        } else {
+            let (is_private, code) = strip_private(stmt);
+            match ns.as_mut() {
+                Some(nb) => nb.eval_stmt(code, is_private),
+                None     => { eval_line(code, env, false); }
+            }
+        }
+        n += 1;
+    }
+    if let Some(nb) = ns.take() { nb.finalize(env); }
+    if verbose { println!("included {n} definition(s) from {display}"); }
 }
 
 // ── NumPy .npy I/O ────────────────────────────────────────────────────────────
@@ -872,18 +930,21 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     "           min max  gcd lcm  fact  n!  ncr(n,r)\n",
                     "           quadratic(a,b,c)  — roots of ax²+bx+c=0 (real or complex pair)\n",
                     "Angle:     deg rad\n",
-                    "Special:   sinc  sech csch  erf erfc  j0 j1 jinc\n",
-                    "           gaussian(x,mu,sigma)  gaussian_cdf(x,mu,sigma)\n",
+                    "Namespaces: ns.member access (e.g. operators.lap).  Browse with !help <ns>\n",
+                    "           operators  solver  special  bits  stats  linalg  vec\n",
+                    "PDE:       operators.grad/div/curl/lap(T,dx)  operators.poisson/specgrad(T,dx)\n",
+                    "           solver.rk4(f,y0,t0,t1,n)  solver.odeint(f,y0,ts)  solver.cfl(V,dx,dt)\n",
+                    "Special:   special.{{sinc,sech,csch,erf,erfc,j0,j1,jinc,gaussian,gaussian_cdf,delta}}\n",
                     "Tuple ops: len sort zip dot  append concat flatten  argmin argmax\n",
                     "           cumsum cumprod diff  (x,) — singleton tensor literal\n",
                     "           linspace(a,b,n)  range(a,b)\n",
-                    "Stats:     mean median mode  std var  (accept tuples or tensors)\n",
+                    "Stats:     mean std (flat);  stats.median  stats.mode  stats.var\n",
                     "HOF:       map(f,t)  filter(f,t)  reduce(f,t)  compose(f,g)  partial(f,a)\n",
                     "Control:   if(cond,a,b)\n",
                     "Spectral:  fft(T[,axes])  ifft(T[,axes])  — n-D DFT / inverse DFT on tensors\n",
                     "           fft/ifft also accept (Re,Im[,axes]) for explicit complex input\n",
                     "Random:    rand()  rand(n)  rand(n1,n2,…)  — scalar, 1-D or n-D tensor in [0,1)\n",
-                    "Bitwise:   and or xor nand nor xnor not shl shr\n",
+                    "Bitwise:   bits.{{and,or,xor,nand,nor,xnor,not,shl,shr}}\n",
                     "Complex:   i  re im abs arg conj  (all operators work on complex numbers)\n",
                     "Constants: pi e phi inf i\n",
                     "Tensors:   (1,2; 3,4)  or  [1,2; 3,4]  — 2D literal;  A @ B  — matmul\n",
@@ -893,16 +954,15 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     "           shape(T)  dim(T,axis)  rows cols  transpose([a,b])  trace norm\n",
                     "           reshape(T, n1, n2, …)  permute(T, p0, p1, …)\n",
                     "           cat(axis, T1, T2, …)  squeeze(T)  unsqueeze(T, dim)\n",
-                    "           outer(T1, T2)  tensordot(T1,T2,n)  tensordot(T1,T2,(a,b))\n",
                     "           matmul(A,B)  row col\n",
                     "           det inv solve(A,b)  hstack vstack tomat(t,r,c)\n",
                     "           hstack/vstack rank-promote: a vector stacks onto a matrix\n",
-                    "           eig(A) eigvals(A) eig_top(A) eig_bot(A)  — eigenvalues/eigenvectors\n",
-                    "           qr(A) → (Q,R)   diagonalize(A) → (V,D,V⁻¹)\n",
+                    "           eig(A) eigvals(A)  — eigenvalues/eigenvectors\n",
+                    "linalg:    linalg.outer  linalg.tensordot  linalg.qr  linalg.diagonalize\n",
+                    "           linalg.eig_top  linalg.eig_bot\n",
                     "           shift(T,n,axis)  — edge-replicating shift (Neumann BCs)\n",
                     "           roll(T,n,axis)   — circular/periodic shift\n",
-                    "           lerp(a,b,t)      — linear interpolation: a*(1-t)+b*t (elementwise)\n",
-                    "           clamp(x,lo,hi)   — clamp value/tensor to [lo,hi]\n",
+                    "           vec.lerp(a,b,t)  — linear interpolation;  vec.clamp(x,lo,hi)\n",
                     "           lingrid(start,end,counts,f)  — supports any n-D via tuples\n",
                     "           T[i,j,…]  T[i,a..b]  T[..,j]  T[i..,j]  T[..k,j]  — n-D slicing\n",
                     "           T[..]  = all  T[n..]  = from n  T[..n]  = to n (tuples too)\n",
@@ -911,6 +971,14 @@ fn bang_command(cmd: &str, env: &mut Env) {
                 ));
             } else {
                 let topic = arg.trim_start_matches('!');
+                // Namespace? List its members.
+                if let Some(Val::Namespace(map)) = env.vars.get(topic) {
+                    let mut names: Vec<&String> = map.keys().collect();
+                    names.sort();
+                    let list = names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("  ");
+                    println!("\x1b[1m{topic}\x1b[0m namespace — access with {topic}.<member>\n  {list}");
+                    return;
+                }
                 // Try bang command help first (if arg starts with ! or is a known command)
                 let bang_text = std::fs::read_to_string(format!("help/bang/{topic}.txt")).ok();
                 if let Some(text) = bang_text {
@@ -936,6 +1004,9 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     eprintln!("no help for '{topic}'  (try !help with no argument)");
                 }
             }
+        }
+        "namespace" => {
+            eprintln!("!namespace is only valid at the top of an included .math file");
         }
         "include" | "import" => {
             if arg.is_empty() { eprintln!("usage: !include <file>"); return; }

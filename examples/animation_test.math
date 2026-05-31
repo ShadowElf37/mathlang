@@ -1,3 +1,3 @@
 # Expanding Gaussian ring. Run from the REPL:  !include animation_test.math
 # (animate2D is a REPL command, and its args are comma-separated.)
-!animate2D t -> tensor((x, y) -> {r=sqrt((x-10)^2 + (y-10)^2); gaussian(r, t/100*10, 1)}, 20, 20), 0, 100, 100
+!animate2D t -> tensor((x, y) -> {r=sqrt((x-10)^2 + (y-10)^2); special.gaussian(r, t/100*10, 1)}, 20, 20), 0, 100, 100

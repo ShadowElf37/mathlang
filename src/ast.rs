@@ -52,6 +52,8 @@ pub enum Expr {
     TensorLit(Vec<Vec<Expr>>),   // (1,2; 3,4) — rows separated by ;
     Array(Vec<Expr>),            // [a,b,c]    — 1-D tensor literal; all elements must be numeric
     Index(Box<Expr>, Box<Expr>),
+    /// Namespace member access: `ns.member` (e.g. operators.grad).
+    Member(Box<Expr>, String),
     Block(Vec<BlockStmt>),
     Apply(Box<Expr>, Vec<Expr>),
     Range(Box<Expr>, Box<Expr>),

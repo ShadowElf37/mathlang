@@ -691,21 +691,24 @@ case (`(x)` alone is just the scalar `x`):
 > norm(ones(3, 4))                  # Frobenius norm = sqrt(12)
 > solve((2,1; 1,3), (5,10))         # solve Ax=b  →  1-D tensor
 > A @ B                             # matmul: 2D×2D, 2D×1D, 1D×2D, 1D×1D (dot)
-> outer(ones(2), ones(3))           # outer product → shape (2, 3)
+> linalg.outer(ones(2), ones(3))    # outer product → shape (2, 3)
 ```
+
+Less-common decompositions (`qr`, `diagonalize`, `eig_top`, `eig_bot`, `tensordot`,
+`outer`) live in the `linalg` namespace; see below.
 
 ### Eigenvalues, QR, and diagonalization
 
 **Eigenvalues and eigenvectors** — all functions accept square real matrices:
 
 ```
-> eigvals((4,1; 1,3))      # [4.618…, 2.381…]   — eigenvalues only
-> eig((4,1; 1,3))          # (eigenvalues, V)    — V columns are eigenvectors
-> eig_top((4,1; 1,3))      # (λ_max, v)          — largest eigenpair via power iteration
-> eig_bot((4,1; 1,3))      # (λ_min, v)          — smallest eigenpair via inverse iteration
+> eigvals((4,1; 1,3))             # [4.618…, 2.381…]   — eigenvalues only
+> eig((4,1; 1,3))                 # (eigenvalues, V)    — V columns are eigenvectors
+> linalg.eig_top((4,1; 1,3))      # (λ_max, v)          — largest eigenpair via power iteration
+> linalg.eig_bot((4,1; 1,3))      # (λ_min, v)          — smallest eigenpair via inverse iteration
 ```
 
-`eig_top` and `eig_bot` are much faster than full `eig` when only one eigenpair is needed.
+`linalg.eig_top` and `linalg.eig_bot` are much faster than full `eig` when only one eigenpair is needed.
 
 Eigenvalue identities:
 
@@ -717,9 +720,9 @@ Eigenvalue identities:
 **QR decomposition** — works for m×n matrices with m ≥ n; returns full Q (m×m) and R (m×n):
 
 ```
-> qr((3,1; 1,2))                      # (Q, R)  with Q orthogonal, R upper-triangular
-> qr((3,1; 1,2))[0]                   # Q only
-> shape(qr((1,2; 3,4; 5,6))[0])       # [3, 3]  — Q is always square
+> linalg.qr((3,1; 1,2))                 # (Q, R)  with Q orthogonal, R upper-triangular
+> linalg.qr((3,1; 1,2))[0]              # Q only
+> shape(linalg.qr((1,2; 3,4; 5,6))[0])  # [3, 3]  — Q is always square
 ```
 
 Verify: `Q @ R` recovers the original; `transpose(Q) @ Q` = `eye(m)`.
@@ -727,14 +730,14 @@ Verify: `Q @ R` recovers the original; `transpose(Q) @ Q` = `eye(m)`.
 **Diagonalization** — returns `(V, D, V_inv)` where `V @ D @ V_inv = A`:
 
 ```
-> diagonalize((4,1; 1,3))    # (V, D, inv(V))
+> linalg.diagonalize((4,1; 1,3))    # (V, D, inv(V))
 ```
 
 `D` is a full diagonal matrix, usable directly in expressions. This enables the matrix exponential without a dedicated builtin:
 
 ```
 # Matrix exponential: e^A = V @ diag(map(exp, eigvals(A))) @ inv(V)
-> res = diagonalize(A)
+> res = linalg.diagonalize(A)
 > res[0] @ diag(map(exp, eigvals(A))) @ res[2]
 ```
 
@@ -743,7 +746,7 @@ Verify: `Q @ R` recovers the original; `transpose(Q) @ Q` = `eye(m)`.
 ```
 > mean(ones(3, 4))     # 1
 > std(eye(3))          # standard deviation over all elements
-> var(eye(3))          # variance
+> stats.var(eye(3))    # variance  (stats.median, stats.mode too)
 > argmax((3,1,4,1,5))  # 4         — index of max in 1-D tensor (scalar)
 > argmax((1,8; 8,1))   # [0, 1]    — [row, col] index for 2-D tensor
 > argmin(T)            # [i, j, …] — n-D index tensor for n-D input
@@ -807,11 +810,7 @@ result = 3  4
 
 **Complex:** `re(z)`, `im(z)`, `abs(z)`, `arg(z)`, `conj(z)`
 
-**Number theory:** `gcd(a,b)`, `lcm(a,b)`, `fact(n)` / `n!`, `delta(x)`
-
-**Special:** `sinc`, `sech`, `csch`, `erf`, `erfc`, `j0`, `j1`, `jinc`, `gaussian(x,mu,sigma)`
-
-**Statistics** (1-D tensors or matrices): `mean`, `median`, `mode`, `std`, `var`, `min`, `max`, `sum`, `prod`
+**Number theory:** `gcd(a,b)`, `lcm(a,b)`, `fact(n)` / `n!`
 
 **Array ops:** `len`, `sort`, `zip(a,b)`, `dot(a,b)`, `append(t,x)`, `concat(a,b)`, `flatten(t)`, `argmin(t)`, `argmax(t)`, `cumsum(t)`, `cumprod(t)`, `diff(t)`, `linspace(a,b,n)`, `range(a,b)`
 
@@ -821,11 +820,15 @@ result = 3  4
 
 **Tensor reorder:** `transpose(T)`, `transpose(T,a,b)`, `permute(T,p0,p1,…)`
 
-**Tensor combine:** `cat(axis,T1,T2,…)`, `hstack(A,B)`, `vstack(A,B)`, `tomat(t,r,c)`, `outer(A,B)`
+**Tensor combine:** `cat(axis,T1,T2,…)`, `hstack(A,B)`, `vstack(A,B)`, `tomat(t,r,c)`
 
-**Tensor reduce:** `sum(T)`, `prod(T)`, `sum(T,axis)`, `prod(T,axis)`, `norm(T)`, `trace(T)`, `mean(T)`, `std(T)`, `var(T)`
+**Tensor reduce:** `sum(T)`, `prod(T)`, `sum(T,axis)`, `prod(T,axis)`, `norm(T)`, `trace(T)`, `mean(T)`, `std(T)`
 
-**Linear algebra:** `matmul(A,B)` / `A @ B`, `det(A)`, `inv(A)`, `solve(A,b)`, `row(T,i)`, `col(T,j)`, `eig(A)` → `(eigenvalues, V)`, `eigvals(A)`, `eig_top(A)` → `(λ, v)`, `eig_bot(A)` → `(λ, v)`, `qr(A)` → `(Q, R)`, `diagonalize(A)` → `(V, D, V⁻¹)`
+**Tensor shift:** `shift(T,n,axis)` (edge-replicating / Neumann), `roll(T,n,axis)` (periodic)
+
+**Linear algebra:** `matmul(A,B)` / `A @ B`, `det(A)`, `inv(A)`, `solve(A,b)`, `row(T,i)`, `col(T,j)`, `eig(A)` → `(eigenvalues, V)`, `eigvals(A)`  (more in the `linalg` namespace)
+
+**Statistics:** `mean`, `std`, `min`, `max`, `sum`, `prod`  (more in the `stats` namespace)
 
 **Grid:** `lingrid(start,end,counts,f)` — n-D uniform grid; `f` may return a scalar, tuple, or tensor
 
@@ -833,22 +836,82 @@ result = 3  4
 
 **Higher-order:** `map(f,t)`, `filter(f,t)`, `reduce(f,t)`, `compose(f,g)`, `partial(f,a)`
 
-**Iteration:** `iterate(f,x0,n)` → `fⁿ(x0)`, `scan(f,x0,n)` → orbit `[x0,…,fⁿ(x0)]` (flat loop, O(1) stack; scalar states → 1-D, vector states → 2-D rows)
+**Iteration:** `iterate(f,x0,n)` → `fⁿ(x0)`, `scan(f,x0,n)` → orbit `[x0,…,fⁿ(x0)]` (flat loop, O(1) stack; scalar states → 1-D, vector states → 2-D rows). Both abort with a clear error if a step produces NaN/Inf, instead of silently returning a non-finite result.
 
-**Spectral:** `fft(v)`, `ifft(v)` — 1-D FFT/IFFT on a 1-D tensor; `fftn(T)`, `ifftn(T)` — n-D FFT on tensors
+**Spectral:** `fft(T)`, `ifft(T)` — n-D FFT/IFFT over all axes by default; also `fft(T, axes)`, `fft(Re, Im)`, `fft(Re, Im, axes)`.
 
 **Random:** `rand()`, `rand(n1,n2,…)` — scalar or shaped tensor
 
-**Bitwise** (operate on 64-bit integers):
-`and`, `or`, `xor`, `nand`, `nor`, `xnor`, `not`, `shl(x,n)`, `shr(x,n)`
+### Namespaces
+
+Niche functions live in **namespaces**, accessed with `.`:
 
 ```
-> shl(1, 8)       # 256
-> and(12, 10)     # 8
-> not(0)          # -1  (bitwise NOT, two's complement)
-> delta(0)        # 1   (1 if x == 0, else 0)
-> heaviside(-1)   # 0   (Heaviside: 0 / 0.5 / 1)
+> bits.xor(6, 3)            # 5      — bitwise ops
+> special.erf(1)           # 0.8427 — special functions
+> stats.median((3,1,2))    # 2
+> linalg.qr((3,1; 1,2))    # (Q, R)
+> vec.lerp(0, 10, 0.5)     # 5
 ```
+
+The standard namespaces are:
+
+| Namespace | Members |
+|-----------|---------|
+| `special` | `erf erfc j0 j1 jinc sinc sech csch gaussian gaussian_cdf delta` |
+| `bits`    | `and or xor nand nor xnor shl shr not` |
+| `stats`   | `median mode var` (mean, std are flat) |
+| `linalg`  | `qr diagonalize tensordot outer eig_top eig_bot` |
+| `vec`     | `lerp clamp` |
+| `operators` / `solver` | differential operators and integrators — see below |
+
+A namespace is a first-class value (`f = bits.xor; f(6,3)`). Names placed in a
+namespace are **not** reserved words, so `xor`, `lerp`, `var`, … are free to use
+as your own variable names. Browse a namespace's members with `!help <namespace>`.
+
+**Your own namespaces:** put `!namespace <name>` at the top of a `.math` file and
+its definitions become members of `<name>` when you `!include` it. Prefix a
+definition with `private` to keep it internal (usable by the file's other
+definitions, but not exported):
+
+```
+# geo.math
+!namespace geo
+private k = 3.14159
+area(r) = k * r^2          # geo.area(2) → 12.566
+```
+
+---
+
+## Differential operators and solvers
+
+The `operators` and `solver` namespaces provide gridded calculus for PDE work.
+Every finite-difference operator takes the physical grid spacing `dx` as a
+**required** argument — forgetting it (i.e. differentiating in index units) is a
+classic and silent source of wrong results.
+
+**`operators`** — spatial operators on a periodic grid:
+
+```
+> operators.grad(T, dx)          # central diff along every axis → trailing component axis
+> operators.grad(T, dx, axis)    # derivative along one axis (same shape as T)
+> operators.div(V, dx)           # divergence of a vector field (trailing component axis)
+> operators.curl(V, dx)          # 2-D scalar curl
+> operators.lap(T, dx)           # Laplacian (periodic); operators.lap(T, dx, operators.neumann) for no-flux
+> operators.poisson(rhs, dx)     # spectral solve of ∇²u = rhs (zero-mean), returns a real field
+> operators.specgrad(T, dx)      # spectral derivative via i·k (machine-precision on smooth fields)
+```
+
+**`solver`** — time integration and stability diagnostics:
+
+```
+> solver.rk4(f, y0, t0, t1, n)   # fixed-step RK4; f is dy/dt = f(t, y); state scalar or tensor
+> solver.rk4((t,y)->y, 1, 0, 1, 100)        # ≈ e
+> solver.odeint(f, y0, ts)       # RK4 sampled at the times in ts → stacked trajectory
+> solver.cfl(V, dx, dt)          # Courant number dt·max|V|/dx (stability check)
+```
+
+`examples/fluid2D.math` is a worked 2-D turbulence simulation built on these.
 
 ---
 

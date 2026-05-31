@@ -374,6 +374,15 @@ impl Parser {
             if *self.peek() == Token::Bang {
                 self.bump();
                 e = Expr::Apply(Box::new(Expr::Var("fact".into())), vec![e]);
+            } else if *self.peek() == Token::Dot {
+                // Namespace member access: `ns.member`. Composes with the `(`/`[`
+                // arms below, so `ns.f(args)` → Apply(Member(...), args).
+                self.bump();
+                let name = match self.bump() {
+                    Token::Ident(s) => s,
+                    t => return Err(format!("expected member name after '.', got {:?}", t)),
+                };
+                e = Expr::Member(Box::new(e), name);
             } else if *self.peek() == Token::LBracket {
                 self.bump();
                 let first = self.parse_index_item()?;
