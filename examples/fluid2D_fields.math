@@ -1,0 +1,52 @@
+# fluid2D_fields.math — 2D incompressible turbulence, written with FIELDS.
+#
+#   ∂ω/∂t = −J(ψ,ω) + ν∇²ω − μω + f
+#
+# Identical physics to fluid2D.math, but the state is a `field` (a 0-form on the
+# periodic box [0,2π)²) rather than a bare tensor + a loose `dx`. The grid spacing
+# is baked into the field, so no operator is ever called with a stray dx — the
+# class of bug that made the original simulation wrong is structurally impossible
+# here.
+#
+# The advection term is the payoff. J(ψ,ω) = ψ_x ω_y − ψ_y ω_x is exactly the
+# coefficient of dψ ∧ dω (a 2-form), so the whole Jacobian collapses to
+#
+#     −J(ψ,ω)  =  ★(dψ ∧ dω)
+#
+# — one line of exterior calculus instead of four hand-paired directional
+# derivatives. (On the Euclidean grid ★ on a 2-form is the identity, so this is
+# numerically identical to the central-difference advection in fluid2D.math.)
+
+N  = 128
+dt = 0.01           # advection CFL needs dt·u/dx < 1 at this resolution
+nu = 0.005          # viscosity — also damps grid-scale enstrophy pile-up
+mu = 0.02           # linear drag on large scales (prevents condensate blow-up)
+fa = 0.6            # forcing amplitude
+
+# 2D isotropic forcing at several wavevectors — prevents single-axis lock-in.
+forcing = field(tensor((i,j) -> {
+  x = 2*pi*i/N; y = 2*pi*j/N;
+  (sin(4*x + 0.5) + sin(4*y + 1.2) + sin(3*x - 4*y) + sin(4*x + 3*y)) / 4
+}, N, N), 0, 2*pi, forms.periodic)
+
+# Streamfunction from vorticity: solve ∇²ψ = −ω on the periodic box.
+# ops.poisson reads the grid spacing and BCs straight from the field.
+streamfn(w) = ops.poisson(-w)
+
+fluidStep(w) = {
+  psi = streamfn(w);
+  adv = forms.hodge(forms.wedge(forms.d(psi), forms.d(w)));   # = −J(ψ,ω)
+  w + dt*(adv + nu*ops.lap(w) - mu*w + fa*forcing)
+}
+
+# Taylor-Green-like IC: clean vortex pairs seeded with noise.
+omega0 = field(tensor((i,j) -> {
+  x = 2*pi*i/N; y = 2*pi*j/N;
+  2*(sin(x)*cos(y) - cos(2*x)*sin(2*y)) + (rand()-0.5)*0.3
+}, N, N), 0, 2*pi, forms.periodic)
+
+st    = cell(omega0)
+# The animator wants a plain tensor, so decay the field with re() on the way out.
+frame = _ -> { w = get(st); set(st, fluidStep(w)); re(w) }
+
+!animate2D frame, 2000, 60
