@@ -8,8 +8,9 @@
 // Domain convention for the spectral solvers: a periodic box whose length along
 // axis a is N_a * dx, so integer FFT frequencies map to wavenumbers
 // k = 2*pi*freq / (N_a*dx).
-use crate::eval::{Val, TData, as_complex_tensor, unravel, fft_axis_inplace, fmt_val};
+use crate::eval::{Val, TData, FieldVal, BC, Variance, as_complex_tensor, unravel, fft_axis_inplace, fmt_val};
 use std::f64::consts::PI;
+use std::sync::Arc;
 
 pub const NAMES: &[&str] = &[
     "grad", "div", "curl", "lap", "poisson", "invlap", "specgrad",
@@ -84,6 +85,13 @@ fn fftn(re: &mut [f64], im: &mut [f64], shape: &[usize], forward: bool) {
 // ── dispatch ────────────────────────────────────────────────────────────────────
 
 pub fn dispatch(name: &str, vals: Vec<Val>, _env: &crate::eval::Env) -> Result<Val, String> {
+    // Field-polymorphic forms: when called on a `field`, the per-axis spacing and
+    // boundary conditions come from the field itself (no dx argument) and the
+    // result is a field, so pipelines stay inside the form algebra. Plain
+    // (tensor, dx [,…]) calls keep the original behaviour below.
+    if matches!(vals.first(), Some(Val::Field(_))) {
+        return field_dispatch(name, vals);
+    }
     match name {
         "grad"     => grad(vals),
         "specgrad" => specgrad(vals),
@@ -262,6 +270,173 @@ fn poisson(vals: Vec<Val>) -> Result<Val, String> {
     // The potential for a real source is real; discard FFT roundoff in the imag part.
     let _ = im;
     Ok(Val::Tensor { data: TData::new(re), shape })
+}
+
+// ── field-polymorphic forms ─────────────────────────────────────────────────────
+
+fn field_dispatch(name: &str, vals: Vec<Val>) -> Result<Val, String> {
+    if vals.len() != 1 {
+        return Err(format!("ops.{name}(field): dx/bc come from the field, so it takes exactly 1 argument"));
+    }
+    let f = match vals.into_iter().next().unwrap() { Val::Field(f) => f, _ => unreachable!() };
+    match name {
+        "grad"               => field_grad(&f),
+        "specgrad"           => field_specgrad(&f),
+        "div"                => field_div(&f),
+        "curl"               => field_curl(&f),
+        "lap"                => field_lap(&f),
+        "poisson" | "invlap" => field_poisson(&f),
+        _ => Err(format!("ops: unknown member '{name}'")),
+    }
+}
+
+fn gtot(grid: &[usize]) -> usize { grid.iter().product::<usize>().max(1) }
+
+/// Component c (component-fastest layout) of a field as a flat grid array.
+fn fcomp(data: &[f64], gt: usize, ncomp: usize, c: usize) -> Vec<f64> {
+    (0..gt).map(|p| data[p * ncomp + c]).collect()
+}
+
+/// Central first derivative of a grid array along `axis`, honouring the BC.
+fn d1(data: &[f64], grid: &[usize], dx: f64, axis: usize, bc: BC) -> Vec<f64> {
+    let (fwd, bwd) = match bc {
+        BC::Periodic => (roll_axis(data, grid, -1, axis), roll_axis(data, grid, 1, axis)),
+        BC::Neumann  => (clamp_axis(data, grid, -1, axis), clamp_axis(data, grid, 1, axis)),
+    };
+    fwd.iter().zip(bwd.iter()).map(|(&a, &b)| (a - b) / (2.0 * dx)).collect()
+}
+
+fn mkfield(f: &FieldVal, data: Vec<f64>, degree: usize, variance: Variance) -> Val {
+    Val::Field(Arc::new(FieldVal {
+        data: TData::new(data), degree, variance,
+        grid: f.grid.clone(), spacing: f.spacing.clone(), lo: f.lo.clone(),
+        bc: f.bc.clone(), metric: f.metric.clone(),
+    }))
+}
+
+fn require_scalar(f: &FieldVal, what: &str) -> Result<(), String> {
+    if f.degree != 0 {
+        return Err(format!("ops.{what}: expected a scalar (0-form) field, got degree {}", f.degree));
+    }
+    Ok(())
+}
+
+// grad(0-form field) -> 1-form field (compact central differences, per-axis dx/BC).
+fn field_grad(f: &FieldVal) -> Result<Val, String> {
+    require_scalar(f, "grad")?;
+    let (n, gt) = (f.grid.len(), gtot(&f.grid));
+    let mut out = vec![0.0; gt * n];
+    for a in 0..n {
+        let d = d1(&f.data, &f.grid, f.spacing[a], a, f.bc[a]);
+        for p in 0..gt { out[p * n + a] = d[p]; }
+    }
+    Ok(mkfield(f, out, 1, f.variance))
+}
+
+// lap(field) -> field of the same degree: the compact 3-point Laplacian applied
+// componentwise (∇², metric-free), distinct from forms.laplace's wide δd stencil.
+fn field_lap(f: &FieldVal) -> Result<Val, String> {
+    let (n, gt) = (f.grid.len(), gtot(&f.grid));
+    let ncomp = f.data.len() / gt;
+    let mut out = vec![0.0; f.data.len()];
+    for c in 0..ncomp {
+        let comp = fcomp(&f.data, gt, ncomp, c);
+        let mut acc = vec![0.0; gt];
+        for a in 0..n {
+            let inv = 1.0 / (f.spacing[a] * f.spacing[a]);
+            let (plus, minus) = match f.bc[a] {
+                BC::Periodic => (roll_axis(&comp, &f.grid, -1, a), roll_axis(&comp, &f.grid, 1, a)),
+                BC::Neumann  => (clamp_axis(&comp, &f.grid, -1, a), clamp_axis(&comp, &f.grid, 1, a)),
+            };
+            for p in 0..gt { acc[p] += (plus[p] + minus[p] - 2.0 * comp[p]) * inv; }
+        }
+        for p in 0..gt { out[p * ncomp + c] = acc[p]; }
+    }
+    Ok(mkfield(f, out, f.degree, f.variance))
+}
+
+// div(1-form/vector field with n components) -> 0-form field: Σ_a ∂_a V_a.
+fn field_div(f: &FieldVal) -> Result<Val, String> {
+    let (n, gt) = (f.grid.len(), gtot(&f.grid));
+    let ncomp = f.data.len() / gt;
+    if ncomp != n {
+        return Err(format!("ops.div: field has {ncomp} components but the grid is {n}-D"));
+    }
+    let mut acc = vec![0.0; gt];
+    for a in 0..n {
+        let comp = fcomp(&f.data, gt, ncomp, a);
+        let d = d1(&comp, &f.grid, f.spacing[a], a, f.bc[a]);
+        for p in 0..gt { acc[p] += d[p]; }
+    }
+    Ok(mkfield(f, acc, 0, f.variance))
+}
+
+// curl(2-component field on a 2-D grid) -> 0-form field: ∂_0 V_1 - ∂_1 V_0.
+fn field_curl(f: &FieldVal) -> Result<Val, String> {
+    let (n, gt) = (f.grid.len(), gtot(&f.grid));
+    let ncomp = f.data.len() / gt;
+    if n != 2 || ncomp != 2 {
+        return Err("ops.curl: only the 2-D scalar curl is supported (a 2-component field on a 2-D grid)".into());
+    }
+    let v0 = fcomp(&f.data, gt, 2, 0);
+    let v1 = fcomp(&f.data, gt, 2, 1);
+    let dv1 = d1(&v1, &f.grid, f.spacing[0], 0, f.bc[0]);
+    let dv0 = d1(&v0, &f.grid, f.spacing[1], 1, f.bc[1]);
+    let out: Vec<f64> = (0..gt).map(|p| dv1[p] - dv0[p]).collect();
+    Ok(mkfield(f, out, 0, f.variance))
+}
+
+/// All-periodic check for the spectral field operators.
+fn require_periodic(f: &FieldVal, what: &str) -> Result<(), String> {
+    if f.bc.iter().any(|&b| b != BC::Periodic) {
+        return Err(format!("ops.{what}: spectral operators require a periodic field"));
+    }
+    Ok(())
+}
+
+// specgrad(0-form field) -> 1-form field: spectral derivative via i*k (periodic).
+fn field_specgrad(f: &FieldVal) -> Result<Val, String> {
+    require_scalar(f, "specgrad")?;
+    require_periodic(f, "specgrad")?;
+    let (n, gt) = (f.grid.len(), gtot(&f.grid));
+    let mut out = vec![0.0; gt * n];
+    for a in 0..n {
+        let mut re = f.data.to_vec();
+        let mut im = vec![0.0; gt];
+        fftn(&mut re, &mut im, &f.grid, true);
+        for p in 0..gt {
+            let multi = unravel(p, &f.grid);
+            let k = kfreq(multi[a], f.grid[a]) * 2.0 * PI / (f.grid[a] as f64 * f.spacing[a]);
+            let (nr, ni) = (-k * im[p], k * re[p]);
+            re[p] = nr; im[p] = ni;
+        }
+        fftn(&mut re, &mut im, &f.grid, false);
+        for p in 0..gt { out[p * n + a] = re[p]; }
+    }
+    Ok(mkfield(f, out, 1, f.variance))
+}
+
+// poisson/invlap(0-form field) -> 0-form field: spectral ∇²u = rhs (periodic, zero-mean).
+fn field_poisson(f: &FieldVal) -> Result<Val, String> {
+    require_scalar(f, "poisson")?;
+    require_periodic(f, "poisson")?;
+    let gt = gtot(&f.grid);
+    let n = f.grid.len();
+    let mut re = f.data.to_vec();
+    let mut im = vec![0.0; gt];
+    fftn(&mut re, &mut im, &f.grid, true);
+    for p in 0..gt {
+        let multi = unravel(p, &f.grid);
+        let mut k2 = 0.0;
+        for a in 0..n {
+            let k = kfreq(multi[a], f.grid[a]) * 2.0 * PI / (f.grid[a] as f64 * f.spacing[a]);
+            k2 += k * k;
+        }
+        if k2 == 0.0 { re[p] = 0.0; im[p] = 0.0; }
+        else { re[p] = -re[p] / k2; im[p] = -im[p] / k2; }
+    }
+    fftn(&mut re, &mut im, &f.grid, false);
+    Ok(mkfield(f, re, 0, f.variance))
 }
 
 // ── shape utilities ─────────────────────────────────────────────────────────────

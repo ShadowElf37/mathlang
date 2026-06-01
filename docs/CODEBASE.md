@@ -11,8 +11,11 @@ src/
   eval.rs          — Evaluator, builtins, VM, type inference (largest file ~5000 lines)
   ns/              — Standard namespaces (`.` access), each in its own module:
     mod.rs         — register_all (called by Env::new), routing to new-function dispatch
-    ops.rs   — grad/div/curl/lap/poisson/invlap/specgrad (finite-diff + spectral)
+    ops.rs   — grad/div/curl/lap/poisson/invlap/specgrad (finite-diff + spectral);
+                     also field-polymorphic when the first arg is a Val::Field
     solver.rs      — rk4/odeint/cfl time integrators
+    forms.rs       — field() constructor + exterior calculus (d/hodge/wedge/raise/
+                     lower/codiff/laplace) on Val::Field; metric-aware
     special.rs bits.rs stats.rs linalg.rs vec.rs — relocated niche builtins (membership lists)
   repl.rs          — REPL loop, bang commands, syntax highlighting, tab completion
   graph.rs         — !graph command: sample → PNG via plotters → open in animator (bare RGB mode)
@@ -100,6 +103,23 @@ builtins are exposed as `Val::Builtin("<bare>")` so they dispatch through the
 unchanged `eval_builtin` match; new PDE functions (ops/solver) route from
 `eval_builtin` via `crate::ns::dispatch` into their module files. User namespaces
 are built by `import_file` from an `!namespace`-headed file (see `NsBuild`).
+
+### Fields and differential forms
+
+`Val::Field(Arc<FieldVal>)` is a k-form sampled on a regular grid. `FieldVal`
+carries the component `data` (flat, layout `grid ++ [C(n,degree)]`, component-axis
+fastest), per-axis `grid`/`spacing`/`lo`/`bc`/`metric`, plus `degree` and
+`variance` (Form vs Vector). Two per-axis quantities are kept separate by design:
+`spacing` (dx) enters only the exterior derivative `d`; `metric` (diagonal g_ii,
+Euclidean=all 1, Minkowski=e.g. -1,1,1,1) enters only hodge/raise/lower/codiff/
+laplace. The `forms` module holds the constructor (`field`, special-cased in
+`eval_builtin`) and the operators (in `forms::NAMES`, routed via `crate::ns::dispatch`);
+components are indexed by sorted k-subsets in lexicographic order with Levi-Civita
+signs from `perm_sign`. Arithmetic operators preserve field-ness (`field_binop` in
+eval.rs); any other named builtin decays a field to its tensor (`field_data_as_tensor`)
+on entry to `eval_builtin`. `ops::dispatch` checks for a leading `Val::Field` and
+routes to its field-polymorphic branch (`field_dispatch`), reading dx/bc from the
+field and returning a field.
 
 `FnSig { params: Vec<Option<TypeHint>>, ret: Option<TypeHint> }` stored with each `Val::Fn`.
 

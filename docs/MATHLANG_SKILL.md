@@ -306,6 +306,7 @@ bits.{and or xor nand nor xnor shl shr not}
 stats.{median mode var}            # mean, std stay flat
 linalg.{qr diagonalize tensordot outer eig_top eig_bot}   # det inv solve eig eigvals stay flat
 vec.{lerp clamp}
+forms.{d hodge wedge raise lower codiff laplace}   # exterior calculus on fields
 ```
 
 **Differential operators / solvers** (for PDE work — `dx` is always required):
@@ -320,6 +321,35 @@ solver.rk4(f, y0, t0, t1, n)       # fixed-step RK4; f is dy/dt = f(t, y)
 solver.odeint(f, y0, ts)           # RK4 sampled at the times in ts → stacked trajectory
 solver.cfl(V, dx, dt)              # Courant number dt·max|V|/dx
 ```
+
+**Fields and differential forms.** A `field` packages grid samples with their
+geometry (box, boundary conditions, derived spacing, diagonal metric):
+
+```
+field(data, lo, hi, bc [, metric])   # bc = forms.periodic | forms.neumann (per axis)
+f = field(tensor(k -> sin(2*pi*k/64), 64), 0, 2*pi, forms.periodic)
+# metric defaults to Euclidean; Minkowski is just (-1, 1, 1, 1)
+```
+
+A field is a *k-form* (0-form = scalar, 1-form = gradient, …) with C(n,k) trailing
+components. `forms.*` is exterior calculus:
+
+```
+forms.d(f)        # exterior derivative: k-form → (k+1)-form (grad/curl/div unified)
+forms.hodge(f)    # Hodge star ★: k-form → (n-k)-form
+forms.wedge(a,b)  # exterior product ∧
+forms.raise(f) / forms.lower(f)   # musical isomorphisms ♯ / ♭
+forms.codiff(f)   # codifferential δ = ±★d★
+forms.laplace(f)  # Laplace–de Rham Δ = dδ + δd
+```
+
+Design rule: **`dx` enters only `d`** (which is therefore metric-free), while the
+**metric enters only `hodge`/`raise`/`lower`/`codiff`/`laplace`**. Hence the same
+code does Euclidean (`forms.laplace` of a 0-form = −∇²) and Minkowski (metric
+`(-1,1,1,1)` ⇒ `forms.laplace` = d'Alembertian □ = −∂ₜ² + ∇²). The `ops.*`
+operators are field-polymorphic: `ops.lap(f)`, `ops.grad(f)`, `ops.poisson(f)`,
+etc. read `dx`/bc from the field and return a field (`ops.lap` uses the compact
+stencil, vs `forms.laplace`'s wider δd stencil).
 
 **User namespaces:** `!namespace foo` at the top of an included `.math` file
 collects its public definitions into `foo`; prefix a def with `private` to keep it

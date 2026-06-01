@@ -1499,6 +1499,39 @@ run_err "bug6.zeroarg.arity1" "f = x -> x+1; f()"       ""
 run_err "bug6.zeroarg.arity2" "h=(x,y)->x+y; h()"       ""
 run "bug6.zeroarg.lambda.ok"  "g = () -> 3; g()"        "3"
 
+# ── fields & differential forms ─────────────────────────────────────────────────
+section "FIELDS & FORMS"
+# construction: a scalar field is a 0-form; display shows degree/extent/bc.
+run_match "field.ctor.0form"  "field((1,2,3,4), 0, 1, forms.periodic)" "0-form \[4\] on \[0, 1\] periodic"
+run_match "field.ctor.neumann.extent" "field((1,2,3,4), 0, 1, forms.neumann)" "on \[0, 1\] neumann"
+run_match "field.ctor.metric.show" "field(zeros(4,4), (0,0), (1,1), forms.periodic, (-1,1))" "metric\(-1, 1\)"
+# arithmetic preserves field-ness: 2*f + f == 3*f.
+run "field.arith.scale"       "f=field((1,2,3,4),0,1,forms.neumann); g=2*f+f; re(g)" "[3, 6, 9, 12]"
+run_err "field.arith.mismatch" "a=field((1,2,3),0,1,forms.periodic); b=field((1,2,3),0,1,forms.neumann); a+b" ""
+# named builtins decay a field to its component tensor.
+run "field.decay.re"          "round(sum(re(field((1,2,3,4),0,1,forms.periodic))),6)" "10"
+# d: exterior derivative of sin ≈ cos (central diff), and d∘d = 0.
+run_match "forms.d.sin"       "f=field(tensor(k->sin(2*pi*k/64),64),0,2*pi,forms.periodic); max(abs(re(forms.d(f))-tensor(k->cos(2*pi*k/64),64)))" "0.001[0-9]"
+run "forms.dd.zero"           "f=field(tensor((i,j)->sin(2*pi*i/8)*cos(2*pi*j/8),8,8),0,2*pi,forms.periodic); round(max(abs(forms.d(forms.d(f)))),9)" "0"
+# hodge: ★★ = identity on a 1-form in 3-D Euclidean.
+run "forms.hodge.involution"  "w=forms.d(field(tensor((i,j,k)->sin(2*pi*i/4),4,4,4),0,2*pi,forms.periodic)); round(max(abs(forms.hodge(forms.hodge(w))-w)),9)" "0"
+# wedge: antisymmetry a∧b = -(b∧a) and a∧a = 0 for 1-forms.
+run "forms.wedge.antisym"     "a=forms.d(field(tensor((i,j)->sin(2*pi*i/6),6,6),0,2*pi,forms.periodic)); b=forms.d(field(tensor((i,j)->cos(2*pi*j/6),6,6),0,2*pi,forms.periodic)); round(max(abs(forms.wedge(a,b)+forms.wedge(b,a))),9)" "0"
+run "forms.wedge.selfzero"    "a=forms.d(field(tensor((i,j)->sin(2*pi*i/6),6,6),0,2*pi,forms.periodic)); round(max(abs(forms.wedge(a,a))),9)" "0"
+# musical isomorphisms round-trip to the identity (even under a Minkowski metric).
+run "forms.raiselower.mink"   "w=forms.d(field(tensor((i,j)->sin(2*pi*i/6),6,6),0,2*pi,forms.periodic,(-1,1))); round(max(abs(forms.lower(forms.raise(w))-w)),9)" "0"
+# Laplace–de Rham on a 0-form ≈ -∇² (wide δd stencil; match the sign, not exact).
+run_match "forms.laplace.sign" "g=tensor((i,j)->sin(2*pi*i/64)*cos(2*pi*j/64),64,64); f=field(g,0,2*pi,forms.periodic); max(abs(re(forms.laplace(f))+ops.lap(g,2*pi/64)))" "0.00[0-9]"
+# Minkowski metric flips the sign of the timelike second-derivative term (exact, same stencil).
+run "forms.laplace.minkowski" "g=tensor((i,j)->sin(2*pi*i/16)*cos(2*pi*j/16),16,16); fe=field(g,0,2*pi,forms.periodic); fm=field(g,0,2*pi,forms.periodic,(-1,1)); dx=2*pi/16; dyy=ops.grad(ops.grad(g,dx,1),dx,1); round(max(abs((re(forms.laplace(fe))-re(forms.laplace(fm)))+2*dyy)),9)" "0"
+# field-polymorphic ops.*: derive dx/bc from the field, return a field.
+run "ops.field.lap.matches"   "g=tensor((i,j)->sin(2*pi*i/16)*cos(2*pi*j/16),16,16); f=field(g,0,2*pi,forms.periodic); round(max(abs(re(ops.lap(f))-ops.lap(g,2*pi/16))),9)" "0"
+run "ops.field.grad.matches.d" "g=tensor((i,j)->sin(2*pi*i/16)*cos(2*pi*j/16),16,16); f=field(g,0,2*pi,forms.periodic); round(max(abs(re(ops.grad(f))-re(forms.d(f)))),9)" "0"
+run_match "ops.field.grad.is.field" "f=field(tensor(k->sin(2*pi*k/8),8),0,2*pi,forms.periodic); ops.grad(f)" "1-form"
+run_match "ops.field.poisson.is.field" "f=field(tensor(k->sin(2*pi*k/8),8),0,2*pi,forms.periodic); ops.poisson(f)" "0-form"
+run_err "ops.field.poisson.periodic" "f=field((1,2,3,4),0,1,forms.neumann); ops.poisson(f)" ""
+run_err "ops.field.extra.arg"  "f=field(tensor(k->sin(2*pi*k/8),8),0,2*pi,forms.periodic); ops.lap(f, 0.1)" ""
+
 # ── print summary ─────────────────────────────────────────────────────────────
 echo
 echo "================================"

@@ -102,6 +102,94 @@ pub struct FnSig {
     pub ret:    Option<TypeHint>,
 }
 
+/// Boundary condition for a grid axis (governs the finite-difference stencil in `d`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BC { Periodic, Neumann }
+
+/// A differential-form field is covariant (Form, the default) or contravariant
+/// (Vector). On a Euclidean Cartesian grid the two are numerically identical
+/// component-by-component; the tag tracks intent (raise/lower flip it).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Variance { Form, Vector }
+
+/// A k-form (or k-vector) field sampled on a regular Cartesian grid.
+///
+/// `data` is flat row-major with logical shape `grid ++ [ncomp]`, where
+/// `ncomp = C(n, degree)` and the components are the sorted `degree`-subsets of
+/// `0..n` in lexicographic order (n = grid.len()). `spacing`/`lo`/`bc`/`metric`
+/// are per spatial axis.
+///
+/// Two distinct per-axis quantities, deliberately separate:
+///   - `spacing` (dx): the discretization step. Enters ONLY the exterior
+///     derivative `d` (finite differences ÷ dx). `d` is otherwise metric-free.
+///   - `metric` (diagonal g_ii): the geometry/signature. Enters `hodge`,
+///     `raise`/`lower`, `codiff`, `lap`. Euclidean = all +1; Minkowski =
+///     e.g. (-1, 1, 1, 1). Constant over the grid (position-dependent metrics
+///     are a future extension — and `d` already needs no change for them).
+#[derive(Debug, Clone)]
+pub struct FieldVal {
+    pub data:     TData,
+    pub grid:     Vec<usize>,
+    pub spacing:  Vec<f64>,
+    pub lo:       Vec<f64>,
+    pub bc:       Vec<BC>,
+    pub metric:   Vec<f64>,   // diagonal metric g_ii (constant); Euclidean = all 1
+    pub degree:   usize,
+    pub variance: Variance,
+}
+
+impl FieldVal {
+    /// Number of components, C(n, degree).
+    pub fn ncomp(&self) -> usize { binomial(self.grid.len(), self.degree) }
+}
+
+/// Binomial coefficient C(n, k).
+pub fn binomial(n: usize, k: usize) -> usize {
+    if k > n { return 0; }
+    let k = k.min(n - k);
+    let mut r = 1usize;
+    for i in 0..k { r = r * (n - i) / (i + 1); }
+    r
+}
+
+/// Arithmetic on fields: operate component-wise on the data, carrying the
+/// geometry. field∘field requires matching grid/degree/variance/spacing/bc/metric
+/// (a mismatch is a real error — adding fields on different grids is a bug); a
+/// field combines with a scalar or a same-shape tensor by broadcasting the data.
+fn field_binop(lv: Val, op: &Op, rv: Val) -> Result<Val, String> {
+    let meta: Arc<FieldVal> = match (&lv, &rv) {
+        (Val::Field(a), _) => a.clone(),
+        (_, Val::Field(b)) => b.clone(),
+        _ => unreachable!(),
+    };
+    if let (Val::Field(a), Val::Field(b)) = (&lv, &rv) {
+        if a.grid != b.grid || a.degree != b.degree || a.variance != b.variance
+            || a.spacing != b.spacing || a.bc != b.bc || a.metric != b.metric {
+            return Err("field op: incompatible fields (grid, degree, variance, spacing, bc, metric must match)".into());
+        }
+    }
+    let lt = match lv { Val::Field(ref a) => field_data_as_tensor(a), other => other };
+    let rt = match rv { Val::Field(ref b) => field_data_as_tensor(b), other => other };
+    match binop_tensor(lt, op, rt)? {
+        Val::Tensor { data, .. } => Ok(crate::ns::forms::with_data(&meta, data.into_vec())),
+        other => Err(format!("field op produced a non-real result: {}", fmt_val(&other))),
+    }
+}
+
+/// View a field's component data as a plain Tensor (the component axis is dropped
+/// for a 0-form, so a scalar field displays/extracts as an ordinary grid tensor).
+pub(crate) fn field_data_as_tensor(f: &FieldVal) -> Val {
+    let ncomp = f.ncomp();
+    let shape = if ncomp == 1 {
+        f.grid.clone()
+    } else {
+        let mut s = f.grid.clone();
+        s.push(ncomp);
+        s
+    };
+    Val::Tensor { data: f.data.clone(), shape }
+}
+
 #[derive(Clone, Debug)]
 pub enum Val {
     Num(f64),
@@ -125,6 +213,9 @@ pub enum Val {
     /// Cloning a Cell shares the same RefCell (identity semantics).
     /// Created with cell(v); read with get(c); written with set(c, v).
     Cell(Arc<RefCell<Val>>),
+    /// A differential-form / vector field on a regular grid (see FieldVal).
+    /// Arc-wrapped for O(1) clone.
+    Field(Arc<FieldVal>),
     /// A namespace: a map from member name to value, accessed with `ns.member`.
     /// Builtin namespaces (ops, special, …) are registered in Env::new;
     /// user namespaces are built by an `!namespace`-headed included file.
@@ -143,6 +234,7 @@ impl Val {
             Val::ComplexTensor { .. } => Err(format!("{ctx}: expected a number, got a complex tensor")),
             Val::Cell(..)             => Err(format!("{ctx}: expected a number, got a cell (use get())")),
             Val::Namespace(..)        => Err(format!("{ctx}: expected a number, got a namespace")),
+            Val::Field(..)            => Err(format!("{ctx}: expected a number, got a field")),
         }
     }
 
@@ -222,6 +314,7 @@ impl Env {
             "sum", "prod", "integral", "deriv", "map",
             "iterate", "scan",
             "cell", "get", "set",
+            "field",
             // Tensor ops
             "tensor", "matrix", "zeros", "ones", "eye", "diag",
             "shape", "rows", "cols", "transpose", "trace", "norm",
@@ -255,6 +348,7 @@ pub fn hint_of_val(v: &Val) -> TypeHint {
         Val::Cell(_)              => TypeHint::Cell,
         Val::Fn(..) | Val::Builtin(_) => TypeHint::Fn,
         Val::Namespace(_)         => TypeHint::Any,
+        Val::Field(_)             => TypeHint::Any,
     }
 }
 
@@ -593,6 +687,7 @@ pub fn is_protected(name: &str) -> bool {
         | "sum" | "prod" | "integral" | "deriv" | "map"
         | "iterate" | "scan"
         | "cell" | "get" | "set"
+        | "field"
         | "tensor" | "matrix" | "zeros" | "ones" | "eye" | "diag"
         | "shape" | "rows" | "cols" | "transpose" | "trace" | "norm"
         | "row" | "col" | "matmul"
@@ -604,7 +699,7 @@ pub fn is_protected(name: &str) -> bool {
         | "reshape" | "permute" | "cat" | "squeeze" | "unsqueeze"
         | "dim"
         // Standard namespace names (ops, special, bits, …) are reserved too.
-        | "ops" | "solver" | "special" | "bits" | "stats" | "linalg" | "vec"
+        | "ops" | "solver" | "forms" | "special" | "bits" | "stats" | "linalg" | "vec"
     )
 }
 
@@ -682,6 +777,27 @@ pub fn fmt_val(v: &Val) -> String {
             let mut names: Vec<&String> = map.keys().collect();
             names.sort();
             format!("namespace{{{}}}", names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "))
+        }
+        Val::Field(f) => {
+            let kind = match f.variance { Variance::Form => "form", Variance::Vector => "vector field" };
+            let dims = f.grid.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("×");
+            let extent = (0..f.grid.len())
+                .map(|a| {
+                    let (lo, dx, n) = (f.lo[a], f.spacing[a], f.grid[a]);
+                    // periodic excludes the duplicate endpoint (hi = lo + dx·N);
+                    // neumann includes both endpoints (hi = lo + dx·(N−1)).
+                    let cells = match f.bc[a] { BC::Periodic => n, BC::Neumann => n.saturating_sub(1) };
+                    format!("[{}, {}]", fmt_f(lo), fmt_f(lo + dx * cells as f64))
+                })
+                .collect::<Vec<_>>().join("×");
+            let bc = if f.bc.iter().all(|&b| b == BC::Periodic) { "periodic" }
+                     else if f.bc.iter().all(|&b| b == BC::Neumann) { "neumann" }
+                     else { "mixed-bc" };
+            let metric = if f.metric.iter().all(|&g| g == 1.0) { String::new() }
+                else { format!(" metric({})", f.metric.iter().map(|&g| fmt_f(g)).collect::<Vec<_>>().join(", ")) };
+            format!("{}-{} [{}] on {} {}{}\n{}",
+                f.degree, kind, dims, extent, bc, metric,
+                fmt_val(&field_data_as_tensor(f)))
         }
         Val::Tuple(items) => {
             let parts: Vec<String> = items.iter().map(|item| {
@@ -774,6 +890,7 @@ fn to_complex(v: Val) -> Result<(f64, f64), String> {
         Val::ComplexTensor { .. } => Err("expected a number, got a complex tensor".into()),
         Val::Cell(..)             => Err("expected a number, got a cell (use get())".into()),
         Val::Namespace(..)        => Err("expected a number, got a namespace".into()),
+        Val::Field(..)            => Err("expected a number, got a field".into()),
     }
 }
 
@@ -1223,7 +1340,7 @@ pub(crate) fn fft_axis_inplace(re: &mut [f64], im: &mut [f64], shape: &[usize], 
 
 // ── Builtin dispatch ──────────────────────────────────────────────────────────
 
-pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String> {
+pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, String> {
     macro_rules! b1 {
         ($closure:expr) => {{
             arity(name, 1, vals.len())?;
@@ -1242,6 +1359,20 @@ pub fn eval_builtin(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String
     // so the flat match still owns `vals` for every other name).
     if crate::ns::is_ns_builtin(name) {
         return crate::ns::dispatch(name, vals, env).unwrap();
+    }
+    if name == "field" {
+        return crate::ns::forms::field_ctor(vals);
+    }
+
+    // A field decays to its component tensor under any flat builtin reached here
+    // (abs/max/sum/sin/…). Arithmetic operators preserve field-ness via
+    // `field_binop`, and the form/operator namespaces (forms.*, ops.*) are routed
+    // out above with their fields intact; everything else treats a field as data.
+    for i in 0..vals.len() {
+        if let Val::Field(f) = &vals[i] {
+            let t = field_data_as_tensor(f);
+            vals[i] = t;
+        }
     }
 
     match name {
@@ -3906,6 +4037,10 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                     Val::Builtin(_) => return Err("cannot scale a builtin function".into()),
                     Val::Cell(..) => return Err("cannot scale a cell (use get/set)".into()),
                     Val::Namespace(..) => return Err("cannot scale a namespace".into()),
+                    Val::Field(f) => {
+                        let scaled = f.data.iter().map(|&x| s * x).collect();
+                        return Ok(Val::Field(Arc::new(FieldVal { data: TData::new(scaled), ..(**f).clone() })));
+                    }
                 }
             }
             let nums: Result<Vec<f64>, _> = args.into_iter().map(|v| v.num("scalar-apply")).collect();
@@ -3929,6 +4064,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
         Val::ComplexTensor { .. } => Err("complex tensors are not callable".into()),
         Val::Cell(..) => Err("cells are not callable (use get/set)".into()),
         Val::Namespace(..) => Err("namespaces are not callable (use ns.member)".into()),
+        Val::Field(..) => Err("fields are not callable".into()),
     }
 }
 
@@ -4339,11 +4475,19 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                               im.into_iter().map(|x| -x).collect(),
                               shape))
             }
+            Val::Field(f) => {
+                let neg = f.data.iter().map(|&x| -x).collect();
+                Ok(Val::Field(Arc::new(FieldVal { data: TData::new(neg), ..(*f).clone() })))
+            }
             Val::Fn(..) | Val::Builtin(_) | Val::Cell(..) | Val::Namespace(..) => Err("unary minus: expected a number".into()),
         },
         Expr::BinOp(l, op, r) => {
             let lv = eval(l, env)?;
             let rv = eval(r, env)?;
+            // Field arithmetic: operate on component data, carrying geometry.
+            if matches!((&lv, &rv), (Val::Field(_), _) | (_, Val::Field(_))) {
+                return field_binop(lv, op, rv);
+            }
             // Tensor/ComplexTensor dispatch (before tuple, since Tensor is not a Tuple)
             if matches!((&lv, &rv),
                 (Val::Tensor { .. }, _) | (_, Val::Tensor { .. }) |

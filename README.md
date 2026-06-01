@@ -864,6 +864,7 @@ The standard namespaces are:
 | `linalg`  | `qr diagonalize tensordot outer eig_top eig_bot` |
 | `vec`     | `lerp clamp` |
 | `ops` / `solver` | differential operators and integrators — see below |
+| `forms`   | exterior calculus on fields: `d hodge wedge raise lower codiff laplace` — see below |
 
 A namespace is a first-class value (`f = bits.xor; f(6,3)`). Names placed in a
 namespace are **not** reserved words, so `xor`, `lerp`, `var`, … are free to use
@@ -912,6 +913,64 @@ classic and silent source of wrong results.
 ```
 
 `examples/fluid2D.math` is a worked 2-D turbulence simulation built on these.
+
+---
+
+## Fields and differential forms
+
+A **field** packages a tensor of grid samples with the geometry needed to do
+calculus on it — the box it lives on, the boundary conditions, the grid spacing,
+and a metric. Build one with `field`:
+
+```
+> field(data, lo, hi, bc [, metric])
+> f = field(tensor(k -> sin(2*pi*k/64), 64), 0, 2*pi, forms.periodic)
+0-form [64] on [0, 6.283185307179586] periodic
+…
+```
+
+* `lo`/`hi` are the lower/upper corners (a scalar broadcasts to every axis, or
+  pass a tuple per axis). The spacing `dx` is derived from them: a `forms.periodic`
+  axis treats `[lo, hi)` as a torus (`dx = (hi-lo)/N`); a `forms.neumann` (no-flux)
+  axis includes both endpoints (`dx = (hi-lo)/(N-1)`).
+* `bc` is `forms.periodic` or `forms.neumann`, per axis.
+* `metric` is the optional **diagonal metric** `g_ii` (default all `1`, i.e.
+  Euclidean). Minkowski is just `(-1, 1, 1, 1)`; an anisotropic grid is any other
+  diagonal.
+
+A field is a *k-form*: a scalar field is a 0-form, a gradient is a 1-form, and so
+on. A k-form on an n-D grid has C(n,k) components, stored on a trailing axis.
+Arithmetic (`+ - *` by scalars and matching fields) stays inside the field
+algebra; any named builtin (`abs`, `max`, `sum`, `re`, …) decays a field to its
+underlying tensor.
+
+The **`forms`** namespace is exterior calculus:
+
+```
+> forms.d(f)            # exterior derivative: k-form → (k+1)-form
+                        #   (grad on a 0-form, curl on a 1-form, div on an (n-1)-form)
+> forms.hodge(f)        # Hodge star ★: k-form → (n-k)-form
+> forms.wedge(a, b)     # exterior product ∧: (k-form, l-form) → (k+l)-form
+> forms.raise(f)        # musical sharp ♯: form → vector field (raise indices)
+> forms.lower(f)        # musical flat  ♭: vector field → form (lower indices)
+> forms.codiff(f)       # codifferential δ = ±★d★: k-form → (k-1)-form
+> forms.laplace(f)      # Laplace–de Rham Δ = dδ + δd
+```
+
+The two per-axis quantities are kept strictly separate. **The grid spacing `dx`
+enters only `d`** (and grad/curl/div, which are `d` in disguise); `d` is otherwise
+metric-free. **The metric enters only `hodge`/`raise`/`lower`/`codiff`/`laplace`.**
+That separation is what makes the same code do Euclidean and Minkowski geometry:
+on a Euclidean grid `raise`/`lower` are the identity and `forms.laplace` of a
+0-form is `−∇²`; flip the timelike sign with metric `(-1,1,1,1)` and `forms.laplace`
+becomes the d'Alembertian `□ = −∂ₜ² + ∇²` — no other change.
+
+The `ops` operators are **field-polymorphic**: call `ops.grad`, `ops.div`,
+`ops.curl`, `ops.lap`, `ops.specgrad`, or `ops.poisson` on a field (with no `dx`
+argument) and they read the spacing and boundary conditions from the field and
+return a field. `ops.lap(f)` uses the compact 3-point stencil (distinct from
+`forms.laplace`'s wider `δd` stencil), and `ops.poisson(f)` does the spectral
+Poisson solve — both staying inside the field algebra.
 
 ---
 
