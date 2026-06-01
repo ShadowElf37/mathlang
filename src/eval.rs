@@ -4152,8 +4152,8 @@ fn scalar_binop(lv: Val, op: &Op, rv: Val) -> Result<Val, String> {
             Op::GtEq     => if la >= ra { 1.0 } else { 0.0 },
             Op::Eq       => if la == ra { 1.0 } else { 0.0 },
             Op::Ne       => if la != ra { 1.0 } else { 0.0 },
-            Op::And      => (int(*la) & int(*ra)) as f64,
-            Op::Or       => (int(*la) | int(*ra)) as f64,
+            Op::And      => if int(*la) != 0 && int(*ra) != 0 { 1.0 } else { 0.0 },
+            Op::Or       => if int(*la) != 0 || int(*ra) != 0 { 1.0 } else { 0.0 },
         }));
     }
     let (la, lb) = to_complex(lv)?;
@@ -4549,8 +4549,8 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                     Op::GtEq     => if la >= ra { 1.0 } else { 0.0 },
                     Op::Eq       => if la == ra { 1.0 } else { 0.0 },
                     Op::Ne       => if la != ra { 1.0 } else { 0.0 },
-                    Op::And      => (int(*la) & int(*ra)) as f64,
-                    Op::Or       => (int(*la) | int(*ra)) as f64,
+                    Op::And      => if int(*la) != 0 && int(*ra) != 0 { 1.0 } else { 0.0 },
+                    Op::Or       => if int(*la) != 0 || int(*ra) != 0 { 1.0 } else { 0.0 },
                 }));
             }
             let (la, lb) = to_complex(lv)?;

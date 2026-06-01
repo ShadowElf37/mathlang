@@ -3,7 +3,8 @@
 ##
 ## Color mapping (REPL ANSI → nano):
 ##   \x1b[36m  cyan         → numbers, constants (pi e phi inf i)
-##   \x1b[38;5;208m orange  → namespace names (ops solver forms ...)
+##   \x1b[38;5;208m orange  → namespace names — ideally #FF8700/208, falls back to yellow
+##                           (Homebrew nano bottles are compiled without --enable-extra-colors)
 ##   \x1b[95m  brightmagenta→ builtin functions, namespace members
 ##   \x1b[32m  green        → type keywords (after ':' in REPL; everywhere here)
 ##   \x1b[33m  yellow       → operators + !commands
@@ -15,7 +16,7 @@ syntax "mathlang" "\.math$"
 ## Two-char operators first so ** isn't split into two *s.
 ## Yellow = \x1b[33m in the REPL.
 color yellow "(->|\*\*|//|\.\.)"
-color yellow "[+\-*/%^]"
+color yellow "[-+*/%^~]"
 
 ## ── Numbers ──────────────────────────────────────────────────────────────
 ## Integers, floats, and scientific notation. Cyan = \x1b[36m.
@@ -30,9 +31,9 @@ color cyan "\b(pi|phi|inf)\b"
 color cyan "\be\b"
 color cyan "\bi\b"
 
-## ── Namespace names (256-colour orange) ─────────────────────────────────
-## These are the namespaces registered in Env::new via ns::register_all.
-color 208 "\b(ops|solver|forms|special|bits|stats|linalg|vec)\b"
+## ── Namespace names (orange in REPL; yellow here — Homebrew nano lacks 256-color) ──
+## True orange would be: color #FF8700 or color 208 (requires --enable-extra-colors).
+color yellow "\b(ops|solver|forms|special|bits|stats|linalg|vec)\b"
 
 ## ── Type keywords (green = \x1b[32m) ────────────────────────────────────
 ## In the REPL these are only green after ':', but nano lacks that context.
