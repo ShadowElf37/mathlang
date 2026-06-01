@@ -355,6 +355,7 @@ impl Parser {
 
     fn unary(&mut self) -> Result<Expr, String> {
         if *self.peek() == Token::Minus { self.bump(); return Ok(Expr::Neg(self.pow()?.into())); }
+        if *self.peek() == Token::Tilde { self.bump(); return Ok(Expr::Not(self.unary()?.into())); }
         self.pow()
     }
 

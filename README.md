@@ -248,6 +248,7 @@ m 'sqrt(2), sin(pi/2)'       # 1.414…  1  (comma = multiple outputs)
 | `%` | remainder |
 | `<` `>` `<=` `>=` `==` `!=` | comparison (returns `1` or `0`) |
 | `&` `\|` | bitwise AND / OR (also written `&&` / `\|\|`) |
+| `~` | logical NOT: `~0 = 1`, `~x = 0` for any non-zero `x` |
 | `n!` | postfix factorial (`5! = 120`) |
 | `A @ B` | matrix / tensor multiply |
 
@@ -859,7 +860,7 @@ The standard namespaces are:
 | Namespace | Members |
 |-----------|---------|
 | `special` | `erf erfc j0 j1 jinc sinc sech csch gaussian gaussian_cdf delta` |
-| `bits`    | `and or xor nand nor xnor shl shr not` |
+| `bits`    | `and or xor nand nor xnor shl shr not`  (operators `& \| ~` work without `bits.`) |
 | `stats`   | `median mode var` (mean, std are flat) |
 | `linalg`  | `qr diagonalize tensordot outer eig_top eig_bot` |
 | `vec`     | `lerp clamp` |

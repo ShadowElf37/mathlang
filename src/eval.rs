@@ -438,7 +438,7 @@ pub fn infer_type(expr: &Expr, params: &HashMap<String, TypeHint>, env: &Env) ->
                 _                                  => Any,
             }
         }
-        Expr::Neg(e) => infer_type(e, params, env),
+        Expr::Neg(e) | Expr::Not(e) => infer_type(e, params, env),
         Expr::BinOp(l, op, r) => match op {
             Op::Lt | Op::Gt | Op::LtEq | Op::GtEq | Op::Eq | Op::Ne | Op::And | Op::Or => Real,
             _ => fuse_arith(infer_type(l, params, env), infer_type(r, params, env)),
@@ -3206,7 +3206,7 @@ fn cfv(
             cfv(l, inner_params, outer_params, outer_locals, outer_captured, vars, seen);
             cfv(r, inner_params, outer_params, outer_locals, outer_captured, vars, seen);
         }
-        Expr::Neg(e) => cfv(e, inner_params, outer_params, outer_locals, outer_captured, vars, seen),
+        Expr::Neg(e) | Expr::Not(e) => cfv(e, inner_params, outer_params, outer_locals, outer_captured, vars, seen),
         Expr::Apply(f, args) => {
             cfv(f, inner_params, outer_params, outer_locals, outer_captured, vars, seen);
             for a in args { cfv(a, inner_params, outer_params, outer_locals, outer_captured, vars, seen); }
@@ -3263,7 +3263,7 @@ fn expr_contains_var(expr: &Expr, target: &str) -> bool {
         Expr::Var(name)      => name == target,
         Expr::Num(_) | Expr::ImagLit(_) => false,
         Expr::BinOp(l, _, r) => expr_contains_var(l, target) || expr_contains_var(r, target),
-        Expr::Neg(e)         => expr_contains_var(e, target),
+        Expr::Neg(e) | Expr::Not(e) => expr_contains_var(e, target),
         Expr::Apply(f, args) => expr_contains_var(f, target) || args.iter().any(|a| expr_contains_var(a, target)),
         Expr::Tuple(es) | Expr::Array(es) => es.iter().any(|e| expr_contains_var(e, target)),
         Expr::Index(b, i)    => expr_contains_var(b, target) || expr_contains_var(i, target),
@@ -3340,6 +3340,7 @@ impl<'a> Compiler<'a> {
             }
 
             Expr::Neg(e) => { self.compile(e)?; self.code.push(Instruction::Neg); }
+            Expr::Not(_) => return Err(()),  // fall back to tree-walk
 
             Expr::Apply(f_expr, arg_exprs) => {
                 if let Expr::Var(name) = f_expr.as_ref() {
@@ -4485,6 +4486,27 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
             }
             Val::Fn(..) | Val::Builtin(_) | Val::Cell(..) | Val::Namespace(..) => Err("unary minus: expected a number".into()),
         },
+        Expr::Not(e) => {
+            #[inline] fn lnot(x: f64) -> f64 { (int(x) == 0) as i64 as f64 }
+            match eval(e, env)? {
+                Val::Num(n) => Ok(Val::Num(lnot(n))),
+                Val::Tuple(items) => {
+                    let r: Result<Vec<Val>, _> = items.into_iter().map(|v| match v {
+                        Val::Num(n) => Ok(Val::Num(lnot(n))),
+                        other => Err(format!("~: expected a number, got {}", fmt_val(&other))),
+                    }).collect();
+                    Ok(Val::Tuple(r?))
+                }
+                Val::Tensor { data, shape } => {
+                    Ok(Val::Tensor { data: TData::new(data.into_iter().map(lnot).collect()), shape })
+                }
+                Val::Field(f) => {
+                    let d = f.data.iter().map(|&x| lnot(x)).collect();
+                    Ok(Val::Field(Arc::new(FieldVal { data: TData::new(d), ..(*f).clone() })))
+                }
+                other => Err(format!("~: expected a number, got {}", fmt_val(&other))),
+            }
+        }
         Expr::BinOp(l, op, r) => {
             let lv = eval(l, env)?;
             let rv = eval(r, env)?;

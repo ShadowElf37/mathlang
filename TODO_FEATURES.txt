@@ -25,33 +25,20 @@
 2.5. Split eval.rs — it is too large (now 4662 lines); defer until the GPU eval path
    (gpu_eval.rs) is designed, so the split boundary is clear.
 
-5. [DONE v0.21.0, see docs/EVALUATION.md] Make iteration first-class, scalable, and
-   collectible — the language's primary use case (time-stepping/PDEs) had no safe,
-   ergonomic iteration form (recursion overflowed ~1500 deep; the scalable path was
-   the undocumented `sum(k->{set(c,..);0},1,N)` cell hack). All five shipped:
-   5a. [DONE] iterate(f, x0, n) — apply f n times; flat internal loop, O(1) stack,
-       scales to 1e6. Safe replacement for the recursive evolve() idiom. Special form
-       (eval_iterate). x0 may be scalar/vector/tuple/complex.
-   5b. [DONE] scan(f, x0, n) — returns the whole orbit [x0, f(x0), ..., f^n(x0)]
-       stacked into a tensor (scalar states -> 1-D [n+1]; vector states -> 2-D rows
-       [n+1, d]). Special form (eval_scan) backed by the stack_rows helper. Retires
-       the cell+sum trajectory hack.
-   5c. [DONE] cumsum / cumprod / diff — array scans over 1-D tensors/tuples.
-   5d. [DONE] Singleton collection literal: (x,) is now a length-1 tensor (parser
-       trailing-comma -> Expr::Array), identical to [x]; (x) alone is still scalar x.
-   5e. [DONE] Generalized stacking: vstack/hstack rank-promote (a 1-D vector becomes a
-       row/column when stacked onto a matrix; scalar -> 1x1) via the to_block helper;
-       append accepts a scalar seed; concat accepts scalars and empty operands.
-   Follow-up: 1e (VM Loop instruction) — DONE v0.21.1 — now lets iterate/scan/sum/prod
-   compile *inside* lambda bodies via Instruction::Loop instead of forcing a tree-walk
-   fallback. FEAT-F is therefore complete.
-
 3. [PARTIAL] MXFR protocol: added channels field (C=1 scalar, C=3 RGB).
     Rgba32Float texture path in renderer; shader RGB passthrough branch.
     Still TODO: showRGB(T) and animateRGB(T) mathlang builtins for [H,W,3]
     and [t,H,W,3] tensors.
 
 4. aur package that puts animator and m executables in bin; hdf5 option?
+
+5.1 [DONE v0.23.3] clean up !help — dramatically shrunk (namespace details now under !help <ns>),
+    per-namespace descriptions, !helpdef <ns> <text> for user namespaces; BUILTIN_FNS cleaned
+    to only reflect names actually in the flat Env::new table.
+5.2 tensor(<field>) to convert field to tensor?
+5.3 single axis ops.grad(field, axis)?
+5.4 [DONE v0.23.3] ~ operator for logical not (mirrors bits.not); bare `not` now errors (namespace-only).
+    Operator chains (~~x) work. BUILTIN_FNS no longer lists bits-namespace names.
 
 6. [DONE v0.22.0] Tame the builtin namespace — done via Rust-backed namespaces with
    `.` syntax instead of the prelude-extraction route below. Implemented (see

@@ -1543,6 +1543,19 @@ run_err "forms.contract.needsvec" "a=forms.d(field(tensor((i,j)->1.0*i,4,4),0,1,
 # cell/get/set are field-transparent (regression: must not decay a field to a tensor).
 run_ok "field.cell.transparent" "{st=cell(field((1.0,2,3,4),0,1,forms.periodic)); set(st,2*get(st)); re(ops.grad(get(st)))}"
 
+# ── ~ (logical not) operator — 5.4 ───────────────────────────────────────────
+section "TILDE NOT OPERATOR"
+run "tilde.zero"       "~0"                           "1"
+run "tilde.one"        "~1"                           "0"
+run "tilde.nonzero"    "~7"                           "0"
+run "tilde.neg"        "~(-3)"                        "0"
+run "tilde.double"     "~~1"                          "1"
+run "tilde.cmp.true"   "~(3 > 2)"                     "0"
+run "tilde.cmp.false"  "~(1 > 5)"                     "1"
+run "tilde.tensor"     "~tensor(x -> x, 4)"           "[1, 0, 0, 0]"
+run "tilde.bits.not.agree" "bits.not(0) == ~0"        "1"
+run_err "tilde.not.flat"  "not(1)"                    ""
+
 # ── print summary ─────────────────────────────────────────────────────────────
 echo
 echo "================================"

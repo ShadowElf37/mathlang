@@ -46,6 +46,7 @@ pub enum Expr {
     Var(String),
     BinOp(Box<Expr>, Op, Box<Expr>),
     Neg(Box<Expr>),
+    Not(Box<Expr>),
     // params, optional return hint (only Def::Func supports return hint), body
     Lambda(Vec<Param>, Option<TypeHint>, Box<Expr>),
     Tuple(Vec<Expr>),

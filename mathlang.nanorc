@@ -1,0 +1,86 @@
+## mathlang (.math) syntax highlighting
+## Mirrors src/repl.rs highlight_line() as closely as nano's regex engine permits.
+##
+## Color mapping (REPL ANSI → nano):
+##   \x1b[36m  cyan         → numbers, constants (pi e phi inf i)
+##   \x1b[38;5;208m orange  → namespace names (ops solver forms ...)
+##   \x1b[95m  brightmagenta→ builtin functions, namespace members
+##   \x1b[32m  green        → type keywords (after ':' in REPL; everywhere here)
+##   \x1b[33m  yellow       → operators + !commands
+##   plain                  → unknown identifiers, '=' ':' '(' ')' etc.
+
+syntax "mathlang" "\.math$"
+
+## ── Operators ────────────────────────────────────────────────────────────
+## Two-char operators first so ** isn't split into two *s.
+## Yellow = \x1b[33m in the REPL.
+color yellow "(->|\*\*|//|\.\.)"
+color yellow "[+\-*/%^]"
+
+## ── Numbers ──────────────────────────────────────────────────────────────
+## Integers, floats, and scientific notation. Cyan = \x1b[36m.
+## Leading-dot floats (.5) also matched; word boundary prevents digit-in-ident match.
+color cyan "\b[0-9]+(\.[0-9]*)?([eE][+-]?[0-9]+)?"
+color cyan "\.[0-9]+([eE][+-]?[0-9]+)?"
+
+## ── Constants ────────────────────────────────────────────────────────────
+## pi, phi, inf coloured cyan. 'e' (Euler) and 'i' (imaginary) are word-bounded
+## so they don't fire inside longer identifiers.
+color cyan "\b(pi|phi|inf)\b"
+color cyan "\be\b"
+color cyan "\bi\b"
+
+## ── Namespace names (256-colour orange) ─────────────────────────────────
+## These are the namespaces registered in Env::new via ns::register_all.
+color 208 "\b(ops|solver|forms|special|bits|stats|linalg|vec)\b"
+
+## ── Type keywords (green = \x1b[32m) ────────────────────────────────────
+## In the REPL these are only green after ':', but nano lacks that context.
+## 'cell', 'tensor', 'fn' are omitted here because they're far more commonly
+## used as function calls and are listed under builtins below.
+color green "\b(any|num|real|complex|int|nat|tuple)\b"
+
+## ── Builtin functions — flat namespace (bright magenta = \x1b[95m) ──────
+color brightmagenta "\b(id|fact|factorial|ncr|delta|quadratic)\b"
+color brightmagenta "\b(sin|cos|tan|asin|acos|atan|atan2|sinh|cosh|tanh|expm1)\b"
+color brightmagenta "\b(sec|csc|cot|sqrt|cbrt|abs|sign|signum)\b"
+color brightmagenta "\b(floor|ceil|round|trunc|frac|heaviside|deg|rad)\b"
+color brightmagenta "\b(len|length|linspace|range|eps|rand)\b"
+color brightmagenta "\b(sort|zip|dot|append|concat|flatten|argmin|argmax)\b"
+color brightmagenta "\b(cumsum|cumprod|diff|mean|std)\b"
+color brightmagenta "\b(compose|partial|filter|reduce|map|sum|prod)\b"
+color brightmagenta "\b(iterate|scan|integral|deriv)\b"
+color brightmagenta "\b(ln|log|log10|log2|exp|re|im|arg|conj)\b"
+color brightmagenta "\b(min|max|pow|hypot|gcd|lcm)\b"
+color brightmagenta "\b(lt|leq|gt|geq|eq|neq|if)\b"
+color brightmagenta "\b(fft|ifft)\b"
+color brightmagenta "\b(cell|get|set|tensor|fn)\b"
+color brightmagenta "\b(matrix|zeros|ones|eye|diag)\b"
+color brightmagenta "\b(shape|rows|cols|transpose|trace|norm|row|col|matmul)\b"
+color brightmagenta "\b(det|inv|solve|eig|eigvals|hstack|vstack|tomat)\b"
+color brightmagenta "\b(shift|roll|lingrid|reshape|permute|cat|squeeze|unsqueeze|dim)\b"
+## Builtins that also exist in namespaces (coloured standalone too, matching REPL)
+color brightmagenta "\b(gaussian|gaussian_cdf|sinc|sech|csch|erf|erfc|j0|j1|jinc)\b"
+color brightmagenta "\b(and|or|xor|nand|nor|xnor|not|shl|shr)\b"
+color brightmagenta "\b(median|mode|var)\b"
+color brightmagenta "\b(qr|diagonalize|tensordot|outer|eig_top|eig_bot)\b"
+color brightmagenta "\b(lerp|clamp)\b"
+
+## ── Namespace members — only after '.' (bright magenta) ─────────────────
+## These identifiers are NOT in the flat builtin table so would be plain when
+## typed standalone in the REPL. In a file context, colouring .member (including
+## the dot) avoids false positives on common words like 'form', 'vector', 'field'.
+## ops members
+color brightmagenta "\.(grad|div|curl|lap|invlap|poisson|specgrad|periodic|neumann)\b"
+## solver members
+color brightmagenta "\.(rk4|odeint|cfl)\b"
+## forms members
+color brightmagenta "\.(d|hodge|wedge|raise|lower|codiff|laplace|form|vector|contract|field)\b"
+
+## ── Bang commands (yellow) ───────────────────────────────────────────────
+## !help, !include, !type, !graph, !animate2D, etc. — whole command word yellow.
+color yellow "^![a-zA-Z_]+"
+
+## ── Comments override everything ─────────────────────────────────────────
+## '#' starts a line comment; must come last so it overrides all rules above.
+color brightblack "#.*$"

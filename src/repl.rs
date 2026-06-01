@@ -6,8 +6,12 @@ use crate::ast::Def;
 use crate::parser::Parser;
 use crate::eval::{Val, Env, TData, eval, fmt_val, is_protected, FnSig, builtin_sig, infer_type, hint_of_val};
 
+// Only flat (unqualified) builtins — names that are in scope without a namespace prefix.
+// Namespace-only functions (special.*, bits.*, stats.*, linalg.*, vec.*, ops.*, solver.*,
+// forms.*) are NOT listed here; they appear in REPL completion/highlighting via the
+// namespace member lists instead.
 pub const BUILTIN_FNS: &[&str] = &[
-    "id", "fact", "factorial", "ncr", "delta", "quadratic",
+    "id", "fact", "factorial", "ncr", "quadratic",
     "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
     "sinh", "cosh", "tanh", "expm1",
     "sec", "csc", "cot",
@@ -19,34 +23,32 @@ pub const BUILTIN_FNS: &[&str] = &[
     "linspace", "range",
     "sort", "zip", "dot", "append", "concat", "flatten", "argmin", "argmax",
     "cumsum", "cumprod", "diff",
-    "mean", "median", "mode", "std", "var",
+    "mean", "std",
     "compose", "partial",
-    "gaussian", "gaussian_cdf", "eps",
+    "eps",
     "filter", "reduce",
     "rand",
     "ln", "log", "log10", "log2", "exp",
     "re", "im", "arg", "conj",
     "min", "max", "pow", "hypot", "gcd", "lcm",
-    "and", "or", "xor", "nand", "nor", "xnor", "not", "shl", "shr",
     "lt", "leq", "gt", "geq", "eq", "neq",
     "if",
     "fft", "ifft",
     "sum", "prod", "integral", "deriv", "map",
     "iterate", "scan",
-    "sinc", "sech", "csch", "erf", "erfc", "j0", "j1", "jinc",
     "cell", "get", "set",
+    "field",
     // Tensor ops
     "tensor", "matrix", "zeros", "ones", "eye", "diag",
     "shape", "rows", "cols", "transpose", "trace", "norm",
-    "row", "col", "matmul", "outer",
+    "row", "col", "matmul",
     "det", "inv", "solve",
-    "eig", "eigvals", "eig_top", "eig_bot",
-    "qr", "diagonalize",
+    "eig", "eigvals",
     "hstack", "vstack", "tomat",
-    "lerp", "clamp", "shift", "roll",
+    "shift", "roll",
     "lingrid",
     "reshape", "permute", "cat", "squeeze", "unsqueeze",
-    "dim", "tensordot",
+    "dim",
 ];
 
 pub const BUILTIN_CONSTS: &[&str] = &["pi", "e", "phi", "inf", "i"];
@@ -250,7 +252,7 @@ fn highlight_line(line: &str, user_fns: &[String], user_vars: &[String],
             i += 1;
             continue;
         }
-        if matches!(b[i], b'+' | b'-' | b'*' | b'/' | b'%' | b'^') {
+        if matches!(b[i], b'+' | b'-' | b'*' | b'/' | b'%' | b'^' | b'~') {
             out.push_str(&format!("\x1b[33m{}\x1b[0m", b[i] as char));
         } else {
             out.push(b[i] as char);
@@ -941,115 +943,94 @@ fn h5_list(file_path: &str) -> Result<(), String> {
     recurse(&*file, 0)
 }
 
+fn ns_builtin_desc(ns: &str) -> Option<&'static str> {
+    match ns {
+        "ops"     => Some("spatial PDE operators (grad div curl lap poisson specgrad); field-aware"),
+        "solver"  => Some("ODE time integrators: rk4(f,y0,t0,t1,n)  odeint(f,y0,ts)  cfl(V,dx,dt)"),
+        "forms"   => Some("exterior calculus over fields: d hodge wedge raise lower codiff laplace contract\n  field(data,lo,hi,bc[,metric])  form(data,deg,…)  vector(data,…)"),
+        "special" => Some("special functions: sinc sech csch  erf erfc  j0 j1 jinc  gaussian gaussian_cdf  delta"),
+        "bits"    => Some("bitwise ops (all truncate to i64): and or xor nand nor xnor shl shr not\n  Operators & | ~ do the same without a function call"),
+        "stats"   => Some("statistics beyond mean/std: median(t)  mode(t)  var(t)"),
+        "linalg"  => Some("linear algebra extras: qr(A)  diagonalize(A)  tensordot(A,B,ax)  outer(a,b)\n  eig_top(A,k)  eig_bot(A,k)"),
+        "vec"     => Some("interpolation/clamping: lerp(a,b,t)  clamp(x,lo,hi)"),
+        _ => None,
+    }
+}
+
+// User-supplied help text for namespaces, set via `!helpdef <ns> <text>`.
+thread_local! {
+    static NS_HELP: std::cell::RefCell<std::collections::HashMap<String,String>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 fn bang_command(cmd: &str, env: &mut Env) {
     let (name, arg) = cmd.split_once(' ').map_or((cmd, ""), |(a, b)| (a, b.trim()));
     match name.trim() {
         "help" => {
             if arg.is_empty() {
                 print!(concat!(
-                    "Commands:  !help [name]  !include <file>  !defs  !clear  !version\n",
-                    "           !type <name>  — show type signature of a function or builtin\n",
-                    "           !graph f [, a, b]  — plot f over [a,b] (default -10..10); opens animator\n",
-                    "           !animate2D T [fps]  — animate 3-D tensor [frames,nx,ny] (T[x,y] convention)\n",
-                    "           !animate2D f n [fps]  — animate f(t) for t=0..n-1; f returns [nx,ny] tensor\n",
-                    "           !animate2D f t0 t1 n [fps]  — animate f(t) over linspace(t0,t1,n)\n",
-                    "           !animate2D_raw …  — write MXFR to stdout (for manual piping)\n",
-                    "           !print [text with {{expr}} interpolation]  — print formatted output\n",
-                    "           !savetensor <var> <file>  — save tensor to binary .mlt file\n",
-                    "           !loadtensor <var> <file>  — load tensor from .mlt file\n",
-                    "           !savenpy <var> <file.npy>  — save tensor to NumPy .npy (f64/c128)\n",
-                    "           !loadnpy <var> <file.npy>  — load NumPy .npy (f2/f4/f8, c8/c16, int, bool)\n",
-                    "           !savehdf5 <var> <file> [/ds] [--append] [--overwrite] [--gzip 0-9]\n",
-                    "           !loadhdf5 <var> <file> [/ds] [--list]\n",
-                    "Init file: ~/.mathlangrc (auto-imported on start; override with $MATHLANG_INIT)\n",
-                    "Exit:      !q / !quit / !exit / Ctrl-D\n\n",
-                    "Syntax:    x = 3              variable\n",
-                    "           f(x) = x^2         named function\n",
-                    "           f = x -> x^2       lambda (first-class)\n",
-                    "           g = n,r -> n+r     multi-arg lambda\n",
-                    "           f(x: real) = x^2   type-hinted param\n",
-                    "           f(x: nat) -> real = sqrt(x)  with return type\n",
-                    "           {{x=3; y=4; x^2+y^2}}  block with local scope\n\n",
-                    "Tuples:    (1,2,3)   t[0]   t[-1]   t[1..3]   t[0,2,4]\n",
-                    "Ranges:    (0..10)  — inclusive; range(a,b) — exclusive\n",
-                    "Operators: + - * / // % ^ **   -> (lambda)   n! (postfix factorial)\n",
-                    "           2pi  3sin(x)  2(x+1)  — implicit multiplication\n",
-                    "Compare:   < > <= >= == !=  (return 0 or 1)  & | (bitwise and/or)\n",
-                    "           lt leq gt geq eq neq  — comparison fns for use with map/filter\n",
-                    "Aggregates: sum(f,a,b)  prod(f,a,b)  sum(f,n)  sum(T)  sum(T,axis)\n",
-                    "           integral(f,a,b[,n])  deriv(f,x[,dx])\n",
-                    "Iteration: iterate(f,x0,n) — apply f n times (flat loop, O(1) stack)\n",
-                    "           scan(f,x0,n)    — the whole orbit [x0,f(x0),…,fⁿ(x0)] as a tensor\n",
-                    "           cumsum(t) cumprod(t) diff(t)  — running scans over a 1-D tensor/tuple\n",
-                    "Grapher:   !graph f [, a, b]  — plot f, saves graph_N.png and opens animator\n",
-                    "Trig:      sin cos tan  asin acos atan atan2\n",
-                    "           sinh cosh tanh  sec csc cot\n",
-                    "Algebra:   sqrt cbrt abs sign heaviside  floor ceil round(x[,n]) trunc frac\n",
-                    "           ln log(x[,base]) log2 log10 exp expm1  pow hypot\n",
-                    "           min max  gcd lcm  fact  n!  ncr(n,r)\n",
-                    "           quadratic(a,b,c)  — roots of ax²+bx+c=0 (real or complex pair)\n",
-                    "Angle:     deg rad\n",
-                    "Namespaces: ns.member access (e.g. ops.lap).  Browse with !help <ns>\n",
-                    "           ops  solver  forms  special  bits  stats  linalg  vec\n",
-                    "PDE:       ops.grad/div/curl/lap(T,dx)  ops.poisson/specgrad(T,dx)\n",
-                    "           solver.rk4(f,y0,t0,t1,n)  solver.odeint(f,y0,ts)  solver.cfl(V,dx,dt)\n",
-                    "Fields:    field(data,lo,hi,bc[,metric])  — scalar (0-form); bc=forms.periodic/neumann\n",
-                    "           forms.form(data,deg,…)  forms.vector(data,…)  — build forms / vector fields\n",
-                    "           forms.d/hodge/wedge/raise/lower/codiff/laplace/contract  — exterior calculus\n",
-                    "           ops.grad/div/curl/lap/poisson(field)  — field-polymorphic (dx/bc from field)\n",
-                    "Special:   special.{{sinc,sech,csch,erf,erfc,j0,j1,jinc,gaussian,gaussian_cdf,delta}}\n",
-                    "Tuple ops: len sort zip dot  append concat flatten  argmin argmax\n",
-                    "           cumsum cumprod diff  (x,) — singleton tensor literal\n",
-                    "           linspace(a,b,n)  range(a,b)\n",
-                    "Stats:     mean std (flat);  stats.median  stats.mode  stats.var\n",
-                    "HOF:       map(f,t)  filter(f,t)  reduce(f,t)  compose(f,g)  partial(f,a)\n",
-                    "Control:   if(cond,a,b)\n",
-                    "Spectral:  fft(T[,axes])  ifft(T[,axes])  — n-D DFT / inverse DFT on tensors\n",
-                    "           fft/ifft also accept (Re,Im[,axes]) for explicit complex input\n",
-                    "Random:    rand()  rand(n)  rand(n1,n2,…)  — scalar, 1-D or n-D tensor in [0,1)\n",
-                    "Bitwise:   bits.{{and,or,xor,nand,nor,xnor,not,shl,shr}}\n",
-                    "Complex:   i  re im abs arg conj  (all operators work on complex numbers)\n",
-                    "Constants: pi e phi inf i\n",
-                    "Tensors:   (1,2; 3,4)  or  [1,2; 3,4]  — 2D literal;  A @ B  — matmul\n",
-                    "           [a, b, c]  — tensor literal (same as (a,b,c) with auto-promotion)\n",
-                    "           zeros(n1,n2,…)  ones(n1,n2,…)  eye(n)  diag(t|T)\n",
-                    "           tensor(f, n1, n2, …)  matrix(f, r, c)\n",
-                    "           shape(T)  dim(T,axis)  rows cols  transpose([a,b])  trace norm\n",
-                    "           reshape(T, n1, n2, …)  permute(T, p0, p1, …)\n",
-                    "           cat(axis, T1, T2, …)  squeeze(T)  unsqueeze(T, dim)\n",
-                    "           matmul(A,B)  row col\n",
-                    "           det inv solve(A,b)  hstack vstack tomat(t,r,c)\n",
-                    "           hstack/vstack rank-promote: a vector stacks onto a matrix\n",
-                    "           eig(A) eigvals(A)  — eigenvalues/eigenvectors\n",
-                    "linalg:    linalg.outer  linalg.tensordot  linalg.qr  linalg.diagonalize\n",
-                    "           linalg.eig_top  linalg.eig_bot\n",
-                    "           shift(T,n,axis)  — edge-replicating shift (Neumann BCs)\n",
-                    "           roll(T,n,axis)   — circular/periodic shift\n",
-                    "           vec.lerp(a,b,t)  — linear interpolation;  vec.clamp(x,lo,hi)\n",
-                    "           lingrid(start,end,counts,f)  — supports any n-D via tuples\n",
-                    "           T[i,j,…]  T[i,a..b]  T[..,j]  T[i..,j]  T[..k,j]  — n-D slicing\n",
-                    "           T[..]  = all  T[n..]  = from n  T[..n]  = to n (tuples too)\n",
-                    "           sum(T,axis)  prod(T,axis)  mean std var on tensors\n",
-                    "           flatten(T)→1D  reduce(f,T)  map(f,T)  norm(T)\n",
+                    "Commands:  !help [topic|ns]  !include <file>  !defs  !clear  !version  !q\n",
+                    "           !type <name>  — show type signature\n",
+                    "           !graph f [,a,b]  — plot f over [a,b] (default -10..10)\n",
+                    "           !animate2D f n [fps]  — animate f(t) returning [nx,ny] tensor\n",
+                    "           !animate2D f t0 t1 n [fps] | !animate2D T [fps]\n",
+                    "           !print text with {{expr}} interpolation\n",
+                    "           !savetensor/loadtensor  !savenpy/loadnpy  !savehdf5/loadhdf5\n",
+                    "           !helpdef <ns> <text>  — set help text for a user namespace\n",
+                    "Init:      ~/.mathlangrc  ($MATHLANG_INIT to override)\n\n",
+                    "Syntax:    x = 3           f(x) = x^2        f = x -> x^2\n",
+                    "           g = n,r -> n+r  f(x:real) = ...   f(x:nat)->real = ...\n",
+                    "           {{x=3; y=4; x^2+y^2}}  block (local scope)\n\n",
+                    "Operators: + - * / // % ^ **   -> (lambda)   n!   ~ (logical not)\n",
+                    "           < > <= >= == !=   & | (bitwise and/or)   2pi  3sin(x)  (implicit mul)\n",
+                    "           lt leq gt geq eq neq  — comparison fns for map/filter\n\n",
+                    "Tuples:    (1,2,3)  t[0]  t[-1]  t[1..3]  t[0,2,4]  (x,)  (singleton)\n",
+                    "           (0..10) inclusive  range(a,b) exclusive  linspace(a,b,n)\n\n",
+                    "Math:      sin cos tan asin acos atan atan2  sinh cosh tanh  sec csc cot\n",
+                    "           sqrt cbrt abs sign heaviside  floor ceil round trunc frac\n",
+                    "           ln log(x[,b]) log2 log10 exp expm1  pow hypot  min max  gcd lcm\n",
+                    "           deg rad  fact  n!  ncr(n,r)  quadratic(a,b,c)  if(c,a,b)\n\n",
+                    "Tensors:   zeros ones eye diag tensor(f,…) matrix(f,r,c)  [a,b;c,d]  A@B\n",
+                    "           shape dim rows cols  transpose trace norm  det inv solve\n",
+                    "           eig eigvals  hstack vstack cat reshape permute squeeze unsqueeze\n",
+                    "           shift(T,n,axis)  roll(T,n,axis)  lingrid  T[i,j]  T[a..b,..]\n\n",
+                    "HOF:       map filter reduce  sum(f,a,b)  prod(f,a,b)  integral deriv\n",
+                    "           iterate(f,x0,n)  scan(f,x0,n)  cumsum cumprod diff\n\n",
+                    "Other:     mean std  fft ifft  rand  re im arg conj  cell get set\n",
+                    "           field(data,lo,hi,bc)  — scalar field (0-form)\n",
+                    "           Constants: pi e phi inf i\n\n",
+                    "Namespaces — use !help <ns> for members and usage:\n",
+                    "  ops     PDE operators: grad div curl lap poisson specgrad\n",
+                    "  solver  ODE steppers:  rk4 odeint cfl\n",
+                    "  forms   Exterior calc: d hodge wedge raise lower codiff laplace contract\n",
+                    "  special Special fns:   sinc sech csch erf erfc j0 j1 jinc gaussian delta\n",
+                    "  bits    Bitwise:       and or xor nand nor xnor shl shr not  (also & | ~)\n",
+                    "  stats   Statistics:    median mode var\n",
+                    "  linalg  Linear alg:    qr diagonalize tensordot outer eig_top eig_bot\n",
+                    "  vec     Interpolation: lerp clamp\n",
                 ));
             } else {
                 let topic = arg.trim_start_matches('!');
-                // Namespace? List its members.
+                // Namespace? Show description + member list.
                 if let Some(Val::Namespace(map)) = env.vars.get(topic) {
+                    let user_desc = NS_HELP.with(|h| h.borrow().get(topic).cloned());
+                    let desc = user_desc.as_deref().or_else(|| ns_builtin_desc(topic));
+                    if let Some(d) = desc {
+                        println!("\x1b[1m{topic}\x1b[0m — {d}");
+                    } else {
+                        println!("\x1b[1m{topic}\x1b[0m namespace");
+                    }
                     let mut names: Vec<&String> = map.keys().collect();
                     names.sort();
                     let list = names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("  ");
-                    println!("\x1b[1m{topic}\x1b[0m namespace — access with {topic}.<member>\n  {list}");
+                    println!("Members (access as {topic}.<member>):\n  {list}");
                     return;
                 }
-                // Try bang command help first (if arg starts with ! or is a known command)
+                // Try bang command help file, then per-function help file.
                 let bang_text = std::fs::read_to_string(format!("help/bang/{topic}.txt")).ok();
                 if let Some(text) = bang_text {
                     print!("{text}");
                 } else if let Ok(text) = std::fs::read_to_string(format!("help/{topic}.txt")) {
-                    // Inject type signature on its own line before the Examples section.
-                    // The files are ANSI-encoded, so find "Examples:", then back up to
-                    // the preceding \n\n to insert cleanly outside any escape sequences.
                     let sig_line = builtin_sig(topic)
                         .map(|s| format!("\x1b[1mUsage:\x1b[0m \x1b[33m{s}\x1b[0m\n\n"))
                         .unwrap_or_default();
@@ -1066,6 +1047,20 @@ fn bang_command(cmd: &str, env: &mut Env) {
                 } else {
                     eprintln!("no help for '{topic}'  (try !help with no argument)");
                 }
+            }
+        }
+        "helpdef" => {
+            // !helpdef <ns> <description text>
+            let (ns, desc) = arg.split_once(' ').map_or((arg, ""), |(a, b)| (a.trim(), b.trim()));
+            if ns.is_empty() {
+                eprintln!("usage: !helpdef <ns> <description>");
+                return;
+            }
+            if desc.is_empty() {
+                // Clear the description.
+                NS_HELP.with(|h| h.borrow_mut().remove(ns));
+            } else {
+                NS_HELP.with(|h| h.borrow_mut().insert(ns.to_string(), desc.to_string()));
             }
         }
         "namespace" => {
