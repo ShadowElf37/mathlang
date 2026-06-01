@@ -1,0 +1,111 @@
+# pic_plasma.math — a 2-D electrostatic particle-in-cell (PIC) plasma, animating
+# the charge density rho(x) = div E.
+#
+# This is the full PIC cycle: a cloud of charged particles and a grid-borne
+# electric field, coupled by the two `pic` operations on either side of the field
+# update —
+#
+#     gather (interpolate E -> particles)   pic.gather
+#                  |                                ^
+#                  v                                |
+#         push particles (x, v)           field push (Ampere)
+#                  |                                ^
+#                  v                                |
+#     scatter (deposit J: particles -> grid)  pic.scatter
+#
+# We use the *Ampere* (time-domain) form of Maxwell rather than solving Poisson
+# each step. The electric field is a genuine dynamical variable:
+#
+#     dE/dt = -J        (Ampere's law, with c = eps0 = 1, no magnetic field in the
+#                        electrostatic/longitudinal limit)
+#     dv/dt = (q/m) E   (Lorentz force)
+#     dx/dt = v
+#
+# That makes rho = div E an *emergent diagnostic*, not something we deposit by
+# hand: Gauss's law div E = rho holds because charge is conserved. Taking div of
+# the field update gives d(div E)/dt = -div J = d(rho)/dt by the continuity
+# equation — so if E starts consistent with the charge (here: a uniform,
+# charge-neutral load, so E = 0 satisfies div E = 0 exactly), it stays consistent.
+# Animating div E therefore shows the real charge density sloshing as a plasma
+# oscillation. (Plain CIC deposition conserves charge only approximately; an
+# Esirkepov current would make div E = rho exact to machine precision — see below.)
+
+N   = 64            # grid: N x N cells on the periodic box [0, 2*pi)^2
+L   = 2*pi
+dt  = 0.05          # leapfrog step; stable while omega_p * dt << 2
+np  = 64            # particles per axis -> P = np^2 = 4096 macro-particles
+P   = np*np
+q   = 0.15          # macro-particle charge (sets the plasma frequency)
+qm  = q             # charge/mass ratio (mass = 1)
+A   = 0.5           # amplitude of the seed velocity perturbation
+
+# ── initial condition ────────────────────────────────────────────────────────
+# Particles sit on a uniform np x np lattice (a charge-neutral background, so the
+# net charge density is ~0 and E = 0 satisfies Gauss). We seed a k=1 perturbation
+# in the x-velocity, v_x = A sin(x): particles stream toward the compressions,
+# charge bunches form, and the longitudinal E field they induce pushes them back —
+# a standing Langmuir (plasma) oscillation. The perturbation varies in x only, so
+# rho = div E shows up as vertical stripes oscillating in time.
+X0 = tensor((p,c) -> {
+  i = p // np;  j = p % np;
+  x = L*(i + 0.5)/np;  y = L*(j + 0.5)/np;
+  if(c == 0, x, y)
+}, P, 2)
+
+V0 = tensor((p,c) -> {
+  i = p // np;  x = L*(i + 0.5)/np;
+  if(c == 0, A*sin(x), 0.0)
+}, P, 2)
+
+# E starts at zero. We build it as the gradient of a zero scalar field so it is a
+# 1-form with exactly the grid's geometry (periodic, spacing 2*pi/N) — the shape
+# pic.scatter and pic.gather expect.
+E0 = ops.grad(field((x,y) -> 0.0, 0, L, (N, N), forms.periodic))
+
+# Keep particles on the torus.
+wrap(Z) = Z - L*floor(Z/L)
+
+# ── one PIC step (symplectic / leapfrog) ─────────────────────────────────────
+# state s = (X, V, E):  X is [P,2] positions, V is [P,2] velocities,
+#                       E is the electric field (a 2-component 1-form on the grid).
+step(s) = {
+  X = s[0];  V = s[1];  E = s[2];
+
+  # GATHER: sample E at each particle to get the force. E is a vector field, so
+  # pic.gather returns one [Ex, Ey] row per particle ([P,2]).
+  acc = qm * pic.gather(E, X);
+  V2  = V + dt*acc;                       # kick
+  X2  = wrap(X + dt*V2);                  # drift (symplectic-Euler ordering)
+
+  # SCATTER: deposit the particle current J = q v onto the grid. The template E
+  # supplies the grid geometry; weights are [P,2] (a current vector per particle),
+  # so the result is a 2-component current field with the same layout as E.
+  J  = pic.scatter(X2, q*V2, E);
+
+  # FIELD PUSH: Ampere's law, dE/dt = -J.
+  E2 = E - dt*J;
+
+  (X2, V2, E2)
+}
+
+# ── animate rho(x) = div E ───────────────────────────────────────────────────
+# State lives in a cell; each frame advances one step and emits the charge
+# density div E as a plain N x N tensor (the animator wants a bare tensor, so
+# re() decays the scalar field). ops.div reads the spacing/BCs from the field.
+st    = cell((X0, V0, E0))
+frame = _ -> { s = get(st); set(st, step(s)); re(ops.div(s[2])) }
+
+!animate2D frame, 600, 30
+
+# ── the canonical view (why this is exactly the symplectic-PIC story) ─────────
+# This electrostatic case is *separable*: the field push is sourced only by the
+# deposited current, and the particle push depends only on the gathered field, so
+# the leapfrog above is the field-aware velocity-Verlet you would get from
+#     solver.verlet(dVdq, dTdp, (X, A), (P_mech, -E), dt, n)
+# with the gather/scatter living inside the gradient functions (q = positions +
+# vector potential A, p = momenta + (-E)). The *full* electromagnetic case —
+# particles minimally coupled through (p - qA)^2 — is non-separable but still
+# canonical, and is exactly what solver.tao integrates: same scatter/gather, same
+# one-big-phase-space, but with A entering the kinetic term. The adjointness of
+# pic.gather and pic.scatter (same kernel = transpose) is what keeps either scheme
+# self-force-free and symplectic.

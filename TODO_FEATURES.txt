@@ -45,53 +45,8 @@
 5.4 [DONE v0.23.3] ~ operator for logical not (mirrors bits.not); bare `not` now errors (namespace-only).
     Operator chains (~~x) work. BUILTIN_FNS no longer lists bits-namespace names.
 
-6. [DONE v0.22.0] Tame the builtin namespace — done via Rust-backed namespaces with
-   `.` syntax instead of the prelude-extraction route below. Implemented (see
-   src/ns/, docs/CODEBASE.md §Namespaces):
-   - Val::Namespace + Expr::Member (Token::Dot in the parser postfix loop); the VM
-     falls back to tree-walk on Member.
-   - Standard namespaces registered by force in Env::new (crate::ns::register_all):
-     special, bits, stats, linalg, vec (relocated niche builtins, exposed as
-     Val::Builtin("<bare>") so the giant eval_builtin match is untouched), plus
-     operators/solver (NEW PDE functions implemented in their own module files,
-     routed from eval_builtin via crate::ns::dispatch).
-   - Curated relocation (kept common names flat — inv det solve fft ifft mean std
-     norm sort roll shift eig eigvals …): the moved names left both the flat
-     Env::new table and is_protected, so they are no longer reserved words.
-   - User namespaces: `!namespace <name>` at the top of an included .math file +
-     `private` to keep a definition internal (import_file / NsBuild).
-   The original two-stage plan (6a prelude extraction in .math, 6b additive
-   namespace values) is kept below for history; we did the Rust-namespace variant
-   of 6b directly (and went beyond it by relocating, not just aliasing).
 
-   6a. [PRIMARY] Prelude extraction. Move the "library tier" builtins — special
-       functions and niche stats (erf, erfc, j0/j1, jinc, gaussian_cdf, sinc,
-       maybe median/mode, the integrators once stable) — out of Rust into an
-       auto-loaded mathlang prelude (.math), built on the MATHLANG_INIT / import_file
-       machinery that already exists. Keep a small frozen *core* protected (~40
-       names: arithmetic, tensor construction/indexing, cell/get/set, the loop
-       forms iterate/scan/sum/prod, if, map/filter/reduce). Net effect: the Rust
-       builtin table and is_protected both shrink dramatically, AND prelude-defined
-       names become *user-overridable* (they're ordinary defs, not protected) — a
-       strict ergonomics win. No grammar change; only an auto-load hook + moving
-       definitions. This is the high-value/low-risk move and should land first.
-
-   6b. [OPTIONAL, later] Additive namespace values, only if 6a leaves discoverability
-       wanting. Expose grouped modules — linalg, stats, signal, bits — as first-class
-       Val::Namespace map values so `linalg.det(A)` works and a namespace can be bound
-       or passed around. Keep all current flat names working (back-compat); new niche
-       builtins then go *only* into a namespace, capping global growth. Feasibility:
-       the lexer already errors on a bare `.` not followed by a digit (src/lexer.rs
-       ~88) and disambiguates decimals by digit-lookahead, so `.` is free for member
-       access with no grammar conflict. Needs: a Val::Namespace variant, a parse node
-       for `ident.ident` access, and resolution in eval + the VM (LoadCaptured-style).
-       Do NOT move existing names *out* of the global table (that breaks every script);
-       namespaces are an additive alias layer, not a replacement.
-
-   Rationale: 6a is the honest dividend of "is the infra good enough to build in
-   mathlang" — yes, so push the library tier into mathlang itself. 6b is the
-   long-term shape for a browsable stdlib but shouldn't gate 6a.
-
+6. !animate2Dforever that commands the animator not to keep old frames, and to buffer a maximum of say 100 frames, that takes a function of t and animates it to t=infinity
 
 CONTINUAL FOR CLAUDE OPUS:
 

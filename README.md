@@ -1107,6 +1107,10 @@ and goes through `solver.verlet`).
 > E    = pic.gather(ops.grad(phi), [1.3, 4.2, 7.8])  # interpolate force back
 ```
 
+`examples/pic_plasma.math` is a full worked 2-D electrostatic PIC plasma — the
+complete gather → push → scatter → field-push cycle — that animates the charge
+density `ρ(x) = ∇·E` as a self-consistent plasma oscillation.
+
 ---
 
 ## Tensor I/O
