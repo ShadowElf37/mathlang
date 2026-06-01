@@ -62,7 +62,7 @@ m 'x=3; y=4; sqrt(x^2 + y^2)'
 
 ## REPL
 
-Run `m` with no arguments to enter the interactive REPL. It supports syntax highlighting, tab completion, and history.
+Run `m` with no arguments to enter the interactive REPL. It supports syntax highlighting, tab completion, and history. Namespaces are highlighted orange, and Tab completes their members — type `ops.` and press Tab to cycle through everything inside (it also works for your own `!namespace` definitions).
 
 ```
 > x = 3

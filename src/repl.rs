@@ -60,27 +60,43 @@ pub const TYPE_KEYWORDS: &[&str] = &["any", "num", "real", "complex", "int", "na
 struct MathHelper {
     user_fns:  RefCell<Vec<String>>,
     user_vars: RefCell<Vec<String>>,
+    // namespace name -> sorted member names. Captures both the standard namespaces
+    // (registered in env.vars) and user `!namespace` ones, refreshed by `update`.
+    namespaces: RefCell<std::collections::HashMap<String, Vec<String>>>,
     hinter:    rustyline::hint::HistoryHinter,
 }
 
 impl MathHelper {
     fn new() -> Self {
-        Self { user_fns: RefCell::new(vec![]), user_vars: RefCell::new(vec![]), hinter: rustyline::hint::HistoryHinter {} }
+        Self {
+            user_fns: RefCell::new(vec![]), user_vars: RefCell::new(vec![]),
+            namespaces: RefCell::new(std::collections::HashMap::new()),
+            hinter: rustyline::hint::HistoryHinter {},
+        }
     }
     fn update(&self, env: &Env) {
         let mut fns  = self.user_fns.borrow_mut();
         let mut vars = self.user_vars.borrow_mut();
-        fns.clear(); vars.clear();
+        let mut nss  = self.namespaces.borrow_mut();
+        fns.clear(); vars.clear(); nss.clear();
         for (k, v) in env.vars.iter() {
-            if BUILTIN_CONSTS.contains(&k.as_str()) || BUILTIN_FNS.contains(&k.as_str()) { continue; }
-            if matches!(v, Val::Fn(..)) { fns.push(k.clone()); } else { vars.push(k.clone()); }
+            match v {
+                Val::Namespace(map) => {
+                    let mut members: Vec<String> = map.keys().cloned().collect();
+                    members.sort();
+                    nss.insert(k.clone(), members);
+                }
+                _ if BUILTIN_CONSTS.contains(&k.as_str()) || BUILTIN_FNS.contains(&k.as_str()) => {}
+                Val::Fn(..) => fns.push(k.clone()),
+                _ => vars.push(k.clone()),
+            }
         }
     }
 }
 
 // Highlight the argument portion of a !print template.
 // Literal text (and escaped {{ / }}) is yellow; {expr} has yellow braces with math-highlighted expr inside.
-fn highlight_print_args(arg: &str, user_fns: &[String], user_vars: &[String]) -> String {
+fn highlight_print_args(arg: &str, user_fns: &[String], user_vars: &[String], namespaces: &[String]) -> String {
     let mut out = String::new();
     let mut chars = arg.chars().peekable();
     let mut in_yellow = false;
@@ -113,7 +129,7 @@ fn highlight_print_args(arg: &str, user_fns: &[String], user_vars: &[String]) ->
                 if closed {
                     close_yellow!();
                     out.push_str("\x1b[33m{\x1b[0m");
-                    out.push_str(&highlight_line(&expr_src, user_fns, user_vars));
+                    out.push_str(&highlight_line(&expr_src, user_fns, user_vars, namespaces));
                     out.push_str("\x1b[33m}\x1b[0m");
                 }
             }
@@ -130,7 +146,7 @@ fn highlight_print_args(arg: &str, user_fns: &[String], user_vars: &[String]) ->
     out
 }
 
-fn highlight_line(line: &str, user_fns: &[String], user_vars: &[String]) -> String {
+fn highlight_line(line: &str, user_fns: &[String], user_vars: &[String], namespaces: &[String]) -> String {
     if line.starts_with('!') {
         let cmd_end = line.find(|c: char| c.is_ascii_whitespace()).unwrap_or(line.len());
         let cmd_name = &line[1..cmd_end];
@@ -138,9 +154,9 @@ fn highlight_line(line: &str, user_fns: &[String], user_vars: &[String]) -> Stri
         let cmd_colored = format!("\x1b[33m{}\x1b[0m", &line[..cmd_end]);
         return match cmd_name {
             "type" | "graph" | "animate2D" | "animate2D_raw" =>
-                format!("{}{}", cmd_colored, highlight_line(rest, user_fns, user_vars)),
+                format!("{}{}", cmd_colored, highlight_line(rest, user_fns, user_vars, namespaces)),
             "print" =>
-                format!("{}{}", cmd_colored, highlight_print_args(rest, user_fns, user_vars)),
+                format!("{}{}", cmd_colored, highlight_print_args(rest, user_fns, user_vars, namespaces)),
             _ => format!("\x1b[33m{line}\x1b[0m"),
         };
     }
@@ -148,6 +164,7 @@ fn highlight_line(line: &str, user_fns: &[String], user_vars: &[String]) -> Stri
     let mut out = String::with_capacity(line.len() + 64);
     let mut i = 0;
     let mut expect_type = false; // true right after a ':' — next identifier is a type
+    let mut expect_member = false; // true right after `<namespace>.` — next ident is a member
     while i < line.len() {
         if b[i].is_ascii_whitespace() { out.push(b[i] as char); i += 1; continue; }
         if b[i].is_ascii_digit() || (b[i] == b'.' && b.get(i+1).map_or(false, |c| c.is_ascii_digit())) {
@@ -166,6 +183,13 @@ fn highlight_line(line: &str, user_fns: &[String], user_vars: &[String]) -> Stri
             let s = i;
             while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') { i += 1; }
             let name = &line[s..i];
+            // Member of a namespace (`ns.member`) — colour like a function (magenta).
+            if expect_member {
+                out.push_str(&format!("\x1b[95m{name}\x1b[0m"));
+                expect_member = false;
+                expect_type = false;
+                continue;
+            }
             // Type annotation (green) — only after a ':'. Keep the flag alive for
             // the second word of "real tensor" / "complex tensor".
             if expect_type && TYPE_KEYWORDS.contains(&name) {
@@ -174,6 +198,17 @@ fn highlight_line(line: &str, user_fns: &[String], user_vars: &[String]) -> Stri
                 continue;
             }
             expect_type = false;
+            // Namespace name (orange, 256-colour). If a single `.` follows, the next
+            // identifier is its member — flag it so it gets the function colour.
+            if namespaces.iter().any(|n| n == name) {
+                out.push_str(&format!("\x1b[38;5;208m{name}\x1b[0m"));
+                let mut j = i;
+                while j < b.len() && b[j].is_ascii_whitespace() { j += 1; }
+                if j < b.len() && b[j] == b'.' && b.get(j + 1).map_or(true, |c| *c != b'.') {
+                    expect_member = true;
+                }
+                continue;
+            }
             if BUILTIN_CONSTS.contains(&name) {
                 out.push_str(&format!("\x1b[36m{name}\x1b[0m"));
             } else if BUILTIN_FNS.contains(&name) || user_fns.iter().any(|u| u == name) {
@@ -220,7 +255,8 @@ fn highlight_line(line: &str, user_fns: &[String], user_vars: &[String]) -> Stri
 
 impl rustyline::highlight::Highlighter for MathHelper {
     fn highlight<'l>(&self, line: &'l str, _pos: usize) -> std::borrow::Cow<'l, str> {
-        std::borrow::Cow::Owned(highlight_line(line, &self.user_fns.borrow(), &self.user_vars.borrow()))
+        let ns_names: Vec<String> = self.namespaces.borrow().keys().cloned().collect();
+        std::borrow::Cow::Owned(highlight_line(line, &self.user_fns.borrow(), &self.user_vars.borrow(), &ns_names))
     }
     fn highlight_char(&self, _line: &str, _pos: usize, _forced: bool) -> bool { true }
 }
@@ -236,13 +272,29 @@ impl rustyline::completion::Completer for MathHelper {
         }
         let start = line[..pos].rfind(|c: char| !c.is_alphanumeric() && c != '_').map_or(0, |i| i+1);
         let word = &line[start..pos];
+        let bytes = line.as_bytes();
+        // Namespace member completion: `<ns>.<word>` (works even when <word> is
+        // empty, e.g. `ops.<TAB>` lists every member).
+        if start > 0 && bytes[start - 1] == b'.' && (start < 2 || bytes[start - 2] != b'.') {
+            let ns_end = start - 1;
+            let ns_start = line[..ns_end].rfind(|c: char| !c.is_alphanumeric() && c != '_').map_or(0, |i| i + 1);
+            let ns = &line[ns_start..ns_end];
+            if let Some(members) = self.namespaces.borrow().get(ns) {
+                let cs: Vec<String> = members.iter()
+                    .filter(|m| m.starts_with(word) && m.as_str() != word)
+                    .cloned().collect();
+                return Ok((start, cs));
+            }
+        }
         if word.is_empty() { return Ok((pos, vec![])); }
         let user_fns  = self.user_fns.borrow();
         let user_vars = self.user_vars.borrow();
+        let namespaces = self.namespaces.borrow();
         let mut cs: Vec<String> = BUILTIN_FNS.iter().copied()
             .chain(BUILTIN_CONSTS.iter().copied())
             .chain(user_fns.iter().map(String::as_str))
             .chain(user_vars.iter().map(String::as_str))
+            .chain(namespaces.keys().map(String::as_str))
             .filter(|s| s.starts_with(word) && *s != word)
             .map(str::to_string)
             .collect();
@@ -1384,8 +1436,13 @@ pub fn run_repl() {
         }
     }
 
-    let mut rl = Editor::<MathHelper, DefaultHistory>::new().expect("failed to init editor");
+    let config = rustyline::Config::builder()
+        .completion_type(rustyline::CompletionType::Circular)   // Tab cycles candidates inline
+        .build();
+    let mut rl = Editor::<MathHelper, DefaultHistory>::with_config(config).expect("failed to init editor");
     rl.set_helper(Some(MathHelper::new()));
+    // Warm up the helper so the standard namespaces are known before the first line.
+    if let Some(h) = rl.helper() { h.update(&env); }
     rl.bind_sequence(
         rustyline::KeyEvent::ctrl('D'),
         rustyline::EventHandler::Conditional(Box::new(CtrlDHandler(ctrl_d_pressed.clone()))),
