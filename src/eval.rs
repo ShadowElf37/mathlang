@@ -656,6 +656,30 @@ pub fn builtin_sig(name: &str) -> Option<&'static str> {
         "roll"  => Some("roll(T: tensor, n: int, axis: nat) -> tensor"),
         // n-D grid
         "lingrid" => Some("lingrid(start: any, end: any, counts: any, f: fn) -> tensor"),
+        // ops namespace
+        "grad"    => Some("ops.grad(T, dx [, axis: nat]) -> tensor | field"),
+        "div"     => Some("ops.div(V, dx) -> tensor | field"),
+        "curl"    => Some("ops.curl(V, dx) -> tensor | field"),
+        "lap"     => Some("ops.lap(T, dx) -> tensor | field"),
+        "poisson" => Some("ops.poisson(rhs, dx) -> tensor | field"),
+        "invlap"  => Some("ops.invlap(T, dx) -> tensor | field"),
+        "specgrad" => Some("ops.specgrad(T, dx [, axis: nat]) -> tensor"),
+        // solver namespace
+        "rk4"    => Some("solver.rk4(f: fn, y0: any, t0: real, t1: real, n: nat) -> any"),
+        "odeint" => Some("solver.odeint(f: fn, y0: any, ts: tensor) -> tensor"),
+        "cfl"    => Some("solver.cfl(V: tensor, dx: real, dt: real) -> real"),
+        // forms namespace
+        "d"        => Some("forms.d(f: field) -> field  (exterior derivative)"),
+        "hodge"    => Some("forms.hodge(w: field) -> field  (Hodge star ★)"),
+        "wedge"    => Some("forms.wedge(a: field, b: field) -> field  (wedge product ∧)"),
+        "raise"    => Some("forms.raise(w: field) -> field  (♯: lower index with metric)"),
+        "lower"    => Some("forms.lower(X: field) -> field  (♭: raise index with metric)"),
+        "codiff"   => Some("forms.codiff(w: field) -> field  (codifferential δ = ±★d★)"),
+        "laplace"  => Some("forms.laplace(w: field) -> field  (Laplace–de Rham Δ = dδ+δd)"),
+        "contract" => Some("forms.contract(X: field, w: field) -> field  (interior product ι_X)"),
+        "form"     => Some("forms.form(data: tensor, degree: nat, lo, hi, bc [, metric]) -> field"),
+        "vector"   => Some("forms.vector(data: tensor, lo, hi, bc [, metric]) -> field"),
+        "field"    => Some("field(data, lo, hi, bc [, metric]) -> field  (0-form / scalar field)"),
         _ => None,
     }
 }

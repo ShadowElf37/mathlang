@@ -1011,6 +1011,27 @@ fn bang_command(cmd: &str, env: &mut Env) {
                 ));
             } else {
                 let topic = arg.trim_start_matches('!');
+
+                // `!help ns.member` — look up the member inside the named namespace.
+                if let Some(dot) = topic.find('.') {
+                    let ns_name = &topic[..dot];
+                    let member  = &topic[dot+1..];
+                    if let Some(Val::Namespace(map)) = env.vars.get(ns_name) {
+                        if map.contains_key(member) {
+                            let sig = builtin_sig(member)
+                                .map(|s| format!("\x1b[33m{s}\x1b[0m"))
+                                .unwrap_or_else(|| format!("{ns_name}.{member}(…)"));
+                            println!("\x1b[1m{ns_name}.{member}\x1b[0m  {sig}");
+                        } else {
+                            eprintln!("'{member}' is not a member of namespace '{ns_name}'");
+                            let mut names: Vec<&String> = map.keys().collect();
+                            names.sort();
+                            eprintln!("  members: {}", names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("  "));
+                        }
+                        return;
+                    }
+                }
+
                 // Namespace? Show description + member list.
                 if let Some(Val::Namespace(map)) = env.vars.get(topic) {
                     let user_desc = NS_HELP.with(|h| h.borrow().get(topic).cloned());
@@ -1026,6 +1047,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     println!("Members (access as {topic}.<member>):\n  {list}");
                     return;
                 }
+
                 // Try bang command help file, then per-function help file.
                 let bang_text = std::fs::read_to_string(format!("help/bang/{topic}.txt")).ok();
                 if let Some(text) = bang_text {
@@ -1044,8 +1066,29 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     } else {
                         print!("{text}");
                     }
+                } else if let Some(sig) = builtin_sig(topic) {
+                    // No help file but we have a signature — find which namespace owns it.
+                    let owner = env.vars.iter().find_map(|(ns, v)| {
+                        if let Val::Namespace(map) = v {
+                            if map.contains_key(topic) { Some(ns.clone()) } else { None }
+                        } else { None }
+                    });
+                    let prefix = owner.as_deref()
+                        .map(|ns| format!("({ns}.{topic})  "))
+                        .unwrap_or_default();
+                    println!("\x1b[33m{prefix}{sig}\x1b[0m");
                 } else {
-                    eprintln!("no help for '{topic}'  (try !help with no argument)");
+                    // Last resort: check if it's a member of any namespace.
+                    let owner = env.vars.iter().find_map(|(ns, v)| {
+                        if let Val::Namespace(map) = v {
+                            if map.contains_key(topic) { Some(ns.clone()) } else { None }
+                        } else { None }
+                    });
+                    if let Some(ns) = owner {
+                        eprintln!("'{topic}' is a member of '{ns}' — try !help {ns}.{topic}");
+                    } else {
+                        eprintln!("no help for '{topic}'  (try !help with no argument)");
+                    }
                 }
             }
         }
