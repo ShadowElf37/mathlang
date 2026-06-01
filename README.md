@@ -1109,7 +1109,8 @@ and goes through `solver.verlet`).
 
 `examples/pic_plasma.math` is a full worked 2-D electrostatic PIC plasma — the
 complete gather → push → scatter → field-push cycle — that animates the charge
-density `ρ(x) = ∇·E` as a self-consistent plasma oscillation.
+density `ρ(x) = ∇·E` as a churning, self-consistent glob of plasma (a converging,
+swirling, thermally-noisy particle load).
 
 ---
 

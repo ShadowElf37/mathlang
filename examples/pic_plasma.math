@@ -33,28 +33,43 @@
 N   = 64            # grid: N x N cells on the periodic box [0, 2*pi)^2
 L   = 2*pi
 dt  = 0.05          # leapfrog step; stable while omega_p * dt << 2
-np  = 64            # particles per axis -> P = np^2 = 4096 macro-particles
+np  = 96            # particles per axis -> P = np^2 = 9216 macro-particles
 P   = np*np
-q   = 0.15          # macro-particle charge (sets the plasma frequency)
+q   = 0.12          # macro-particle charge (sets the plasma frequency)
 qm  = q             # charge/mass ratio (mass = 1)
-A   = 0.5           # amplitude of the seed velocity perturbation
+
+# Seed-flow shape: particles stream INTO a Gaussian blob at the box centre, with a
+# swirl (rotation) and random thermal kicks on top — so a churning, speckled
+# "glob" of plasma forms and pulses, instead of a clean 1-D oscillation.
+cx    = pi          # blob centre
+cy    = pi
+sig   = 1.1         # blob radius
+kc    = 1.2         # inward (converging) flow strength -> compresses the blob
+ks    = 0.7         # swirl (rotational) flow strength  -> makes it churn
+therm = 0.5         # thermal velocity noise -> grainy plasma texture
 
 # ── initial condition ────────────────────────────────────────────────────────
-# Particles sit on a uniform np x np lattice (a charge-neutral background, so the
-# net charge density is ~0 and E = 0 satisfies Gauss). We seed a k=1 perturbation
-# in the x-velocity, v_x = A sin(x): particles stream toward the compressions,
-# charge bunches form, and the longitudinal E field they induce pushes them back —
-# a standing Langmuir (plasma) oscillation. The perturbation varies in x only, so
-# rho = div E shows up as vertical stripes oscillating in time.
+# Particles start on a uniform np x np lattice — a charge-neutral background, so
+# the net charge density is ~0 and E = 0 satisfies Gauss's law exactly at t = 0
+# (essential: the Ampère scheme only stays consistent if it starts consistent).
+# All the action is in the seed VELOCITY field; the glob is emergent.
 X0 = tensor((p,c) -> {
   i = p // np;  j = p % np;
   x = L*(i + 0.5)/np;  y = L*(j + 0.5)/np;
   if(c == 0, x, y)
 }, P, 2)
 
+# Velocity = converging inflow + swirl, both localised by a Gaussian envelope at
+# the centre, plus uniform thermal noise. The inflow piles charge into a central
+# glob (div v < 0 ⇒ compression), the swirl makes it rotate and shear, and the
+# noise gives the speckled texture. The induced E pushes back, so the glob pulses
+# and churns rather than simply collapsing.
 V0 = tensor((p,c) -> {
-  i = p // np;  x = L*(i + 0.5)/np;
-  if(c == 0, A*sin(x), 0.0)
+  i = p // np;  j = p % np;
+  x = L*(i + 0.5)/np;  y = L*(j + 0.5)/np;
+  env = exp(-((x-cx)^2 + (y-cy)^2)/(2*sig^2));
+  if(c == 0, (-kc*(x-cx) - ks*(y-cy))*env + therm*(rand()-0.5),
+             (-kc*(y-cy) + ks*(x-cx))*env + therm*(rand()-0.5))
 }, P, 2)
 
 # E starts at zero. We build it as the gradient of a zero scalar field so it is a
