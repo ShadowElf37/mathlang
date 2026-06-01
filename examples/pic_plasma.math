@@ -1,126 +1,109 @@
-# pic_plasma.math — a 2-D electrostatic particle-in-cell (PIC) plasma, animating
-# the charge density rho(x) = div E.
+# pic_plasma.math — a 2-D relativistic ELECTROMAGNETIC particle-in-cell plasma:
+# a self-pinching current beam (z-pinch), animating the charge density rho = div E.
 #
-# This is the full PIC cycle: a cloud of charged particles and a grid-borne
-# electric field, coupled by the two `pic` operations on either side of the field
-# update —
+# A beam of charge streams out of the plane at v_z = beta*c, carrying a current
+# J_z. That current makes its own magnetic field B (azimuthal, in-plane), and the
+# Lorentz force q v_z x B squeezes the beam inward — a z-pinch. The fields are
+# fully self-consistent: BOTH the electric field (from the charge) and the magnetic
+# field (from the current) are solved from the instantaneous particle distribution
+# every step. (This is the magneto-quasistatic / Darwin limit of Maxwell — the full
+# self-consistent E and B, dropping only electromagnetic radiation, which is
+# irrelevant to a steady pinch. The vector potential A_z is explicit below.)
 #
-#     gather (interpolate E -> particles)   pic.gather
-#                  |                                ^
-#                  v                                |
-#         push particles (x, v)           field push (Ampere)
-#                  |                                ^
-#                  v                                |
-#     scatter (deposit J: particles -> grid)  pic.scatter
+# The PIC cycle is the same as always — pic.scatter deposits the sources, the field
+# solve produces the potentials, pic.gather reads the force back onto the particles:
 #
-# We use the *Ampere* (time-domain) form of Maxwell rather than solving Poisson
-# each step. The electric field is a genuine dynamical variable:
+#     scatter (rho, J_z) --> Poisson solve (phi, A_z) --> gather force --> push
 #
-#     dE/dt = -J        (Ampere's law, with c = eps0 = 1, no magnetic field in the
-#                        electrostatic/longitudinal limit)
-#     dv/dt = (q/m) E   (Lorentz force)
-#     dx/dt = v
+# Why this needs a neutralizing background, and why it's relativistic ------------
+# A single-species beam can NOT pinch on its own: its self-magnetic force is always
+# weaker than its self-electric repulsion (the ratio is exactly beta^2 < 1), so a
+# bare charged beam flies apart at (1 - beta^2) times the electrostatic rate. A real
+# z-pinch decouples the current from the net charge with a stationary neutralizing
+# ion background (here `rho_bg`, the frozen initial profile): it cancels the charge
+# so E starts at zero, while the beam still carries the FULL current, so B pinches
+# it unopposed. As the beam compresses, charge imbalance rho = div E builds up and
+# pushes back — a Bennett equilibrium the beam oscillates around (collapse, bounce,
+# repeat). The equilibrium compression scales like gamma^2, so it wants a
+# relativistic drift to be dramatic.
 #
-# That makes rho = div E an *emergent diagnostic*, not something we deposit by
-# hand: Gauss's law div E = rho holds because charge is conserved. Taking div of
-# the field update gives d(div E)/dt = -div J = d(rho)/dt by the continuity
-# equation — so if E starts consistent with the charge (here: a uniform,
-# charge-neutral load, so E = 0 satisfies div E = 0 exactly), it stays consistent.
-# Animating div E therefore shows the real charge density sloshing as a plasma
-# oscillation. (Plain CIC deposition conserves charge only approximately; an
-# Esirkepov current would make div E = rho exact to machine precision — see below.)
+# With mathlang's Poisson convention lap(poisson(f)) = +f, the electric field that
+# satisfies Gauss is E = grad(poisson(rho_net)) (so div E = rho_net exactly), and
+# combining the electric (net charge) and magnetic (full current) forces gives a
+# single effective potential — the transverse force per charge is
+#     F/q = grad( poisson( (1 - beta^2) rho  -  rho_bg ) ).
 
-N   = 64            # grid: N x N cells on the periodic box [0, 2*pi)^2
-L   = 2*pi
-dt  = 0.05          # leapfrog step; stable while omega_p * dt << 2
-np  = 96            # particles per axis -> P = np^2 = 9216 macro-particles
-P   = np*np
-q   = 0.12          # macro-particle charge (sets the plasma frequency)
-qm  = q             # charge/mass ratio (mass = 1)
-
-# Seed-flow shape: particles stream INTO a Gaussian blob at the box centre, with a
-# swirl (rotation) and random thermal kicks on top — so a churning, speckled
-# "glob" of plasma forms and pulses, instead of a clean 1-D oscillation.
-cx    = pi          # blob centre
-cy    = pi
-sig   = 1.1         # blob radius
-kc    = 1.2         # inward (converging) flow strength -> compresses the blob
-ks    = 0.7         # swirl (rotational) flow strength  -> makes it churn
-therm = 0.5         # thermal velocity noise -> grainy plasma texture
+N    = 64           # grid: N x N cells on the periodic box [0, 2*pi)^2
+L    = 2*pi
+dt   = 0.03
+np   = 90           # particles per axis -> P = np^2 = 8100 macro-particles
+P    = np*np
+q    = 0.10         # charge per macro-particle
+beta = 0.85         # axial drift v_z / c  (sets the magnetic pinch strength)
+gam  = 1/sqrt(1 - beta^2)   # Lorentz factor -> relativistic transverse inertia
+cx   = pi           # beam centre
+cy   = pi
+r0   = 1.6          # initial beam radius
+vth  = 0.15         # transverse thermal speed -> pressure that halts the collapse
 
 # ── initial condition ────────────────────────────────────────────────────────
-# Particles start on a uniform np x np lattice — a charge-neutral background, so
-# the net charge density is ~0 and E = 0 satisfies Gauss's law exactly at t = 0
-# (essential: the Ampère scheme only stays consistent if it starts consistent).
-# All the action is in the seed VELOCITY field; the glob is emergent.
-X0 = tensor((p,c) -> {
-  i = p // np;  j = p % np;
-  x = L*(i + 0.5)/np;  y = L*(j + 0.5)/np;
-  if(c == 0, x, y)
-}, P, 2)
+# A uniform disk of radius r0. We precompute each particle's (radius, angle) so its
+# x and y stay correlated (a tensor constructor calls f(p,c) per component, and two
+# independent rand() draws would scramble the disk).
+rr = tensor(p -> r0*sqrt(rand()), P)        # sqrt -> uniform area density
+tt = tensor(p -> 2*pi*rand(), P)
+X0 = tensor((p,c) -> if(c == 0, cx + rr[p]*cos(tt[p]), cy + rr[p]*sin(tt[p])), P, 2)
+V0 = tensor((p,c) -> vth*(rand() - 0.5), P, 2)   # small thermal spread
 
-# Velocity = converging inflow + swirl, both localised by a Gaussian envelope at
-# the centre, plus uniform thermal noise. The inflow piles charge into a central
-# glob (div v < 0 ⇒ compression), the swirl makes it rotate and shear, and the
-# noise gives the speckled texture. The induced E pushes back, so the glob pulses
-# and churns rather than simply collapsing.
-V0 = tensor((p,c) -> {
-  i = p // np;  j = p % np;
-  x = L*(i + 0.5)/np;  y = L*(j + 0.5)/np;
-  env = exp(-((x-cx)^2 + (y-cy)^2)/(2*sig^2));
-  if(c == 0, (-kc*(x-cx) - ks*(y-cy))*env + therm*(rand()-0.5),
-             (-kc*(y-cy) + ks*(x-cx))*env + therm*(rand()-0.5))
-}, P, 2)
+qw    = tensor(p -> q, P)                   # per-particle charge weights
+zerof = field((x,y) -> 0.0, 0, L, (N, N), forms.periodic)   # grid template (geometry)
+rho_bg = pic.scatter(X0, qw, zerof)         # frozen neutralizing ion background
 
-# E starts at zero. We build it as the gradient of a zero scalar field so it is a
-# 1-form with exactly the grid's geometry (periodic, spacing 2*pi/N) — the shape
-# pic.scatter and pic.gather expect.
-E0 = ops.grad(field((x,y) -> 0.0, 0, L, (N, N), forms.periodic))
-
-# Keep particles on the torus.
 wrap(Z) = Z - L*floor(Z/L)
 
-# ── one PIC step (symplectic / leapfrog) ─────────────────────────────────────
-# state s = (X, V, E):  X is [P,2] positions, V is [P,2] velocities,
-#                       E is the electric field (a 2-component 1-form on the grid).
+# ── one step (quasi-static fields + relativistic transverse push) ─────────────
+# state s = (X, V):  X is [P,2] transverse positions, V is [P,2] transverse velocity.
 step(s) = {
-  X = s[0];  V = s[1];  E = s[2];
+  X = s[0];  V = s[1];
 
-  # GATHER: sample E at each particle to get the force. E is a vector field, so
-  # pic.gather returns one [Ex, Ey] row per particle ([P,2]).
-  acc = qm * pic.gather(E, X);
-  V2  = V + dt*acc;                       # kick
-  X2  = wrap(X + dt*V2);                  # drift (symplectic-Euler ordering)
+  # SCATTER charge onto the grid (the current J_z = beta*rho shares this shape).
+  rho = pic.scatter(X, qw, zerof);
 
-  # SCATTER: deposit the particle current J = q v onto the grid. The template E
-  # supplies the grid geometry; weights are [P,2] (a current vector per particle),
-  # so the result is a 2-component current field with the same layout as E.
-  J  = pic.scatter(X2, q*V2, E);
+  # FIELD SOLVE: one Poisson solve gives the combined electric (net charge) +
+  # magnetic (full current, via A_z = -beta*poisson(rho)) force potential. grad of
+  # it is a 1-form (the in-plane force field).
+  Feff = ops.grad(ops.poisson((1 - beta^2)*rho - rho_bg));
 
-  # FIELD PUSH: Ampere's law, dE/dt = -J.
-  E2 = E - dt*J;
-
-  (X2, V2, E2)
+  # GATHER the force back to each particle; push with relativistic inertia gamma*m.
+  Fp = q * pic.gather(Feff, X);
+  V2 = V + dt*Fp/gam;
+  X2 = wrap(X + dt*V2);
+  (X2, V2)
 }
 
 # ── animate rho(x) = div E ───────────────────────────────────────────────────
-# State lives in a cell; each frame advances one step and emits the charge
-# density div E as a plain N x N tensor (the animator wants a bare tensor, so
-# re() decays the scalar field). ops.div reads the spacing/BCs from the field.
-st    = cell((X0, V0, E0))
-frame = _ -> { s = get(st); set(st, step(s)); re(ops.div(s[2])) }
+# Each frame advances one step and shows the charge density rho = div E, where
+# E = grad(poisson(rho - rho_bg)) is the self-consistent electric field. It is ~0
+# while the beam is uniform and lights up as the pinch bunches charge — a glowing
+# core that pulses as the beam collapses and rebounds.
+st    = cell((X0, V0))
+frame = _ -> {
+  s = get(st);  set(st, step(s));
+  rho = pic.scatter(s[0], qw, zerof);
+  E   = ops.grad(ops.poisson(rho - rho_bg));
+  re(ops.div(E))
+}
 
-!animate2D frame, 600, 30
+!animate2D frame, 900, 30
 
-# ── the canonical view (why this is exactly the symplectic-PIC story) ─────────
-# This electrostatic case is *separable*: the field push is sourced only by the
-# deposited current, and the particle push depends only on the gathered field, so
-# the leapfrog above is the field-aware velocity-Verlet you would get from
-#     solver.verlet(dVdq, dTdp, (X, A), (P_mech, -E), dt, n)
-# with the gather/scatter living inside the gradient functions (q = positions +
-# vector potential A, p = momenta + (-E)). The *full* electromagnetic case —
-# particles minimally coupled through (p - qA)^2 — is non-separable but still
-# canonical, and is exactly what solver.tao integrates: same scatter/gather, same
-# one-big-phase-space, but with A entering the kinetic term. The adjointness of
-# pic.gather and pic.scatter (same kernel = transpose) is what keeps either scheme
-# self-force-free and symplectic.
+# ── the canonical view (the A field is right here) ────────────────────────────
+# This is exactly the (p - qA)^2 coupling the solver thread was about. The axial
+# canonical momentum is p_z = gamma*m*v_z + q*A_z; the magnetic pinch force is
+# q*v_z*grad(A_z), with the vector potential A_z = -beta*poisson(rho) made explicit
+# in the field solve above (B = curl(A_z zhat)). Because A enters the kinetic
+# energy, the full electromagnetic system is non-separable but still canonical —
+# the regime solver.tao integrates. Here we use the quasi-static field solve for
+# robustness, but the gather/scatter and the one-big-phase-space are identical; the
+# adjointness of pic.gather and pic.scatter (same kernel = transpose) is what keeps
+# the deposited current and the gathered force consistent, hence the scheme
+# momentum-conserving and self-force-free.

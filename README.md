@@ -1107,10 +1107,13 @@ and goes through `solver.verlet`).
 > E    = pic.gather(ops.grad(phi), [1.3, 4.2, 7.8])  # interpolate force back
 ```
 
-`examples/pic_plasma.math` is a full worked 2-D electrostatic PIC plasma — the
-complete gather → push → scatter → field-push cycle — that animates the charge
-density `ρ(x) = ∇·E` as a churning, self-consistent glob of plasma (a converging,
-swirling, thermally-noisy particle load).
+`examples/pic_plasma.math` is a full worked 2-D relativistic **electromagnetic**
+PIC plasma — a self-pinching current beam (z-pinch) — that animates the charge
+density `ρ(x) = ∇·E`. Both the electric field (from the deposited charge) and the
+magnetic field (from the deposited current, via the vector potential
+`A_z = −β·poisson(ρ)`) are solved self-consistently each step; the beam collapses
+under its own magnetic field and rebounds against the electrostatic pressure it
+builds up, an oscillating Bennett pinch whose charge density pulses in `div E`.
 
 ---
 
