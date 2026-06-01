@@ -12,11 +12,14 @@
 // (subset) index varying fastest: component c at grid point p lives at
 // data[p*ncomp + c]. Components are indexed by the sorted k-subsets of
 // {0,..,n-1} in lexicographic order (see `subsets`).
-use crate::eval::{Val, TData, FieldVal, BC, Variance, fmt_val};
+use crate::eval::{Val, TData, FieldVal, BC, Variance, binomial, fmt_val};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub const NAMES: &[&str] = &["d", "hodge", "wedge", "raise", "lower", "codiff", "laplace"];
+pub const NAMES: &[&str] = &[
+    "d", "hodge", "wedge", "raise", "lower", "codiff", "laplace",
+    "form", "vector", "contract",
+];
 
 pub fn members() -> HashMap<String, Val> {
     let mut m: HashMap<String, Val> =
@@ -36,6 +39,9 @@ pub fn dispatch(name: &str, vals: Vec<Val>, _env: &crate::eval::Env) -> Result<V
         "lower"  => lower(vals),
         "codiff" => codiff(vals),
         "laplace" => laplace(vals),
+        "form"     => form_ctor(vals),
+        "vector"   => vector_ctor(vals),
+        "contract" => contract(vals),
         _ => Err(format!("forms: unknown member '{name}'")),
     }
 }
@@ -166,16 +172,84 @@ pub fn field_ctor(vals: Vec<Val>) -> Result<Val, String> {
         Val::Tensor { data, shape } => (data, shape),
         other => return Err(format!("field: data must be a real tensor, got {}", fmt_val(&other))),
     };
+    let geom: Vec<Val> = it.collect();
+    // A scalar field is a 0-form: its data shape IS the grid (no component axis).
+    assemble(data, grid, 0, Variance::Form, &geom, "field")
+}
+
+// forms.form(data, degree, lo, hi, bc [, metric]) — build a degree-k FORM directly
+// from component data laid out grid ++ [C(n,k)] (the trailing component axis is
+// dropped when C(n,k)==1, matching how fields display/extract).
+fn form_ctor(vals: Vec<Val>) -> Result<Val, String> {
+    if vals.len() < 5 || vals.len() > 6 {
+        return Err("forms.form(data, degree, lo, hi, bc [, metric]) expects 5 or 6 args".into());
+    }
+    let mut it = vals.into_iter();
+    let (data, shape) = match it.next().unwrap() {
+        Val::Tensor { data, shape } => (data, shape),
+        other => return Err(format!("forms.form: data must be a real tensor, got {}", fmt_val(&other))),
+    };
+    let degree = it.next().unwrap().num("forms.form degree")? as usize;
+    let (grid, _ncomp) = split_shape(&shape, degree, "forms.form")?;
+    let geom: Vec<Val> = it.collect();
+    assemble(data, grid, degree, Variance::Form, &geom, "forms.form")
+}
+
+// forms.vector(data, lo, hi, bc [, metric]) — build a VECTOR FIELD (contravariant,
+// degree 1) from data laid out grid ++ [n] (n components per grid point).
+fn vector_ctor(vals: Vec<Val>) -> Result<Val, String> {
+    if vals.len() < 4 || vals.len() > 5 {
+        return Err("forms.vector(data, lo, hi, bc [, metric]) expects 4 or 5 args".into());
+    }
+    let mut it = vals.into_iter();
+    let (data, shape) = match it.next().unwrap() {
+        Val::Tensor { data, shape } => (data, shape),
+        other => return Err(format!("forms.vector: data must be a real tensor, got {}", fmt_val(&other))),
+    };
+    let (grid, _n) = split_shape(&shape, 1, "forms.vector")?;
+    let geom: Vec<Val> = it.collect();
+    assemble(data, grid, 1, Variance::Vector, &geom, "forms.vector")
+}
+
+/// Recover (grid, ncomp) from a stored data shape for a degree-k field. The
+/// component axis (size C(n,k)) is trailing and is omitted when it would be 1, so
+/// a 0-form (and any top-degree form) is shaped exactly like its grid.
+fn split_shape(shape: &[usize], degree: usize, what: &str) -> Result<(Vec<usize>, usize), String> {
+    if shape.is_empty() { return Err(format!("{what}: data must have rank >= 1")); }
+    // Trailing component-axis interpretation (only when it genuinely fits and the
+    // form is not a 0-form, whose shape is always exactly the grid).
+    if degree > 0 && shape.len() >= 2 {
+        let n = shape.len() - 1;
+        let m = binomial(n, degree);
+        if m == shape[shape.len() - 1] && m >= 1 {
+            return Ok((shape[..n].to_vec(), m));
+        }
+    }
+    // Otherwise there is no component axis, so C(n,degree) must be 1.
+    let n = shape.len();
+    if binomial(n, degree) == 1 {
+        return Ok((shape.to_vec(), 1));
+    }
+    Err(format!("{what}: data shape {shape:?} is not consistent with a degree-{degree} field on any grid"))
+}
+
+/// Shared field builder: derive per-axis spacing from the geometry args
+/// (lo, hi, bc [, metric]) and assemble the FieldVal.
+fn assemble(data: TData, grid: Vec<usize>, degree: usize, variance: Variance,
+            geom: &[Val], what: &str) -> Result<Val, String> {
     let n = grid.len();
-    if n == 0 { return Err("field: data must have rank >= 1".into()); }
-    let lo  = as_axis_vec(&it.next().unwrap(), n, "field lo")?;
-    let hi  = as_axis_vec(&it.next().unwrap(), n, "field hi")?;
-    let bcv = as_axis_vec(&it.next().unwrap(), n, "field bc")?;
-    let metric = match it.next() {
-        Some(m) => as_axis_vec(&m, n, "field metric")?,
+    if n == 0 { return Err(format!("{what}: grid must have rank >= 1")); }
+    if geom.len() < 3 || geom.len() > 4 {
+        return Err(format!("{what}: expected lo, hi, bc [, metric]"));
+    }
+    let lo  = as_axis_vec(&geom[0], n, &format!("{what} lo"))?;
+    let hi  = as_axis_vec(&geom[1], n, &format!("{what} hi"))?;
+    let bcv = as_axis_vec(&geom[2], n, &format!("{what} bc"))?;
+    let metric = match geom.get(3) {
+        Some(m) => as_axis_vec(m, n, &format!("{what} metric"))?,
         None    => vec![1.0; n],
     };
-    if metric.iter().any(|&g| g == 0.0) { return Err("field: metric entries must be nonzero".into()); }
+    if metric.iter().any(|&g| g == 0.0) { return Err(format!("{what}: metric entries must be nonzero")); }
     let bc: Vec<BC> = bcv.iter().map(|&b| if b == 0.0 { BC::Periodic } else { BC::Neumann }).collect();
     // Spacing: periodic boxes [lo,hi) exclude the duplicate endpoint (÷N); a
     // Neumann/clamped axis includes both endpoints (÷(N-1)).
@@ -186,9 +260,7 @@ pub fn field_ctor(vals: Vec<Val>) -> Result<Val, String> {
             BC::Neumann  => span / (grid[a].max(2) - 1) as f64,
         }
     }).collect();
-    Ok(Val::Field(Arc::new(FieldVal {
-        data, grid, spacing, lo, bc, metric, degree: 0, variance: Variance::Form,
-    })))
+    Ok(Val::Field(Arc::new(FieldVal { data, grid, spacing, lo, bc, metric, degree, variance })))
 }
 
 /// Rebuild a field with new component data but identical geometry/degree/variance.
@@ -360,4 +432,52 @@ fn laplace(vals: Vec<Val>) -> Result<Val, String> {
     let (a, b) = (as_field(term_dd, "forms.laplace")?, as_field(term_cd, "forms.laplace")?);
     let sum: Vec<f64> = a.data.iter().zip(b.data.iter()).map(|(x, y)| x + y).collect();
     Ok(rebuild(&a, sum, a.degree, a.variance))
+}
+
+// contract(X, w) — interior product ι_X ω: feed a vector field X into the first
+// slot of a k-form ω, giving a (k-1)-form. Metric-FREE (it is the natural pairing,
+// not a raising/lowering). At k=1 this is the duality pairing ⟨ω, X⟩ = Σ_i ω_i X^i
+// — a scalar (0-form). With Cartan's formula L_X = d∘ι_X + ι_X∘d it also gives the
+// Lie derivative.
+//   (ι_X ω)_J = Σ_{i∉J} sign(i,J) · X^i · ω_{sorted({i}∪J)}.
+fn contract(vals: Vec<Val>) -> Result<Val, String> {
+    if vals.len() != 2 { return Err("forms.contract(X, w) expects 2 args".into()); }
+    let mut it = vals.into_iter();
+    let x = as_field(it.next().unwrap(), "forms.contract")?;
+    let w = as_field(it.next().unwrap(), "forms.contract")?;
+    if x.degree != 1 || x.variance != Variance::Vector {
+        return Err("forms.contract: the first argument must be a vector field \
+                    (degree-1, contravariant — from forms.vector or forms.raise)".into());
+    }
+    if w.variance != Variance::Form {
+        return Err("forms.contract: the second argument must be a form (covariant)".into());
+    }
+    if x.grid != w.grid || x.spacing != w.spacing || x.bc != w.bc || x.metric != w.metric {
+        return Err("forms.contract: operands must share the same grid geometry".into());
+    }
+    let n = w.grid.len();
+    let k = w.degree;
+    if k == 0 {
+        return Err("forms.contract: cannot contract a vector into a 0-form (degree would be -1)".into());
+    }
+    let in_sub  = subsets(n, k);
+    let out_sub = subsets(n, k - 1);
+    let (nc_in, nc_out) = (in_sub.len(), out_sub.len());
+    let gt = grid_total(&w.grid);
+    let xcomp: Vec<Vec<f64>> = (0..n).map(|i| component(&x, i, n)).collect();
+    let mut out = vec![0.0; gt * nc_out];
+    for (out_c, jset) in out_sub.iter().enumerate() {
+        for i in 0..n {
+            if jset.contains(&i) { continue; }
+            let mut iset = jset.clone();
+            iset.push(i);
+            iset.sort_unstable();
+            let p = iset.iter().position(|&v| v == i).unwrap();   // position of i in sorted {i}∪J
+            let in_c = subset_index(&in_sub, &iset);
+            let sign = if p % 2 == 0 { 1.0 } else { -1.0 };
+            let wi = component(&w, in_c, nc_in);
+            for gp in 0..gt { out[gp * nc_out + out_c] += sign * xcomp[i][gp] * wi[gp]; }
+        }
+    }
+    Ok(rebuild(&w, out, k - 1, Variance::Form))
 }

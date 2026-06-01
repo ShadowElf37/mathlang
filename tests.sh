@@ -1531,6 +1531,17 @@ run_match "ops.field.grad.is.field" "f=field(tensor(k->sin(2*pi*k/8),8),0,2*pi,f
 run_match "ops.field.poisson.is.field" "f=field(tensor(k->sin(2*pi*k/8),8),0,2*pi,forms.periodic); ops.poisson(f)" "0-form"
 run_err "ops.field.poisson.periodic" "f=field((1,2,3,4),0,1,forms.neumann); ops.poisson(f)" ""
 run_err "ops.field.extra.arg"  "f=field(tensor(k->sin(2*pi*k/8),8),0,2*pi,forms.periodic); ops.lap(f, 0.1)" ""
+# direct construction of forms and vector fields.
+run_match "forms.vector.ctor" "forms.vector(tensor((i,j,c)->1.0*c,3,3,2),0,2*pi,forms.periodic)" "vector field \[3×3\]"
+run_match "forms.form.ctor.1form" "forms.form(tensor((i,c)->1.0,5,1),1,0,1,forms.periodic)" "1-form \[5\]"
+run_err "forms.vector.badshape" "forms.vector(tensor((i,c)->1.0,4,2),0,1,forms.periodic)" ""
+# contraction (interior product) ι_X: vector + k-form → (k-1)-form.
+run "forms.contract.pairing"  "X=forms.vector(tensor((i,j,c)->if(c==0,3.0,5.0),3,3,2),0,1,forms.periodic); w=forms.form(tensor((i,j,c)->if(c==0,2.0,7.0),3,3,2),1,0,1,forms.periodic); re(forms.contract(X,w))[0,0]" "41"
+run "forms.contract.graddot"  "h=tensor((i,j)->sin(2*pi*i/16)*cos(2*pi*j/16),16,16); f=tensor((i,j)->cos(3*pi*i/16)*sin(2*pi*j/16),16,16); hf=field(h,0,2*pi,forms.periodic); ff=field(f,0,2*pi,forms.periodic); dx=2*pi/16; pair=re(forms.contract(forms.raise(forms.d(hf)),forms.d(ff))); ref=ops.grad(h,dx,0)*ops.grad(f,dx,0)+ops.grad(h,dx,1)*ops.grad(f,dx,1); round(max(abs(pair-ref)),9)" "0"
+run "forms.contract.nilpotent" "w=forms.form(tensor((i,j,k,c)->sin(i+2*j+3*k+c),4,4,4,3),2,0,2*pi,forms.periodic); X=forms.vector(tensor((i,j,k,c)->cos(i+j+k+2*c),4,4,4,3),0,2*pi,forms.periodic); round(max(abs(forms.contract(X,forms.contract(X,w)))),9)" "0"
+run_err "forms.contract.needsvec" "a=forms.d(field(tensor((i,j)->1.0*i,4,4),0,1,forms.periodic)); forms.contract(a,a)" ""
+# cell/get/set are field-transparent (regression: must not decay a field to a tensor).
+run_ok "field.cell.transparent" "{st=cell(field((1.0,2,3,4),0,1,forms.periodic)); set(st,2*get(st)); re(ops.grad(get(st)))}"
 
 # ── print summary ─────────────────────────────────────────────────────────────
 echo

@@ -96,7 +96,8 @@ impl MathHelper {
 
 // Highlight the argument portion of a !print template.
 // Literal text (and escaped {{ / }}) is yellow; {expr} has yellow braces with math-highlighted expr inside.
-fn highlight_print_args(arg: &str, user_fns: &[String], user_vars: &[String], namespaces: &[String]) -> String {
+fn highlight_print_args(arg: &str, user_fns: &[String], user_vars: &[String],
+                        namespaces: &std::collections::HashMap<String, Vec<String>>) -> String {
     let mut out = String::new();
     let mut chars = arg.chars().peekable();
     let mut in_yellow = false;
@@ -146,7 +147,8 @@ fn highlight_print_args(arg: &str, user_fns: &[String], user_vars: &[String], na
     out
 }
 
-fn highlight_line(line: &str, user_fns: &[String], user_vars: &[String], namespaces: &[String]) -> String {
+fn highlight_line(line: &str, user_fns: &[String], user_vars: &[String],
+                  namespaces: &std::collections::HashMap<String, Vec<String>>) -> String {
     if line.starts_with('!') {
         let cmd_end = line.find(|c: char| c.is_ascii_whitespace()).unwrap_or(line.len());
         let cmd_name = &line[1..cmd_end];
@@ -164,7 +166,9 @@ fn highlight_line(line: &str, user_fns: &[String], user_vars: &[String], namespa
     let mut out = String::with_capacity(line.len() + 64);
     let mut i = 0;
     let mut expect_type = false; // true right after a ':' — next identifier is a type
-    let mut expect_member = false; // true right after `<namespace>.` — next ident is a member
+    // After `<namespace>.`, holds that namespace's member list so the next
+    // identifier is coloured as a member only if it actually belongs to it.
+    let mut member_of: Option<&Vec<String>> = None;
     while i < line.len() {
         if b[i].is_ascii_whitespace() { out.push(b[i] as char); i += 1; continue; }
         if b[i].is_ascii_digit() || (b[i] == b'.' && b.get(i+1).map_or(false, |c| c.is_ascii_digit())) {
@@ -183,10 +187,14 @@ fn highlight_line(line: &str, user_fns: &[String], user_vars: &[String], namespa
             let s = i;
             while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') { i += 1; }
             let name = &line[s..i];
-            // Member of a namespace (`ns.member`) — colour like a function (magenta).
-            if expect_member {
-                out.push_str(&format!("\x1b[95m{name}\x1b[0m"));
-                expect_member = false;
+            // Member access (`ns.member`): colour as a function (magenta) only if it
+            // is a real member of that namespace; an unknown name stays plain.
+            if let Some(members) = member_of.take() {
+                if members.iter().any(|m| m == name) {
+                    out.push_str(&format!("\x1b[95m{name}\x1b[0m"));
+                } else {
+                    out.push_str(name);
+                }
                 expect_type = false;
                 continue;
             }
@@ -198,14 +206,14 @@ fn highlight_line(line: &str, user_fns: &[String], user_vars: &[String], namespa
                 continue;
             }
             expect_type = false;
-            // Namespace name (orange, 256-colour). If a single `.` follows, the next
-            // identifier is its member — flag it so it gets the function colour.
-            if namespaces.iter().any(|n| n == name) {
+            // Namespace name (orange, 256-colour). If a single `.` follows, remember
+            // its member list so the next identifier can be validated against it.
+            if let Some(members) = namespaces.get(name) {
                 out.push_str(&format!("\x1b[38;5;208m{name}\x1b[0m"));
                 let mut j = i;
                 while j < b.len() && b[j].is_ascii_whitespace() { j += 1; }
                 if j < b.len() && b[j] == b'.' && b.get(j + 1).map_or(true, |c| *c != b'.') {
-                    expect_member = true;
+                    member_of = Some(members);
                 }
                 continue;
             }
@@ -255,8 +263,7 @@ fn highlight_line(line: &str, user_fns: &[String], user_vars: &[String], namespa
 
 impl rustyline::highlight::Highlighter for MathHelper {
     fn highlight<'l>(&self, line: &'l str, _pos: usize) -> std::borrow::Cow<'l, str> {
-        let ns_names: Vec<String> = self.namespaces.borrow().keys().cloned().collect();
-        std::borrow::Cow::Owned(highlight_line(line, &self.user_fns.borrow(), &self.user_vars.borrow(), &ns_names))
+        std::borrow::Cow::Owned(highlight_line(line, &self.user_fns.borrow(), &self.user_vars.borrow(), &self.namespaces.borrow()))
     }
     fn highlight_char(&self, _line: &str, _pos: usize, _forced: bool) -> bool { true }
 }
@@ -986,8 +993,9 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     "           ops  solver  forms  special  bits  stats  linalg  vec\n",
                     "PDE:       ops.grad/div/curl/lap(T,dx)  ops.poisson/specgrad(T,dx)\n",
                     "           solver.rk4(f,y0,t0,t1,n)  solver.odeint(f,y0,ts)  solver.cfl(V,dx,dt)\n",
-                    "Fields:    field(data,lo,hi,bc[,metric])  — k-form on a grid; bc=forms.periodic/neumann\n",
-                    "           forms.d/hodge/wedge/raise/lower/codiff/laplace  — exterior calculus\n",
+                    "Fields:    field(data,lo,hi,bc[,metric])  — scalar (0-form); bc=forms.periodic/neumann\n",
+                    "           forms.form(data,deg,…)  forms.vector(data,…)  — build forms / vector fields\n",
+                    "           forms.d/hodge/wedge/raise/lower/codiff/laplace/contract  — exterior calculus\n",
                     "           ops.grad/div/curl/lap/poisson(field)  — field-polymorphic (dx/bc from field)\n",
                     "Special:   special.{{sinc,sech,csch,erf,erfc,j0,j1,jinc,gaussian,gaussian_cdf,delta}}\n",
                     "Tuple ops: len sort zip dot  append concat flatten  argmin argmax\n",

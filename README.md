@@ -941,8 +941,22 @@ and a metric. Build one with `field`:
 A field is a *k-form*: a scalar field is a 0-form, a gradient is a 1-form, and so
 on. A k-form on an n-D grid has C(n,k) components, stored on a trailing axis.
 Arithmetic (`+ - *` by scalars and matching fields) stays inside the field
-algebra; any named builtin (`abs`, `max`, `sum`, `re`, …) decays a field to its
-underlying tensor.
+algebra; container builtins (`cell`/`get`/`set`/`id`) pass a field through
+untouched, while any other named builtin (`abs`, `max`, `sum`, `re`, …) decays it
+to its underlying tensor.
+
+`field` builds a 0-form (scalar field). To build a higher-degree form or a vector
+field directly from component data, use:
+
+```
+> forms.form(data, degree, lo, hi, bc [, metric])   # a degree-k form
+> forms.vector(data, lo, hi, bc [, metric])          # a (degree-1) vector field
+```
+
+The component axis is trailing (`data` shaped `grid ++ [C(n,degree)]`, dropped when
+that count is 1). A **vector field** is the contravariant counterpart of a 1-form;
+its component count equals the grid dimension. The only other way to get a vector
+is `forms.raise` (a 1-form ↦ vector field).
 
 The **`forms`** namespace is exterior calculus:
 
@@ -955,7 +969,14 @@ The **`forms`** namespace is exterior calculus:
 > forms.lower(f)        # musical flat  ♭: vector field → form (lower indices)
 > forms.codiff(f)       # codifferential δ = ±★d★: k-form → (k-1)-form
 > forms.laplace(f)      # Laplace–de Rham Δ = dδ + δd
+> forms.contract(X, w)  # interior product ι_X: vector + k-form → (k-1)-form
 ```
+
+`forms.contract` is the natural pairing between vectors and forms — feeding a
+vector field `X` into a k-form gives a (k−1)-form, and at degree 1 it bottoms out
+at the scalar `⟨ω, X⟩ = Σ_i ω_i X^i` (a 0-form). It is metric-free (unlike
+`raise`/`lower`), and with Cartan's formula `L_X = d∘ι_X + ι_X∘d` it gives the Lie
+derivative.
 
 The two per-axis quantities are kept strictly separate. **The grid spacing `dx`
 enters only `d`** (and grad/curl/div, which are `d` in disguise); `d` is otherwise

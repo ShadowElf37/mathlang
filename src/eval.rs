@@ -1364,14 +1364,18 @@ pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, St
         return crate::ns::forms::field_ctor(vals);
     }
 
-    // A field decays to its component tensor under any flat builtin reached here
+    // A field decays to its component tensor under most flat builtins reached here
     // (abs/max/sum/sin/…). Arithmetic operators preserve field-ness via
     // `field_binop`, and the form/operator namespaces (forms.*, ops.*) are routed
-    // out above with their fields intact; everything else treats a field as data.
-    for i in 0..vals.len() {
-        if let Val::Field(f) = &vals[i] {
-            let t = field_data_as_tensor(f);
-            vals[i] = t;
+    // out above with their fields intact. Container/identity builtins are
+    // field-transparent — they must store and return the field untouched, not its
+    // raw data (otherwise `cell(field)`/`get`/`set` would silently lose the type).
+    if !matches!(name, "cell" | "get" | "set" | "id") {
+        for i in 0..vals.len() {
+            if let Val::Field(f) = &vals[i] {
+                let t = field_data_as_tensor(f);
+                vals[i] = t;
+            }
         }
     }
 

@@ -332,16 +332,23 @@ f = field(tensor(k -> sin(2*pi*k/64), 64), 0, 2*pi, forms.periodic)
 ```
 
 A field is a *k-form* (0-form = scalar, 1-form = gradient, …) with C(n,k) trailing
-components. `forms.*` is exterior calculus:
+components. `field` makes a 0-form; build higher forms / vector fields directly
+with `forms.form(data, degree, lo, hi, bc[, metric])` and
+`forms.vector(data, lo, hi, bc[, metric])`. `forms.*` is exterior calculus:
 
 ```
 forms.d(f)        # exterior derivative: k-form → (k+1)-form (grad/curl/div unified)
 forms.hodge(f)    # Hodge star ★: k-form → (n-k)-form
 forms.wedge(a,b)  # exterior product ∧
-forms.raise(f) / forms.lower(f)   # musical isomorphisms ♯ / ♭
+forms.raise(f) / forms.lower(f)   # musical isomorphisms ♯ / ♭ (form ↔ vector field)
+forms.contract(X,w) # interior product ι_X: vector + k-form → (k-1)-form (metric-free)
 forms.codiff(f)   # codifferential δ = ±★d★
 forms.laplace(f)  # Laplace–de Rham Δ = dδ + δd
 ```
+
+`forms.contract` is the natural vector–form pairing: at degree 1 it is the scalar
+⟨ω,X⟩ = Σ_i ω_i X^i. Container builtins (`cell`/`get`/`set`/`id`) keep a field as a
+field; other named builtins decay it to its tensor.
 
 Design rule: **`dx` enters only `d`** (which is therefore metric-free), while the
 **metric enters only `hodge`/`raise`/`lower`/`codiff`/`laplace`**. Hence the same
