@@ -287,11 +287,21 @@ prod(f, a, b)                  # integer product
 solver.rk4(f, y0, t0, t1, n)             # RK4, returns final state (f(t,y)=dy/dt)
 solver.odeint(f, y0, ts)                 # RK4 sampled at times ts, returns trajectory
 solver.verlet(dVdq, dTdp, q0, p0, dt, n) # velocity-Verlet, symplectic, H=T(p)+V(q)
+solver.tao(dHdq, dHdp, q0, p0, dt, n[, omega]) # explicit symplectic, NON-separable canonical H(q,p)
 solver.cfl(V, dx, dt)                    # Courant number diagnostic
 ```
 
 `solver.verlet` conserves energy over long runs (rk4 drifts). Build the gradient
 pieces from potentials with `deriv`: `solver.verlet(q->deriv(V,q), p->deriv(T,p), …)`.
+`q0`/`p0` may each be a scalar, tensor, **field**, or **tuple** of these — a tuple pours
+particles AND field samples into one canonical (q,p) pair; the result keeps that
+structure. For a field potential the variational derivative is the exterior-calculus
+operator itself, e.g. `solver.verlet(q->forms.laplace(q), p->p, phi, pdot, dt, n)` is a
+wave equation.
+
+`solver.tao` handles `H` that won't split into `T(p)+V(q)` (e.g. EM particle-in-cell).
+Pass `dHdq(q,p)`/`dHdp(q,p)` as 2-arg functions; `omega` (default 100) is the binding
+strength — larger tracks `H` tighter but wants a smaller `dt`. Same flexible q0/p0 templates.
 
 ---
 

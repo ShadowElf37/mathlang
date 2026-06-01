@@ -5,9 +5,10 @@
 // tensors). RK4 is the cheap high-value scheme; the integrating-factor (IMEX)
 // stepper from the doc is intentionally deferred (it can't be made generic
 // without knowing which part of the RHS is the stiff linear operator).
-use crate::eval::{Val, TData, Env, apply_val, fmt_val};
+use crate::eval::{Val, TData, Env, apply_val, fmt_val, FieldVal};
+use std::sync::Arc;
 
-pub const NAMES: &[&str] = &["rk4", "odeint", "verlet", "cfl"];
+pub const NAMES: &[&str] = &["rk4", "odeint", "verlet", "tao", "cfl"];
 
 pub fn members() -> std::collections::HashMap<String, Val> {
     NAMES.iter().map(|n| (n.to_string(), Val::Builtin(n.to_string()))).collect()
@@ -18,31 +19,74 @@ pub fn dispatch(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String> {
         "rk4"    => rk4(vals, env),
         "odeint" => odeint(vals, env),
         "verlet" => verlet(vals, env),
+        "tao"    => tao(vals, env),
         "cfl"    => cfl(vals),
         _ => Err(format!("solver: unknown member '{name}'")),
     }
 }
 
-// State shape: scalar, or a tensor with a recorded shape.
-enum Shape { Scalar, Tensor(Vec<usize>) }
+// State template: a recipe for flattening a structured Val (scalar / tensor /
+// field / tuple-of-these) into one contiguous f64 phase-space vector and rebuilding
+// it afterwards. A Tuple lets you pour a whole heterogeneous collection — particle
+// coordinates AND field samples — into a single canonical (q, p) pair so the
+// integrators evolve everything together; the physics coupling lives in the
+// gradient functions. Field templates carry the grid geometry so the data can be
+// re-inflated into a proper field for those functions.
+enum State {
+    Scalar,
+    Tensor(Vec<usize>),
+    Field(Arc<FieldVal>),
+    Tuple(Vec<State>),
+}
 
-fn to_state(v: &Val) -> Result<(Vec<f64>, Shape), String> {
+// Recursively append a Val's numbers to `out`, returning its template.
+fn flatten(v: &Val, out: &mut Vec<f64>) -> Result<State, String> {
     match v {
-        Val::Num(x) => Ok((vec![*x], Shape::Scalar)),
-        Val::Tensor { data, shape } => Ok((data.to_vec(), Shape::Tensor(shape.clone()))),
-        other => Err(format!("solver: state must be a real scalar or tensor, got {}", fmt_val(other))),
+        Val::Num(x) => { out.push(*x); Ok(State::Scalar) }
+        Val::Tensor { data, shape } => { out.extend_from_slice(data); Ok(State::Tensor(shape.clone())) }
+        Val::Field(f) => { out.extend_from_slice(&f.data); Ok(State::Field(f.clone())) }
+        Val::Tuple(items) => {
+            let mut subs = Vec::with_capacity(items.len());
+            for it in items { subs.push(flatten(it, out)?); }
+            Ok(State::Tuple(subs))
+        }
+        other => Err(format!("solver: state must be a scalar, tensor, field, or a tuple of these, got {}", fmt_val(other))),
     }
 }
 
-fn from_state(data: Vec<f64>, shape: &Shape) -> Val {
-    match shape {
-        Shape::Scalar     => Val::Num(data[0]),
-        Shape::Tensor(s)  => Val::Tensor { data: TData::new(data), shape: s.clone() },
+fn to_state(v: &Val) -> Result<(Vec<f64>, State), String> {
+    let mut data = Vec::new();
+    let st = flatten(v, &mut data)?;
+    Ok((data, st))
+}
+
+// Walk the template, consuming numbers from `data` at cursor `cur`.
+fn rebuild(data: &[f64], st: &State, cur: &mut usize) -> Val {
+    match st {
+        State::Scalar => { let x = data[*cur]; *cur += 1; Val::Num(x) }
+        State::Tensor(s) => {
+            let n: usize = s.iter().product();
+            let slice = data[*cur..*cur + n].to_vec();
+            *cur += n;
+            Val::Tensor { data: TData::new(slice), shape: s.clone() }
+        }
+        State::Field(f) => {
+            let n = f.data.len();
+            let slice = data[*cur..*cur + n].to_vec();
+            *cur += n;
+            crate::ns::forms::with_data(f, slice)
+        }
+        State::Tuple(subs) => Val::Tuple(subs.iter().map(|s| rebuild(data, s, cur)).collect()),
     }
+}
+
+fn from_state(data: Vec<f64>, st: &State) -> Val {
+    let mut cur = 0;
+    rebuild(&data, st, &mut cur)
 }
 
 /// Evaluate dy/dt = f(t, y); returns the derivative flat vector (length-checked).
-fn call_f(f: &Val, t: f64, y: &[f64], sh: &Shape, env: &Env) -> Result<Vec<f64>, String> {
+fn call_f(f: &Val, t: f64, y: &[f64], sh: &State, env: &Env) -> Result<Vec<f64>, String> {
     let yv = from_state(y.to_vec(), sh);
     let out = apply_val(f.clone(), vec![Val::Num(t), yv], env)?;
     let (d, _) = to_state(&out)?;
@@ -53,7 +97,7 @@ fn call_f(f: &Val, t: f64, y: &[f64], sh: &Shape, env: &Env) -> Result<Vec<f64>,
 }
 
 /// One classical RK4 step of size h from time t.
-fn rk4_step(f: &Val, t: f64, y: &[f64], sh: &Shape, h: f64, env: &Env) -> Result<Vec<f64>, String> {
+fn rk4_step(f: &Val, t: f64, y: &[f64], sh: &State, h: f64, env: &Env) -> Result<Vec<f64>, String> {
     let n = y.len();
     let k1 = call_f(f, t, y, sh, env)?;
     let y2: Vec<f64> = (0..n).map(|i| y[i] + 0.5 * h * k1[i]).collect();
@@ -114,13 +158,17 @@ fn odeint(vals: Vec<Val>, env: &Env) -> Result<Val, String> {
         rows.extend_from_slice(&y);
     }
     let mut out_shape = vec![ts.len()];
-    if let Shape::Tensor(s) = &sh { out_shape.extend_from_slice(s); }
+    match &sh {
+        State::Scalar    => {}
+        State::Tensor(s) => out_shape.extend_from_slice(s),
+        _                => if l > 1 { out_shape.push(l); }   // field/tuple: stack raw flat data
+    }
     Ok(Val::Tensor { data: TData::new(rows), shape: out_shape })
 }
 
 // Apply a 1-arg gradient function to a state vector; return its flat output,
 // length-checked against `len`.
-fn call_grad(f: &Val, x: &[f64], sh: &Shape, len: usize, env: &Env, what: &str) -> Result<Vec<f64>, String> {
+fn call_grad(f: &Val, x: &[f64], sh: &State, len: usize, env: &Env, what: &str) -> Result<Vec<f64>, String> {
     let xv = from_state(x.to_vec(), sh);
     let out = apply_val(f.clone(), vec![xv], env)?;
     let (d, _) = to_state(&out)?;
@@ -136,8 +184,10 @@ fn call_grad(f: &Val, x: &[f64], sh: &Shape, len: usize, env: &Env, what: &str) 
 // rk4, which drifts). You supply the two gradient pieces as 1-arg functions:
 //   dVdq(q) = ∂H/∂q  (the force, -dp/dt),   dTdp(p) = ∂H/∂p  (the velocity, dq/dt)
 // each returning the same shape as the state. Build them straight from a potential
-// with `deriv`, e.g. dVdq = q -> deriv(V, q). q0/p0 are scalars or equal-length
-// tensors. One step is the kick-drift-kick sequence; returns the final (q, p).
+// with `deriv`, e.g. dVdq = q -> deriv(V, q). q0/p0 may each be a scalar, tensor,
+// field, or a tuple of these — a tuple lets you evolve particles AND fields as one
+// phase space (the coupling lives in dVdq). One step is the kick-drift-kick
+// sequence; returns the final (q, p) with the same structure you passed in.
 fn verlet(vals: Vec<Val>, env: &Env) -> Result<Val, String> {
     if vals.len() != 6 { return Err("solver.verlet(dVdq, dTdp, q0, p0, dt, n) expects 6 args".into()); }
     let mut it = vals.into_iter();
@@ -167,6 +217,101 @@ fn verlet(vals: Vec<Val>, env: &Env) -> Result<Val, String> {
         q = qn; p = pn;
     }
     Ok(Val::Tuple(vec![from_state(q, &qsh), from_state(p, &psh)]))
+}
+
+// Apply a 2-arg gradient g(a, b) where `a` follows template `ast` and `b` follows
+// `bst`; return its flat output, length-checked against `len`.
+fn call_grad2(g: &Val, a: &[f64], ast: &State, b: &[f64], bst: &State, len: usize, env: &Env, what: &str)
+    -> Result<Vec<f64>, String>
+{
+    let av = from_state(a.to_vec(), ast);
+    let bv = from_state(b.to_vec(), bst);
+    let out = apply_val(g.clone(), vec![av, bv], env)?;
+    let (d, _) = to_state(&out)?;
+    if d.len() != len {
+        return Err(format!("{what} returned {} values but the state has {}", d.len(), len));
+    }
+    Ok(d)
+}
+
+// Tao sub-flow A, from H_A = H(q, y): exact, since q and y are held fixed.
+//   p -= h·∂qH(q,y);   x += h·∂pH(q,y)
+fn tao_phi_a(h: f64, dhdq: &Val, dhdp: &Val, q: &[f64], p: &mut [f64], x: &mut [f64], y: &[f64],
+             qst: &State, pst: &State, len: usize, env: &Env) -> Result<(), String> {
+    let hq = call_grad2(dhdq, q, qst, y, pst, len, env, "solver.tao: dHdq")?;
+    let hp = call_grad2(dhdp, q, qst, y, pst, len, env, "solver.tao: dHdp")?;
+    for i in 0..len { p[i] -= h * hq[i]; x[i] += h * hp[i]; }
+    Ok(())
+}
+
+// Tao sub-flow B, from H_B = H(x, p): exact, since x and p are held fixed.
+//   q += h·∂pH(x,p);   y -= h·∂qH(x,p)
+fn tao_phi_b(h: f64, dhdq: &Val, dhdp: &Val, q: &mut [f64], p: &[f64], x: &[f64], y: &mut [f64],
+             qst: &State, pst: &State, len: usize, env: &Env) -> Result<(), String> {
+    let hp = call_grad2(dhdp, x, qst, p, pst, len, env, "solver.tao: dHdp")?;
+    let hq = call_grad2(dhdq, x, qst, p, pst, len, env, "solver.tao: dHdq")?;
+    for i in 0..len { q[i] += h * hp[i]; y[i] -= h * hq[i]; }
+    Ok(())
+}
+
+// Tao sub-flow C, the harmonic binding ω·½(|q−x|²+|p−y|²): an exact rotation by
+// angle 2ωh of the difference (q−x, p−y), leaving the mean (q+x, p+y) fixed.
+fn tao_phi_c(h: f64, omega: f64, q: &mut [f64], p: &mut [f64], x: &mut [f64], y: &mut [f64], len: usize) {
+    let theta = 2.0 * omega * h;
+    let (c, s) = (theta.cos(), theta.sin());
+    for i in 0..len {
+        let (qp, qm, pp, pm) = (q[i] + x[i], q[i] - x[i], p[i] + y[i], p[i] - y[i]);
+        q[i] = 0.5 * (qp + c * qm + s * pm);
+        p[i] = 0.5 * (pp - s * qm + c * pm);
+        x[i] = 0.5 * (qp - c * qm - s * pm);
+        y[i] = 0.5 * (pp + s * qm - c * pm);
+    }
+}
+
+// tao(dHdq, dHdp, q0, p0, dt, n[, omega]) — Tao's explicit symplectic integrator
+// for a NON-separable but canonical Hamiltonian H(q,p). When H won't split into
+// T(p)+V(q) (e.g. electromagnetic PIC, whose (p−qA)² term mixes a momentum with a
+// field coordinate), `verlet` no longer applies. Tao duplicates the system into an
+// extended phase space (q,p)⊕(x,y), binds the copies with a harmonic term of
+// strength ω, and Strang-composes three exactly-solvable sub-flows
+// (A·B·C·B·A), giving a 2nd-order explicit symplectic step on the original H.
+// You supply dHdq(q,p)=∂H/∂q and dHdp(q,p)=∂H/∂p as 2-arg functions. q0/p0 follow
+// the same flexible templates as `verlet`. ω (default 100) binds the two copies:
+// larger ω tracks H more tightly but needs a smaller dt — tune it. Returns (q, p).
+fn tao(vals: Vec<Val>, env: &Env) -> Result<Val, String> {
+    if vals.len() != 6 && vals.len() != 7 {
+        return Err("solver.tao(dHdq, dHdp, q0, p0, dt, n[, omega]) expects 6 or 7 args".into());
+    }
+    let mut it = vals.into_iter();
+    let dhdq = it.next().unwrap();
+    let dhdp = it.next().unwrap();
+    let (q0, qst) = to_state(&it.next().unwrap())?;
+    let (p0, pst) = to_state(&it.next().unwrap())?;
+    let dt = it.next().unwrap().num("solver.tao dt")?;
+    let n  = it.next().unwrap().num("solver.tao n")? as i64;
+    let omega = match it.next() { Some(v) => v.num("solver.tao omega")?, None => 100.0 };
+    if n <= 0 { return Err("solver.tao: n must be a positive integer".into()); }
+    if q0.len() != p0.len() {
+        return Err(format!("solver.tao: q0 and p0 must have the same length ({} vs {})", q0.len(), p0.len()));
+    }
+    let len = q0.len();
+    // Extended phase space: the working copy (q, p) and a shadow (x, y) = (q, p).
+    let (mut q, mut p) = (q0.clone(), p0.clone());
+    let (mut x, mut y) = (q0, p0);
+    let h = 0.5 * dt;
+    for step in 0..n {
+        tao_phi_a(h, &dhdq, &dhdp, &q, &mut p, &mut x, &y, &qst, &pst, len, env)?;
+        tao_phi_b(h, &dhdq, &dhdp, &mut q, &p, &x, &mut y, &qst, &pst, len, env)?;
+        tao_phi_c(dt, omega, &mut q, &mut p, &mut x, &mut y, len);
+        tao_phi_b(h, &dhdq, &dhdp, &mut q, &p, &x, &mut y, &qst, &pst, len, env)?;
+        tao_phi_a(h, &dhdq, &dhdp, &q, &mut p, &mut x, &y, &qst, &pst, len, env)?;
+        for (i, v) in q.iter().chain(p.iter()).enumerate() {
+            if !v.is_finite() {
+                return Err(format!("solver.tao: non-finite value at step {step} (component {i})"));
+            }
+        }
+    }
+    Ok(Val::Tuple(vec![from_state(q, &qst), from_state(p, &pst)]))
 }
 
 // cfl(V, dx, dt) — Courant number dt*max|V|/dx, a stability diagnostic.

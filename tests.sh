@@ -1484,6 +1484,15 @@ run_match "solver.verlet.deriv" "V=q->q^2/2; T=p->p^2/2; s=solver.verlet(q->deri
 # Vector-valued state (2-D orbit) conserves energy over a long run.
 run_match "solver.verlet.vec"   "s=solver.verlet(q->q, p->p, [1.0,0.0], [0.0,1.0], 0.01, 1000); round((sum(s[0]*s[0])+sum(s[1]*s[1]))/2, 3)" "^1($|\\.0|\\.00)"
 run_err "solver.verlet.arity"   "solver.verlet(q->q, p->p, 1.0, 0.0, 0.05)"
+# Heterogeneous tuple state (scalar + vector) survives the flatten/rebuild round trip.
+run "solver.verlet.tuple"   "s=solver.verlet(q->q, p->p, (0.0,[1.0,2.0]), (1.0,[0.0,0.0]), 0.01, 50); shape(s[0][1])" "[2]"
+# Field-valued state: a 0-form field round-trips and stays a field (1-D wave eq).
+run "solver.verlet.field"   "f=field(tensor((i)->exp(-((i-8.0)/2.0)^2),16),0,16,forms.periodic); z=field(tensor((i)->0.0,16),0,16,forms.periodic); s=solver.verlet(q->forms.laplace(q), p->p, f, z, 0.2, 50); shape(s[0])" "[16]"
+# tao: separable SHO — Tao must also conserve energy ≈ 0.5 (sanity vs verlet).
+run_match "solver.tao.sho"  "s=solver.tao((q,p)->q, (q,p)->p, 1.0, 0.0, 0.05, 400); round((s[0]^2+s[1]^2)/2, 2)" "0\\.5"
+# tao on a NON-separable H = p²/2 + q²/2 + 0.3 q²p²: energy stays bounded near 0.5.
+run_match "solver.tao.nonsep" "dq=(q,p)->q+0.6*q*p^2; dp=(q,p)->p+0.6*q^2*p; s=solver.tao(dq,dp,1.0,0.0,0.02,1000); round(0.5*s[1]^2+0.5*s[0]^2+0.3*s[0]^2*s[1]^2, 2)" "0\\.5"
+run_err "solver.tao.arity"  "solver.tao((q,p)->q, (q,p)->p, 1.0, 0.0)"
 run "solver.cfl"            "solver.cfl((1,2,3), 0.1, 0.02)" "0.6"
 run_err "op.grad.needs.dx"  "ops.grad(zeros(4,4))" ""
 

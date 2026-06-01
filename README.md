@@ -468,13 +468,45 @@ result = 24
 workhorse **symplectic** integrator for a separable Hamiltonian `H(q,p) = T(p) + V(q)`.
 Unlike `solver.rk4`, it conserves energy over long runs. Pass the two gradient pieces
 `dVdq = ∂H/∂q` (force) and `dTdp = ∂H/∂p` (velocity); `deriv` builds them from the
-potentials directly. `q0`/`p0` may be scalars or equal-length tensors; returns the
-final `(q, p)`.
+potentials directly. Returns the final `(q, p)`.
 
 ```
 > V = q -> q^2/2; T = p -> p^2/2          # simple harmonic oscillator
 > s = solver.verlet(q -> deriv(V, q), p -> deriv(T, p), 1.0, 0.0, 0.05, 200)
 > (s[0]^2 + s[1]^2) / 2                    # energy ≈ 0.5, no secular drift
+result = 0.4999...
+```
+
+**One big phase space.** `q0`/`p0` aren't limited to scalars — each may be a scalar, a
+tensor, a **field**, or a **tuple** of these. A tuple lets you pour a whole
+heterogeneous collection (particle coordinates *and* field samples) into a single
+canonical `(q, p)` pair and evolve everything together; all the coupling lives inside
+your gradient functions, and the result comes back with the same structure you passed
+in. For a field potential the variational derivative *is* the exterior-calculus
+operator, e.g. a 1-D wave equation `H = ½∫(p² + (∂φ)²)`:
+
+```
+> phi = field(tensor(i -> exp(-((i-8)/2)^2), 16), 0, 16, forms.periodic)
+> pdot = field(tensor(i -> 0.0, 16), 0, 16, forms.periodic)
+> s = solver.verlet(q -> forms.laplace(q), p -> p, phi, pdot, 0.2, 100)   # δH/δφ = Δφ
+```
+
+### Non-separable Hamiltonians (Tao's method)
+
+When `H` won't split into `T(p) + V(q)` — e.g. electromagnetic particle-in-cell, whose
+`(p − qA)²` term mixes a momentum with a field coordinate — Verlet no longer applies.
+`solver.tao(dHdq, dHdp, q0, p0, dt, n [, omega])` is Tao's **explicit symplectic**
+integrator for a *non-separable but canonical* `H(q,p)`. It duplicates the system into
+an extended phase space, binds the two copies with a harmonic term of strength `omega`
+(default 100; larger tracks `H` more tightly but needs a smaller `dt` — tune it), and
+Strang-composes three exactly-solvable sub-flows. You pass `dHdq(q,p)` and `dHdp(q,p)`
+as 2-arg functions; `q0`/`p0` follow the same flexible templates as `verlet`.
+
+```
+> dq = (q,p) -> q + 0.6*q*p^2              # H = p²/2 + q²/2 + 0.3 q²p²  (non-separable)
+> dp = (q,p) -> p + 0.6*q^2*p
+> s = solver.tao(dq, dp, 1.0, 0.0, 0.02, 1000)
+> 0.5*s[1]^2 + 0.5*s[0]^2 + 0.3*s[0]^2*s[1]^2   # energy stays bounded near 0.5
 result = 0.4999...
 ```
 

@@ -946,7 +946,7 @@ fn h5_list(file_path: &str) -> Result<(), String> {
 fn ns_builtin_desc(ns: &str) -> Option<&'static str> {
     match ns {
         "ops"     => Some("spatial PDE operators (grad div curl lap poisson specgrad); field-aware"),
-        "solver"  => Some("ODE time integrators: rk4(f,y0,t0,t1,n)  odeint(f,y0,ts)  verlet(dVdq,dTdp,q0,p0,dt,n)  cfl(V,dx,dt)"),
+        "solver"  => Some("ODE time integrators: rk4(f,y0,t0,t1,n)  odeint(f,y0,ts)  verlet(dVdq,dTdp,q0,p0,dt,n)  tao(dHdq,dHdp,q0,p0,dt,n[,omega])  cfl(V,dx,dt)"),
         "forms"   => Some("exterior calculus over fields: d hodge wedge raise lower codiff laplace contract\n  field(data,lo,hi,bc[,metric])  form(data,deg,…)  vector(data,…)"),
         "special" => Some("special functions: sinc sech csch  erf erfc  j0 j1 jinc  gaussian gaussian_cdf  delta"),
         "bits"    => Some("true bitwise ops (truncate to i64): and or xor nand nor xnor shl shr not\n  Note: operators & | ~ are LOGICAL (return 0/1); bits.and/or are bitwise"),
@@ -1002,7 +1002,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     "           Constants: pi e phi inf i\n\n",
                     "Namespaces — use !help <ns> for members and usage:\n",
                     "  ops     PDE operators: grad div curl lap poisson specgrad\n",
-                    "  solver  ODE steppers:  rk4 odeint verlet(symplectic) cfl\n",
+                    "  solver  ODE steppers:  rk4 odeint verlet(symplectic) tao(nonsep symplectic) cfl\n",
                     "  forms   Exterior calc: d hodge wedge raise lower codiff laplace contract\n",
                     "  special Special fns:   sinc sech csch erf erfc j0 j1 jinc gaussian delta\n",
                     "  bits    Bitwise:       and or xor nand nor xnor shl shr not  (also & | ~)\n",
