@@ -1519,6 +1519,9 @@ run "pic.adjoint"      "f=field(x->sin(x), 0, 6, 12, forms.periodic); X=[1.3,3.7
 # Vector-field gather returns one row per particle: shape [P, ncomp].
 run "pic.gather.vec"   "shape(pic.gather(forms.vector(tensor((i,j,c)->i+j+c, 3,3,2), (0,0),(2,2),forms.periodic), [0.5,0.5]))" "[1, 2]"
 run_err "pic.scatter.arity" "pic.scatter([2.5], [1.0])"
+# solver.tao over a heterogeneous (tensor, field) phase space — the capability the
+# electromagnetic PIC example (examples/pic_em_tao.math) is built on. Must stay finite.
+run "solver.tao.fieldtuple" "f=field((x,y)->0.0,0,1,(4,4),forms.periodic); s=solver.tao((q,p)->p, (q,p)->q, ([1.0,0.0],f), ([0.0,1.0],f), 0.1, 5); shape(s[0][0])" "[2]"
 # End-to-end electrostatic PIC cycle (gather→push→scatter→Ampère): 20 steps of a
 # seeded plasma oscillation, rho = div E must stay finite and bounded (cf. examples/pic_plasma.math).
 run "pic.cycle" "L=2*pi; dt=0.05; np=8; P=np*np; q=0.2; X=tensor((p,c)->{i=p//np;j=p%np;if(c==0,L*(i+0.5)/np,L*(j+0.5)/np)},P,2); V=tensor((p,c)->{i=p//np;if(c==0,0.5*sin(L*(i+0.5)/np),0.0)},P,2); E=ops.grad(field((x,y)->0.0,0,L,(16,16),forms.periodic)); wrap=Z->Z-L*floor(Z/L); step=s->{X=s[0];V=s[1];E=s[2];a=q*pic.gather(E,X);V2=V+dt*a;X2=wrap(X+dt*V2);J=pic.scatter(X2,q*V2,E);(X2,V2,E-dt*J)}; r=iterate(step,(X,V,E),20); m=max(abs(re(ops.div(r[2])))); (m<10) & (m>=0)" "1"

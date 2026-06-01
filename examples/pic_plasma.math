@@ -102,8 +102,9 @@ frame = _ -> {
 # q*v_z*grad(A_z), with the vector potential A_z = -beta*poisson(rho) made explicit
 # in the field solve above (B = curl(A_z zhat)). Because A enters the kinetic
 # energy, the full electromagnetic system is non-separable but still canonical —
-# the regime solver.tao integrates. Here we use the quasi-static field solve for
-# robustness, but the gather/scatter and the one-big-phase-space are identical; the
+# the regime solver.tao integrates (see examples/pic_em_tao.math for that genuinely
+# non-separable, tao-integrated version with a dynamical A field). Here we use the
+# quasi-static field solve for robustness, but the gather/scatter machinery is identical; the
 # adjointness of pic.gather and pic.scatter (same kernel = transpose) is what keeps
 # the deposited current and the gathered force consistent, hence the scheme
 # momentum-conserving and self-force-free.

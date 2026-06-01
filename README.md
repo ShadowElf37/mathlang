@@ -1115,6 +1115,13 @@ magnetic field (from the deposited current, via the vector potential
 under its own magnetic field and rebounds against the electrostatic pressure it
 builds up, an oscillating Bennett pinch whose charge density pulses in `div E`.
 
+`examples/pic_em_tao.math` goes further: a **fully electromagnetic** PIC whose
+entire coupled state — particles *and* the field `(A, −E)` — is one non-separable
+canonical Hamiltonian (`(p − qA)²` mixes particle momentum with the field
+coordinate `A`), advanced as a single phase space by **`solver.tao`**. It's the
+example the whole symplectic-integrator thread builds toward: `pic_plasma.math` is
+*separable* and uses Verlet, this one is *non-separable* and needs Tao.
+
 ---
 
 ## Tensor I/O

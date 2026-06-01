@@ -1,0 +1,112 @@
+# pic_em_tao.math — a full ELECTROMAGNETIC particle-in-cell plasma whose entire
+# coupled state (particles + fields) is advanced as ONE non-separable canonical
+# Hamiltonian system by solver.tao. Animates the charge density rho = div E.
+#
+# This is the simulation the whole solver thread was building toward. The fields
+# are genuine canonical phase-space variables, not solved algebraically: the vector
+# potential A is a coordinate and (minus) the electric field is its conjugate
+# momentum. In temporal gauge,
+#
+#     q = (X_particles, A_x, A_y)          p = (P_particles, Pi_x, Pi_y),   Pi = -E
+#
+#     H(q,p) = sum_i |P_i - q A(X_i)|^2 / 2m        <- particles, minimally coupled
+#            + (1/2) sum_grid ( |Pi|^2 + B_z^2 ),   B_z = dx A_y - dy A_x
+#
+# The term |P_i - qA(X_i)|^2 mixes a particle MOMENTUM P_i with the field
+# COORDINATE A(X_i): the Hamiltonian is NON-SEPARABLE. Velocity-Verlet (which needs
+# H = T(p) + V(q)) does not apply. solver.tao does — it is the explicit symplectic
+# integrator for non-separable canonical H, and it takes the whole heterogeneous
+# (particles, fields) bundle as one flattened phase space. Hamilton's equations are
+# read straight off H and handed to tao as dH/dq and dH/dp:
+#
+#     dX/dt = (P - qA)/m = v          dP/dt = -dH/dX = q (v . grad)A     (Lorentz)
+#     dA/dt = Pi  = -E                dPi/dt = -dH/dA = J - curl(curl A)  (Ampere/Faraday)
+#
+# rho = div E = -div(Pi) emerges from Gauss's law as charge bunches.
+#
+# Notes on the discretization -------------------------------------------------
+# * pic.gather and pic.scatter with the SAME kernel are exact transposes, which is
+#   what makes dH/dA (a scatter of the current) the consistent adjoint of the A in
+#   the kinetic term (a gather) — the property that lets tao actually conserve H.
+# * Explicit EM-PIC has a finite-grid instability when cells hold too few particles;
+#   we use the smooth TSC shape function and a few particles per cell to tame it.
+#   Energy is then conserved to ~1% over the run (a symplectic-integrator hallmark);
+#   over much longer runs the instability eventually wins, as it does for any
+#   explicit EM-PIC. Define Ham below and watch Ham(q,p) to see the conservation.
+
+N   = 24            # coarse grid (keeps the finite-grid instability at bay)
+L   = 2*pi
+dt  = 0.05          # within the light CFL c*dt < dx = 2*pi/N
+P   = 1600          # macro-particles (~3 per cell)
+q   = 0.11          # charge per macro-particle (sets the coupling / plasma freq.)
+m   = 1.0
+
+K     = pic.tsc                                              # smooth shape function
+zerof = field((x,y)->0.0, 0, L, (N,N), forms.periodic)      # grid template / zero field
+xt(vf,k) = field(tensor(vf)[..,..,k], 0, L, forms.periodic) # component k of a vector field -> scalar field
+cstk(a,b) = hstack(reshape(a,P,1), reshape(b,P,1))          # two [P] columns -> [P,2]
+
+# kinetic velocity from the canonical state: v = (P - qA)/m  (A gathered to particles)
+velx(X,Ax,Pp) = (Pp[..,0] - q*pic.gather(Ax,X,K))/m
+vely(X,Ay,Pp) = (Pp[..,1] - q*pic.gather(Ay,X,K))/m
+
+# total energy — not needed to run, but evaluate Ham(q,p) at any time to check
+# that tao is conserving it.
+Ham(qq,pp) = {
+  X=qq[0]; Ax=qq[1]; Ay=qq[2]; Pp=pp[0]; Px=pp[1]; Py=pp[2];
+  Vx=velx(X,Ax,Pp); Vy=vely(X,Ay,Pp);
+  Bz = xt(ops.grad(Ay),0) - xt(ops.grad(Ax),1);
+  0.5*m*sum(Vx^2+Vy^2) + 0.5*sum(tensor(Px)^2+tensor(Py)^2) + 0.5*sum(tensor(Bz)^2)
+}
+
+# dq/dt = dH/dp = (v, Pi_x, Pi_y)
+dHdp(qq,pp) = {
+  X=qq[0]; Ax=qq[1]; Ay=qq[2]; Pp=pp[0]; Px=pp[1]; Py=pp[2];
+  ( cstk(velx(X,Ax,Pp), vely(X,Ay,Pp)), Px, Py )
+}
+
+# dp/dt = -dH/dq.  dH/dX is the Lorentz force; dH/dA = curl(curl A) - J (J = the
+# deposited current, the scatter that is the adjoint of the gather in the kinetic term).
+dHdq(qq,pp) = {
+  X=qq[0]; Ax=qq[1]; Ay=qq[2]; Pp=pp[0];
+  Vx=velx(X,Ax,Pp); Vy=vely(X,Ay,Pp);
+  gAx = pic.gather(ops.grad(Ax), X, K);          # (dxAx, dyAx) per particle
+  gAy = pic.gather(ops.grad(Ay), X, K);          # (dxAy, dyAy)
+  dHdXx = -q*(Vx*gAx[..,0] + Vy*gAy[..,0]);
+  dHdXy = -q*(Vx*gAx[..,1] + Vy*gAy[..,1]);
+  Bz  = xt(ops.grad(Ay),0) - xt(ops.grad(Ax),1); # B_z = curl A
+  gBz = ops.grad(Bz);
+  Jx  = pic.scatter(X, q*Vx, zerof, K);          # current density (adjoint of the gather)
+  Jy  = pic.scatter(X, q*Vy, zerof, K);
+  ( cstk(dHdXx, dHdXy), xt(gBz,1) - Jx, (-1)*xt(gBz,0) - Jy )
+}
+
+# ── initial condition ────────────────────────────────────────────────────────
+# Uniform load (E = 0 satisfies Gauss), seeded with a transverse current sheet
+# v_y = 0.3 sin(x) plus a little thermal noise. The sheared transverse current
+# drives A_y -> a magnetic field B_z, the particles bunch, and rho = div E lights up
+# (a Weibel-like filamentation) — all from the self-consistent fields.
+X0  = tensor((p,c) -> L*rand(), P, 2)
+vy0 = 0.3*sin(X0[..,0]) + 0.05*(tensor(p->rand(),P) - 0.5)
+vx0 = 0.05*(tensor(p->rand(),P) - 0.5)
+q0  = (X0, zerof, zerof)
+p0  = (cstk(m*vx0, m*vy0), zerof, zerof)          # P = m v  (A = 0 at t=0)
+
+# ── animate rho(x) = div E ───────────────────────────────────────────────────
+# Each frame is ONE symplectic tao step of the whole particle+field phase space.
+st    = cell((q0, p0))
+frame = _ -> {
+  s  = get(st);
+  s2 = solver.tao(dHdq, dHdp, s[0], s[1], dt, 1);
+  set(st, s2);
+  Px = s2[1][1];  Py = s2[1][2];
+  re( (-1)*(xt(ops.grad(Px),0) + xt(ops.grad(Py),1)) )    # rho = div E = -div(Pi)
+}
+
+!animate2D frame, 500, 30
+
+# Companion: examples/pic_plasma.math is the relativistic z-pinch — that one is
+# *separable* (quasi-static fields + conserved axial momentum), so it uses the
+# Verlet-style leapfrog. This file is the non-separable case, which is why it needs
+# tao. Same pic.scatter / pic.gather, same one-big-phase-space — only the
+# integrator changes with the structure of H.
