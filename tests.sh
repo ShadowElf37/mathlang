@@ -53,7 +53,6 @@ run_err() {
 }
 
 # run_lib: like `run`, but loads a mathlang library file first (m -f lib 'expr').
-LIB_INT="${MATHLANG_LIB_INT:-examples/integrators.math}"
 run_lib() {
     local label="$1" lib="$2" expr="$3" expected="$4" got
     got=$("$M" -f "$lib" "$expr" 2>&1)
@@ -1255,22 +1254,6 @@ run "vm.loop.nested"     "f(n)=sum(j->iterate(x->x+1, 0, j), 1, n); f(4)"     "1
 run "vm.loop.sum.range"  "f(n)=sum(k->2*k, 0, n); f(100)"                     "10100"
 run_err "vm.loop.iter.neg" "f(n)=iterate(g->g, 0, n); f(-1)"
 
-# ── stdlib: examples/integrators.math (verlet / rk4, built in pure mathlang) ──
-section "stdlib.integrators"
-run_lib "int.load"        "$LIB_INT" "1+1"                                          "2"
-# Velocity-Verlet SHO (dH/dq=q, dH/dp=p): energy (q²+p²)/2 ≈ 0.5, bounded drift
-run_lib "int.verlet.efinal" "$LIB_INT" "f=verletFinal(q->q,p->p,1.0,0.0,0.05,200); round((f[0]^2+f[1]^2)/2, 2)" "0.5"
-run_lib "int.verlet.shape" "$LIB_INT" "shape(verletOrbit(q->q,p->p,1.0,0.0,0.05,200))" "[201, 2]"
-run_lib "int.verlet.seed"  "$LIB_INT" "verletOrbit(q->q,p->p,1.0,0.0,0.05,3)[0]"      "[1, 0]"
-# Generator: first call returns the seed, then advances; cells are independent
-run_lib "int.gen.seed"     "$LIB_INT" "{ g=verlet(q->q,p->p,1.0,0.0,0.05); g(0)[0] }" "1"
-run_lib "int.gen.advances" "$LIB_INT" "{ g=verlet(q->q,p->p,1.0,0.0,0.05); g(0); round(g(0)[0], 5) }" "0.99875"
-run_lib "int.gen.indep"    "$LIB_INT" "{ g=verlet(q->q,p->p,1.0,0.0,0.05); h=verlet(q->q,p->p,1.0,0.0,0.05); g(0); h(0)[0] }" "1"
-# RK4: y'=y, y(0)=1 → e at t=1 ; vector RK4 returns (T, Y) with separate shapes
-run_lib "int.rk4.exp"      "$LIB_INT" "round(rk4Final((t,y)->y, 0.0, 1.0, 0.001, 1000), 5)" "2.71828"
-run_lib "int.rk4.vshapeT"  "$LIB_INT" "shape(rk4Orbit((t,y)->(y[1],-y[0]), 0.0, (1.0,0.0), 0.01, 50)[0])" "[51]"
-run_lib "int.rk4.vshapeY"  "$LIB_INT" "shape(rk4Orbit((t,y)->(y[1],-y[0]), 0.0, (1.0,0.0), 0.01, 50)[1])" "[51, 2]"
-
 # ── HDF5 (skipped unless built with --features hdf5) ─────────────────────────
 section "HDF5"
 _H5F=$(mktemp /tmp/mlt_test_XXXXXX.h5)
@@ -1494,6 +1477,13 @@ run "op.curl.const"        "N=16; dx=1.0; V=tensor((a,b,c)->if(c==0,-b*dx,a*dx),
 # solver: y'=y → e
 run_match "solver.rk4.exp"  "solver.rk4((t,y)->y, 1, 0, 1, 100)" "2.71828182"
 run "solver.odeint.shape"   "shape(solver.odeint((t,y)->y, 1, linspace(0,1,11)))" "[11]"
+# verlet: SHO H=(q²+p²)/2 (dH/dq=q, dH/dp=p). Symplectic → energy ≈ 0.5 (bounded).
+run_match "solver.verlet.sho"   "s=solver.verlet(q->q, p->p, 1.0, 0.0, 0.05, 200); round((s[0]^2+s[1]^2)/2, 3)" "0\\.49|0\\.5"
+# Gradients built from a potential via deriv compose into verlet (same result).
+run_match "solver.verlet.deriv" "V=q->q^2/2; T=p->p^2/2; s=solver.verlet(q->deriv(V,q), p->deriv(T,p), 1.0, 0.0, 0.05, 200); round((s[0]^2+s[1]^2)/2, 3)" "0\\.49|0\\.5"
+# Vector-valued state (2-D orbit) conserves energy over a long run.
+run_match "solver.verlet.vec"   "s=solver.verlet(q->q, p->p, [1.0,0.0], [0.0,1.0], 0.01, 1000); round((sum(s[0]*s[0])+sum(s[1]*s[1]))/2, 3)" "^1($|\\.0|\\.00)"
+run_err "solver.verlet.arity"   "solver.verlet(q->q, p->p, 1.0, 0.0, 0.05)"
 run "solver.cfl"            "solver.cfl((1,2,3), 0.1, 0.02)" "0.6"
 run_err "op.grad.needs.dx"  "ops.grad(zeros(4,4))" ""
 

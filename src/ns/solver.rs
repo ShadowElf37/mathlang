@@ -7,7 +7,7 @@
 // without knowing which part of the RHS is the stiff linear operator).
 use crate::eval::{Val, TData, Env, apply_val, fmt_val};
 
-pub const NAMES: &[&str] = &["rk4", "odeint", "cfl"];
+pub const NAMES: &[&str] = &["rk4", "odeint", "verlet", "cfl"];
 
 pub fn members() -> std::collections::HashMap<String, Val> {
     NAMES.iter().map(|n| (n.to_string(), Val::Builtin(n.to_string()))).collect()
@@ -17,6 +17,7 @@ pub fn dispatch(name: &str, vals: Vec<Val>, env: &Env) -> Result<Val, String> {
     match name {
         "rk4"    => rk4(vals, env),
         "odeint" => odeint(vals, env),
+        "verlet" => verlet(vals, env),
         "cfl"    => cfl(vals),
         _ => Err(format!("solver: unknown member '{name}'")),
     }
@@ -115,6 +116,57 @@ fn odeint(vals: Vec<Val>, env: &Env) -> Result<Val, String> {
     let mut out_shape = vec![ts.len()];
     if let Shape::Tensor(s) = &sh { out_shape.extend_from_slice(s); }
     Ok(Val::Tensor { data: TData::new(rows), shape: out_shape })
+}
+
+// Apply a 1-arg gradient function to a state vector; return its flat output,
+// length-checked against `len`.
+fn call_grad(f: &Val, x: &[f64], sh: &Shape, len: usize, env: &Env, what: &str) -> Result<Vec<f64>, String> {
+    let xv = from_state(x.to_vec(), sh);
+    let out = apply_val(f.clone(), vec![xv], env)?;
+    let (d, _) = to_state(&out)?;
+    if d.len() != len {
+        return Err(format!("{what} returned {} values but the state has {}", d.len(), len));
+    }
+    Ok(d)
+}
+
+// verlet(dVdq, dTdp, q0, p0, dt, n) — velocity-Verlet (leapfrog), the workhorse
+// symplectic integrator for a SEPARABLE Hamiltonian H(q,p) = T(p) + V(q). It is
+// symplectic and time-reversible, so energy stays bounded over long runs (unlike
+// rk4, which drifts). You supply the two gradient pieces as 1-arg functions:
+//   dVdq(q) = ∂H/∂q  (the force, -dp/dt),   dTdp(p) = ∂H/∂p  (the velocity, dq/dt)
+// each returning the same shape as the state. Build them straight from a potential
+// with `deriv`, e.g. dVdq = q -> deriv(V, q). q0/p0 are scalars or equal-length
+// tensors. One step is the kick-drift-kick sequence; returns the final (q, p).
+fn verlet(vals: Vec<Val>, env: &Env) -> Result<Val, String> {
+    if vals.len() != 6 { return Err("solver.verlet(dVdq, dTdp, q0, p0, dt, n) expects 6 args".into()); }
+    let mut it = vals.into_iter();
+    let dvdq = it.next().unwrap();
+    let dtdp = it.next().unwrap();
+    let (mut q, qsh) = to_state(&it.next().unwrap())?;
+    let (mut p, psh) = to_state(&it.next().unwrap())?;
+    let dt = it.next().unwrap().num("solver.verlet dt")?;
+    let n  = it.next().unwrap().num("solver.verlet n")? as i64;
+    if n <= 0 { return Err("solver.verlet: n must be a positive integer".into()); }
+    if q.len() != p.len() {
+        return Err(format!("solver.verlet: q0 and p0 must have the same length ({} vs {})", q.len(), p.len()));
+    }
+    let len = q.len();
+    for step in 0..n {
+        let fq = call_grad(&dvdq, &q, &qsh, len, env, "solver.verlet: dVdq")?;          // ∂H/∂q at q
+        let ph: Vec<f64> = (0..len).map(|i| p[i] - 0.5 * dt * fq[i]).collect();          // half kick
+        let vp = call_grad(&dtdp, &ph, &psh, len, env, "solver.verlet: dTdp")?;          // ∂H/∂p at p½
+        let qn: Vec<f64> = (0..len).map(|i| q[i] + dt * vp[i]).collect();                // drift
+        let fq2 = call_grad(&dvdq, &qn, &qsh, len, env, "solver.verlet: dVdq")?;         // ∂H/∂q at q'
+        let pn: Vec<f64> = (0..len).map(|i| ph[i] - 0.5 * dt * fq2[i]).collect();        // half kick
+        for (i, v) in qn.iter().chain(pn.iter()).enumerate() {
+            if !v.is_finite() {
+                return Err(format!("solver.verlet: non-finite value at step {step} (component {i})"));
+            }
+        }
+        q = qn; p = pn;
+    }
+    Ok(Val::Tuple(vec![from_state(q, &qsh), from_state(p, &psh)]))
 }
 
 // cfl(V, dx, dt) — Courant number dt*max|V|/dx, a stability diagnostic.

@@ -667,6 +667,7 @@ pub fn builtin_sig(name: &str) -> Option<&'static str> {
         // solver namespace
         "rk4"    => Some("solver.rk4(f: fn, y0: any, t0: real, t1: real, n: nat) -> any"),
         "odeint" => Some("solver.odeint(f: fn, y0: any, ts: tensor) -> tensor"),
+        "verlet" => Some("solver.verlet(dVdq: fn, dTdp: fn, q0: any, p0: any, dt: real, n: nat) -> (q, p)  [symplectic, H=T(p)+V(q)]"),
         "cfl"    => Some("solver.cfl(V: tensor, dx: real, dt: real) -> real"),
         // forms namespace
         "d"        => Some("forms.d(f: field) -> field  (exterior derivative)"),

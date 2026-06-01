@@ -191,27 +191,6 @@ field, and timestep and returns a stateful solver; `heatSolverDisk(N, dx, dt,
 T_disk, T_air, a_disk, a_air)` is the convenience constructor used for `solver_demo`.
 Uses energy-conserving divergence-form FD with Neumann BCs.
 
-#### `integrators.math`
-
-Symplectic and explicit ODE integrators, built in pure mathlang on top of
-`iterate`/`scan` (no special builtins).
-
-```
-verletStep(dHdq, dHdp, dt)              — one velocity-Verlet step, (q,p) -> (q,p)
-verletOrbit(dHdq, dHdp, q0, p0, dt, n)  — whole phase-space orbit via scan
-verletFinal(dHdq, dHdp, q0, p0, dt, n)  — endpoint via iterate, O(1) stack
-verlet(dHdq, dHdp, q0, p0, dt)          — stateful generator (cell), for animate
-rk4Step / rk4Orbit / rk4Final           — classic RK4 for y' = f(t, y)
-```
-
-```zsh
-m -f integrators.math 'shape(verletOrbit(q->q, p->p, 1.0, 0.0, 0.05, 200))'  # [201, 2]
-```
-
-For a separable Hamiltonian `H(q,p) = T(p) + V(q)`, pass `dHdq = ∂H/∂q` (force) and
-`dHdp = ∂H/∂p` (velocity). The simple harmonic oscillator is `dHdq = q`, `dHdp = p`.
-Verlet is symplectic, so energy stays bounded over long runs.
-
 #### `conversions.math`
 
 Unit conversion factors and functions for physics, chemistry, and engineering.
@@ -456,6 +435,48 @@ result = 12    # 5-point stencil, dx=1e-5
 
 `integral(f, a, b, n)` — Simpson's rule with `n` steps (default 1000).
 `deriv(f, x, dx)` — custom step size.
+
+**Partial derivatives & gradients.** Give `deriv` a tensor (or tuple) point and it
+differentiates a multivariate function. With an axis index you get one partial; with
+none you get the whole gradient (same shape as the point):
+
+```
+> deriv((x,y) -> x^2*y, (3,5), 0)    # ∂/∂x at (3,5)
+result = 30
+> deriv((x,y) -> x^2*y, (3,5))       # full gradient
+result = [30, 9]
+> deriv(v -> v[0]^2 + v[1]^3, [2,3]) # gradient of a single vector-argument fn
+result = [4, 27]
+```
+
+A tuple point whose slots are vectors differentiates per slot — e.g.
+`deriv(H, (q,p), 0)` is `∂H/∂q` (a vector) for a phase-space Hamiltonian `H(q,p)`.
+
+**Multidimensional integrals.** Give `integral` vector/tuple bounds and it integrates
+over the box `∏[aⱼ, bⱼ]` by tensor-product Simpson (`n` steps *per axis*, default 64):
+
+```
+> integral((x,y) -> x*y, [0,0], [1,1])      # ∫∫ over the unit square
+result = 0.25
+> integral((x,y,z) -> 1, [0,0,0], [2,3,4])  # volume of a box
+result = 24
+```
+
+### Symplectic integration
+
+`solver.verlet(dVdq, dTdp, q0, p0, dt, n)` is velocity-Verlet (leapfrog) — the
+workhorse **symplectic** integrator for a separable Hamiltonian `H(q,p) = T(p) + V(q)`.
+Unlike `solver.rk4`, it conserves energy over long runs. Pass the two gradient pieces
+`dVdq = ∂H/∂q` (force) and `dTdp = ∂H/∂p` (velocity); `deriv` builds them from the
+potentials directly. `q0`/`p0` may be scalars or equal-length tensors; returns the
+final `(q, p)`.
+
+```
+> V = q -> q^2/2; T = p -> p^2/2          # simple harmonic oscillator
+> s = solver.verlet(q -> deriv(V, q), p -> deriv(T, p), 1.0, 0.0, 0.05, 200)
+> (s[0]^2 + s[1]^2) / 2                    # energy ≈ 0.5, no secular drift
+result = 0.4999...
+```
 
 ---
 

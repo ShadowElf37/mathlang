@@ -272,11 +272,26 @@ scan(v -> (v[1], -v[0]), (1,0), 100)     # [101, 2] orbit of a harmonic oscillat
 ```
 integral(f, a, b)              # Simpson's rule, 1000 steps
 integral(f, a, b, n)           # custom step count
+integral(f, [a0,a1], [b0,b1])  # multidim box integral (tensor-product Simpson, 64/axis)
 deriv(f, x)                    # 5-point stencil, dx=1e-5
 deriv(f, x, dx)                # custom step
+deriv(f, point, i)             # partial ∂f/∂(component i) at a tensor/tuple point
+deriv(f, point)                # full gradient (same shape as point)
 sum(f, a, b)                   # integer sum Σ_{k=a}^{b} f(k)
 prod(f, a, b)                  # integer product
 ```
+
+## Symplectic / ODE integration (`solver`)
+
+```
+solver.rk4(f, y0, t0, t1, n)             # RK4, returns final state (f(t,y)=dy/dt)
+solver.odeint(f, y0, ts)                 # RK4 sampled at times ts, returns trajectory
+solver.verlet(dVdq, dTdp, q0, p0, dt, n) # velocity-Verlet, symplectic, H=T(p)+V(q)
+solver.cfl(V, dx, dt)                    # Courant number diagnostic
+```
+
+`solver.verlet` conserves energy over long runs (rk4 drifts). Build the gradient
+pieces from potentials with `deriv`: `solver.verlet(q->deriv(V,q), p->deriv(T,p), …)`.
 
 ---
 

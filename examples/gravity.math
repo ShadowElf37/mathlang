@@ -1,0 +1,39 @@
+# gravity2D.math — 2-D gravitational orbit on a 50×50 grid via velocity-Verlet
+# H(q,p) = p·p/2 − 1/|q−c|  (separable, so standard Verlet applies)
+
+N  = 50
+cx = 25.0
+cy = 25.0
+dt = 0.5
+sg = 1.5   # Gaussian blob sigma (pixels)
+
+# dV/dq for V(q) = −1/|q−c|: gradient = (q−c)/|q−c|³
+dVdq(q) = {
+    dx = q[0] - cx;
+    dy = q[1] - cy;
+    r3 = (dx^2 + dy^2)^1.5;
+    (dx/r3, dy/r3)
+}
+dTdp(p) = p   # T = p·p/2
+
+# Circular orbit at radius 10; v_circ = sqrt(GM/r) = 1/sqrt(10)
+r0 = 10.0
+q0 = (cx + r0, cy)
+p0 = (0.0, 1.0/sqrt(r0))
+
+# Stateful cell-based generator over solver.verlet (one symplectic step per call).
+# First call returns the seed (q0, p0), then advances by dt — same convention as
+# heat.math's solver, so it plugs straight into !animate2D.
+st  = cell((q0, p0))
+gen = _ -> { s = get(st); set(st, solver.verlet(dVdq, dTdp, s[0], s[1], dt, 1)); s }
+
+# Each call: step one dt, render particle as Gaussian blob on N×N grid
+frame = _ -> {
+    s  = gen(0);
+    q  = s[0];
+    qx = q[0];
+    qy = q[1];
+    tensor((ix, iy) -> exp(-((ix-qx)^2 + (iy-qy)^2) / (2*sg^2)), N, N)
+}
+
+!animate2D frame, 400, 30
