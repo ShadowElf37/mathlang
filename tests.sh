@@ -1494,6 +1494,31 @@ run_match "solver.tao.sho"  "s=solver.tao((q,p)->q, (q,p)->p, 1.0, 0.0, 0.05, 40
 run_match "solver.tao.nonsep" "dq=(q,p)->q+0.6*q*p^2; dp=(q,p)->p+0.6*q^2*p; s=solver.tao(dq,dp,1.0,0.0,0.02,1000); round(0.5*s[1]^2+0.5*s[0]^2+0.3*s[0]^2*s[1]^2, 2)" "0\\.5"
 run_err "solver.tao.arity"  "solver.tao((q,p)->q, (q,p)->p, 1.0, 0.0)"
 run "solver.cfl"            "solver.cfl((1,2,3), 0.1, 0.02)" "0.6"
+
+# ── field constructors: function form + tensor() conversion ──────────────────
+# field(f, lo, hi, counts, bc): evaluate f at physical grid coords (x = lo + i·dx).
+run "field.fn.1d"      "tensor(field(x -> x^2, 0, 4, 5, forms.neumann))"            "[0, 1, 4, 9, 16]"
+# 2-D periodic: dx = 1/2, so f(x,y)=x+y over {0,0.5}² gives [[0,0.5],[0.5,1]].
+run "field.fn.2d"      "tensor(field((x,y) -> x+y, (0,0), (1,1), (2,2), forms.periodic))[1,0]" "0.5"
+run_ok "field.fn.metric" "field(x -> x, 0, 4, 5, forms.neumann, -1)"
+run_err "field.fn.arity" "field(x -> x, 0, 4, forms.neumann)"
+# tensor(field): extract grid data as a plain tensor (geometry dropped).
+run "tensor.of.field"  "tensor(field(x -> x^2, 0, 4, 5, forms.neumann))"            "[0, 1, 4, 9, 16]"
+
+# ── pic: particle/grid deposition (scatter) and interpolation (gather) ───────
+# CIC deposit of a unit charge at x=2.5 splits 0.5/0.5 across nodes 2 and 3.
+run "pic.scatter.cic"  "tensor(pic.scatter([2.5], [1.0], field(x->0, 0, 4, 5, forms.neumann)))" "[0, 0, 0.5, 0.5, 0]"
+# NGP deposit lands wholly on the nearest node.
+run "pic.scatter.ngp"  "tensor(pic.scatter([2.4], [1.0], field(x->0, 0, 4, 5, forms.neumann), pic.ngp))" "[0, 0, 1, 0, 0]"
+# Charge conservation: total deposited equals the sum of weights.
+run "pic.conserve"     "sum(tensor(pic.scatter([1.3,7.8,4.2], [2.0,-1.0,0.5], field(x->0, 0, 9, 10, forms.periodic))))" "1.5"
+# gather of a linear field is exact at any point (CIC reproduces linears).
+run "pic.gather.exact" "pic.gather(field(x -> x, 0, 4, 5, forms.neumann), [2.5])"   "[2.5]"
+# Adjointness: <gather(f,X), w> == <f, scatter(X,w)> (same kernel ⇒ transposes).
+run "pic.adjoint"      "f=field(x->sin(x), 0, 6, 12, forms.periodic); X=[1.3,3.7,5.1]; w=[2.0,-1.0,0.5]; abs(sum(pic.gather(f,X)*w) - sum(tensor(f)*tensor(pic.scatter(X,w,f)))) < 1e-12" "1"
+# Vector-field gather returns one row per particle: shape [P, ncomp].
+run "pic.gather.vec"   "shape(pic.gather(forms.vector(tensor((i,j,c)->i+j+c, 3,3,2), (0,0),(2,2),forms.periodic), [0.5,0.5]))" "[1, 2]"
+run_err "pic.scatter.arity" "pic.scatter([2.5], [1.0])"
 run_err "op.grad.needs.dx"  "ops.grad(zeros(4,4))" ""
 
 # ── iterate/scan non-finite guard + BUG-6 ───────────────────────────────────────

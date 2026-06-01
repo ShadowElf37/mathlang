@@ -919,6 +919,7 @@ The standard namespaces are:
 | `vec`     | `lerp clamp` |
 | `ops` / `solver` | differential operators and integrators — see below |
 | `forms`   | exterior calculus on fields: `d hodge wedge raise lower codiff laplace` — see below |
+| `pic`     | particle-in-cell coupling: `scatter` (deposit) / `gather` (interpolate) — see below |
 
 A namespace is a first-class value (`f = bits.xor; f(6,3)`). Names placed in a
 namespace are **not** reserved words, so `xor`, `lerp`, `var`, … are free to use
@@ -977,7 +978,8 @@ calculus on it — the box it lives on, the boundary conditions, the grid spacin
 and a metric. Build one with `field`:
 
 ```
-> field(data, lo, hi, bc [, metric])
+> field(data, lo, hi, bc [, metric])                 # from a tensor of samples
+> field(f, lo, hi, counts, bc [, metric])            # by sampling a function
 > f = field(tensor(k -> sin(2*pi*k/64), 64), 0, 2*pi, forms.periodic)
 0-form [64] on [0, 6.283185307179586] periodic
 …
@@ -991,6 +993,21 @@ and a metric. Build one with `field`:
 * `metric` is the optional **diagonal metric** `g_ii` (default all `1`, i.e.
   Euclidean). Minkowski is just `(-1, 1, 1, 1)`; an anisotropic grid is any other
   diagonal.
+
+The **function form** `field(f, lo, hi, counts, bc)` mirrors `tensor(f, …)` but
+samples `f` at each grid point's *physical* coordinates rather than its integer
+indices — `f` is called with `n` reals `x_a = lo_a + i·dx_a`, the exact sample
+points the field uses, so there is no need to pre-build a tensor with the right
+centre and spacing:
+
+```
+> field((x, y) -> exp(-(x^2 + y^2)), -2, 2, (64, 64), forms.neumann)
+0-form [64×64] on [-2, 2]×[-2, 2] neumann
+```
+
+Going the other way, **`tensor(f)`** extracts a field's grid data as a plain
+tensor (a 0-form gives a grid-shaped tensor; a multi-component field keeps its
+trailing component axis). The geometry is dropped — rebuild a field with `field`.
 
 A field is a *k-form*: a scalar field is a 0-form, a gradient is a 1-form, and so
 on. A k-form on an n-D grid has C(n,k) components, stored on a trailing axis.
@@ -1046,6 +1063,49 @@ argument) and they read the spacing and boundary conditions from the field and
 return a field. `ops.lap(f)` uses the compact 3-point stencil (distinct from
 `forms.laplace`'s wider `δd` stencil), and `ops.poisson(f)` does the spectral
 Poisson solve — both staying inside the field algebra.
+
+---
+
+## Particle-in-cell (`pic`)
+
+The **`pic`** namespace couples a cloud of particles to a grid field — the two
+operations a particle-in-cell (PIC) scheme needs, on either side of the field
+solve:
+
+```
+> pic.scatter(positions, weights, template [, kernel])   # particles → grid
+> pic.gather(field, positions [, kernel])                # grid → particles
+```
+
+* **`scatter`** (deposition) spreads each particle's weight onto the grid through
+  a shape function: `ρ_g = Σ_i w_i S(x_g − x_i)`. The `template` field supplies
+  the grid geometry (and degree/variance) of the result. With a scalar (0-form)
+  template and scalar weights `w_i = q_i` you get charge density `ρ`; with a
+  vector-field template and `weights` shaped `[P, n]` (e.g. `q_i v_i`) you get
+  current density `J`.
+* **`gather`** (interpolation) samples a field at the particle positions:
+  `E(x_i) = Σ_g E_g S(x_g − x_i)`, returning `[P]` for a scalar field or
+  `[P, ncomp]` for a vector field (the force per particle).
+
+`positions` is a `[P, n]` tensor (or `[P]` on a 1-D grid); kernels are
+`pic.ngp` (nearest-grid-point), `pic.cic` (cloud-in-cell / linear, the default),
+and `pic.tsc` (triangular-shaped-cloud / quadratic). Boundaries follow the
+field's per-axis `bc`: periodic wraps, Neumann clamps to the edge.
+
+`gather` and `scatter` with the same kernel are **exact transposes** of each
+other. That adjointness is what makes a PIC scheme free of self-force, and — when
+the shape function sits inside a single Hamiltonian, so that `scatter = ∂H/∂A` is
+the current deposition and `gather = ∂H/∂x` is the field interpolation — keeps the
+discrete dynamics *canonical*, so the full electromagnetic system can be advanced
+with `solver.tao` (the field push alone, sourced by a deposited `J`, is separable
+and goes through `solver.verlet`).
+
+```
+> grid = field(x -> 0, 0, 9, 10, forms.periodic)     # a 10-cell scalar template
+> rho  = pic.scatter([1.3, 4.2, 7.8], [2.0, -1.0, 0.5], grid)   # deposit charge
+> phi  = ops.poisson(rho)                            # solve ∇²φ = −ρ on the grid
+> E    = pic.gather(ops.grad(phi), [1.3, 4.2, 7.8])  # interpolate force back
+```
 
 ---
 

@@ -14,8 +14,10 @@ src/
     ops.rs   — grad/div/curl/lap/poisson/invlap/specgrad (finite-diff + spectral);
                      also field-polymorphic when the first arg is a Val::Field
     solver.rs      — rk4/odeint/verlet(symplectic)/tao(nonsep symplectic)/cfl time integrators
-    forms.rs       — field() constructor + exterior calculus (d/hodge/wedge/raise/
-                     lower/codiff/laplace) on Val::Field; metric-aware
+    forms.rs       — field() constructor (data + function forms) + exterior calculus
+                     (d/hodge/wedge/raise/lower/codiff/laplace) on Val::Field; metric-aware
+    pic.rs         — particle-in-cell scatter(deposit)/gather(interpolate); adjoint
+                     ngp/cic/tsc shape functions over a Val::Field grid
     special.rs bits.rs stats.rs linalg.rs vec.rs — relocated niche builtins (membership lists)
   repl.rs          — REPL loop, bang commands, syntax highlighting, tab completion
   graph.rs         — !graph command: sample → PNG via plotters → open in animator (bare RGB mode)

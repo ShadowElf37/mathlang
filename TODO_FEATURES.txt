@@ -35,8 +35,13 @@
 5.1 [DONE v0.23.3] clean up !help — dramatically shrunk (namespace details now under !help <ns>),
     per-namespace descriptions, !helpdef <ns> <text> for user namespaces; BUILTIN_FNS cleaned
     to only reflect names actually in the flat Env::new table.
-5.2 tensor(<field>) to convert field to tensor?
-5.3 single axis ops.grad(field, axis)?
+5.2 [DONE v0.26.0] tensor(<field>) converts a field to a plain tensor (component
+    data; 0-form → grid-shaped, vector field keeps trailing component axis). Geometry
+    dropped (rebuild with field()); returning (tensor,dx) rejected as it breaks composition.
+5.2.1 [DONE v0.26.0] field(f, lo, hi, counts, bc [, metric]) function constructor —
+    samples f at physical grid coords x_a = lo_a + i·dx_a (same dx the field uses),
+    mirroring tensor(f,…) but with proper centre/spacing. No intermediate tensor needed.
+5.3 (resolved by partial deriv?) single axis ops.grad(field, axis)?
 5.4 [DONE v0.23.3] ~ operator for logical not (mirrors bits.not); bare `not` now errors (namespace-only).
     Operator chains (~~x) work. BUILTIN_FNS no longer lists bits-namespace names.
 

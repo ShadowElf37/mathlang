@@ -12,7 +12,7 @@
 // (subset) index varying fastest: component c at grid point p lives at
 // data[p*ncomp + c]. Components are indexed by the sorted k-subsets of
 // {0,..,n-1} in lexicographic order (see `subsets`).
-use crate::eval::{Val, TData, FieldVal, BC, Variance, binomial, fmt_val};
+use crate::eval::{Val, TData, FieldVal, BC, Variance, Env, apply_val, binomial, fmt_val};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -163,9 +163,19 @@ fn rebuild(f: &FieldVal, data: Vec<f64>, degree: usize, variance: Variance) -> V
 // field(data, lo, hi, bc [, metric]) — build a 0-form (scalar field) on the box
 // [lo, hi] sampled by `data`. bc is forms.periodic (0) or forms.neumann (1) per
 // axis (scalar broadcasts). Optional metric is the diagonal g_ii (default 1s).
-pub fn field_ctor(vals: Vec<Val>) -> Result<Val, String> {
+//
+// field(f, lo, hi, counts, bc [, metric]) — the FUNCTION form: build a 0-form by
+// evaluating f at each grid point's physical coordinates (no intermediate tensor
+// needed). `counts` is the per-axis resolution (scalar or n-tuple); f is called
+// with n real coordinates, x_a = lo_a + i·dx_a, exactly the sample points the
+// field uses. Mirrors tensor(f, …) but with proper centre and spacing.
+pub fn field_ctor(vals: Vec<Val>, env: &Env) -> Result<Val, String> {
+    if matches!(vals.first(), Some(Val::Fn(..)) | Some(Val::Builtin(_))) {
+        return field_from_fn(vals, env);
+    }
     if vals.len() < 4 || vals.len() > 5 {
-        return Err("field(data, lo, hi, bc [, metric]) expects 4 or 5 args".into());
+        return Err("field(data, lo, hi, bc [, metric]) expects 4 or 5 args \
+                    (or field(f, lo, hi, counts, bc [, metric]) for the function form)".into());
     }
     let mut it = vals.into_iter();
     let (data, grid) = match it.next().unwrap() {
@@ -175,6 +185,68 @@ pub fn field_ctor(vals: Vec<Val>) -> Result<Val, String> {
     let geom: Vec<Val> = it.collect();
     // A scalar field is a 0-form: its data shape IS the grid (no component axis).
     assemble(data, grid, 0, Variance::Form, &geom, "field")
+}
+
+/// Per-axis grid spacing for the box [lo, hi] at the given resolution and BC —
+/// the single source of truth shared by `assemble` and the function constructor.
+fn axis_spacing(lo: &[f64], hi: &[f64], grid: &[usize], bc: &[BC]) -> Vec<f64> {
+    (0..grid.len()).map(|a| {
+        let span = hi[a] - lo[a];
+        match bc[a] {
+            BC::Periodic => span / grid[a] as f64,
+            BC::Neumann  => span / (grid[a].max(2) - 1) as f64,
+        }
+    }).collect()
+}
+
+// field(f, lo, hi, counts, bc [, metric]) — see field_ctor.
+fn field_from_fn(vals: Vec<Val>, env: &Env) -> Result<Val, String> {
+    if vals.len() < 5 || vals.len() > 6 {
+        return Err("field(f, lo, hi, counts, bc [, metric]) expects 5 or 6 args".into());
+    }
+    let mut it = vals.into_iter();
+    let f       = it.next().unwrap();
+    let lo_v    = it.next().unwrap();
+    let hi_v    = it.next().unwrap();
+    let counts_v = it.next().unwrap();
+    let rest: Vec<Val> = it.collect();        // bc [, metric] — fed to assemble
+
+    let grid = as_count_vec(&counts_v)?;
+    let n = grid.len();
+    if n == 0 { return Err("field: counts must have rank >= 1".into()); }
+    if grid.iter().any(|&c| c == 0) { return Err("field: counts must be positive".into()); }
+    let lo  = as_axis_vec(&lo_v, n, "field lo")?;
+    let hi  = as_axis_vec(&hi_v, n, "field hi")?;
+    let bcv = as_axis_vec(&rest[0], n, "field bc")?;
+    let bc: Vec<BC> = bcv.iter().map(|&b| if b == 0.0 { BC::Periodic } else { BC::Neumann }).collect();
+    let spacing = axis_spacing(&lo, &hi, &grid, &bc);
+
+    let total: usize = grid.iter().product();
+    let mut data = Vec::with_capacity(total);
+    let mut idx = vec![0usize; n];
+    for _ in 0..total {
+        let coords: Vec<Val> = (0..n).map(|a| Val::Num(lo[a] + idx[a] as f64 * spacing[a])).collect();
+        let v = apply_val(f.clone(), coords, env)?;
+        data.push(v.num("field: f must return a real number")?);
+        for k in (0..n).rev() { idx[k] += 1; if idx[k] < grid[k] { break; } idx[k] = 0; }
+    }
+    // Reuse assemble for geometry validation/spacing (it recomputes the same dx).
+    let mut geom = vec![lo_v, hi_v];
+    geom.extend(rest);                        // lo, hi, bc [, metric]
+    assemble(TData::new(data), grid, 0, Variance::Form, &geom, "field")
+}
+
+/// Coerce a counts argument (scalar / n-tuple / 1-D tensor) into Vec<usize>.
+fn as_count_vec(v: &Val) -> Result<Vec<usize>, String> {
+    match v {
+        Val::Num(x) => Ok(vec![*x as usize]),
+        Val::Tuple(items) => items.iter()
+            .map(|t| t.clone().num("field counts").map(|x| x as usize))
+            .collect(),
+        Val::Tensor { data, shape } if shape.len() == 1 =>
+            Ok(data.iter().map(|&x| x as usize).collect()),
+        other => Err(format!("field counts: expected a scalar or tuple, got {}", fmt_val(other))),
+    }
 }
 
 // forms.form(data, degree, lo, hi, bc [, metric]) — build a degree-k FORM directly
@@ -253,13 +325,7 @@ fn assemble(data: TData, grid: Vec<usize>, degree: usize, variance: Variance,
     let bc: Vec<BC> = bcv.iter().map(|&b| if b == 0.0 { BC::Periodic } else { BC::Neumann }).collect();
     // Spacing: periodic boxes [lo,hi) exclude the duplicate endpoint (÷N); a
     // Neumann/clamped axis includes both endpoints (÷(N-1)).
-    let spacing: Vec<f64> = (0..n).map(|a| {
-        let span = hi[a] - lo[a];
-        match bc[a] {
-            BC::Periodic => span / grid[a] as f64,
-            BC::Neumann  => span / (grid[a].max(2) - 1) as f64,
-        }
-    }).collect();
+    let spacing = axis_spacing(&lo, &hi, &grid, &bc);
     Ok(Val::Field(Arc::new(FieldVal { data, grid, spacing, lo, bc, metric, degree, variance })))
 }
 

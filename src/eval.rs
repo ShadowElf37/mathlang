@@ -626,7 +626,7 @@ pub fn builtin_sig(name: &str) -> Option<&'static str> {
         // control flow
         "if" => Some("if(cond: num, a: any, b: any) -> any"),
         // tensor construction
-        "tensor" => Some("tensor(f: fn, n1: nat, n2: nat, …) -> tensor"),
+        "tensor" => Some("tensor(f: fn, n1: nat, n2: nat, …) -> tensor   |   tensor(field) -> tensor  (extract grid data)"),
         "matrix" => Some("matrix(f: fn, r: nat, c: nat) -> tensor"),
         // tensor indexing
         "row" => Some("row(M: tensor, i: nat) -> tensor"),
@@ -681,7 +681,10 @@ pub fn builtin_sig(name: &str) -> Option<&'static str> {
         "contract" => Some("forms.contract(X: field, w: field) -> field  (interior product ι_X)"),
         "form"     => Some("forms.form(data: tensor, degree: nat, lo, hi, bc [, metric]) -> field"),
         "vector"   => Some("forms.vector(data: tensor, lo, hi, bc [, metric]) -> field"),
-        "field"    => Some("field(data, lo, hi, bc [, metric]) -> field  (0-form / scalar field)"),
+        "field"    => Some("field(data, lo, hi, bc [, metric]) -> field   |   field(f: fn, lo, hi, counts, bc [, metric]) -> field  (sample f at grid coords)"),
+        // pic namespace
+        "scatter"  => Some("pic.scatter(positions, weights, template: field [, kernel]) -> field  (deposit particles → grid: ρ, J)"),
+        "gather"   => Some("pic.gather(field, positions [, kernel]) -> tensor  (interpolate grid → particles; transpose of scatter)"),
         _ => None,
     }
 }
@@ -725,7 +728,7 @@ pub fn is_protected(name: &str) -> bool {
         | "reshape" | "permute" | "cat" | "squeeze" | "unsqueeze"
         | "dim"
         // Standard namespace names (ops, special, bits, …) are reserved too.
-        | "ops" | "solver" | "forms" | "special" | "bits" | "stats" | "linalg" | "vec"
+        | "ops" | "solver" | "forms" | "pic" | "special" | "bits" | "stats" | "linalg" | "vec"
     )
 }
 
@@ -1387,7 +1390,7 @@ pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, St
         return crate::ns::dispatch(name, vals, env).unwrap();
     }
     if name == "field" {
-        return crate::ns::forms::field_ctor(vals);
+        return crate::ns::forms::field_ctor(vals, env);
     }
 
     // A field decays to its component tensor under most flat builtins reached here
@@ -2189,6 +2192,16 @@ pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, St
 
         // ── Tensor constructors ───────────────────────────────────────────────
         "tensor" => {
+            // tensor(field) — extract a field's grid data as a plain tensor (the
+            // field already decayed to its component tensor above: a 0-form gives
+            // a grid-shaped tensor, a vector field a grid++[ncomp] tensor). The
+            // geometry (lo/hi/spacing) is dropped; rebuild a field with field(...).
+            if vals.len() == 1 {
+                return match vals.into_iter().next().unwrap() {
+                    t @ Val::Tensor { .. } => Ok(t),
+                    other => Err(format!("tensor(x): single-arg form converts a field/tensor, got {}", fmt_val(&other))),
+                };
+            }
             // tensor(f, n1, n2, ...) — variadic; f called with (i0, i1, ...) for each cell
             // f may return real or complex values; if any element is complex, returns ComplexTensor.
             if vals.len() < 2 { return Err("tensor(f, n1, n2, …) expects at least 2 args".into()); }

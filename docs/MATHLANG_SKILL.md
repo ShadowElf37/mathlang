@@ -351,8 +351,11 @@ solver.cfl(V, dx, dt)              # Courant number dt·max|V|/dx
 geometry (box, boundary conditions, derived spacing, diagonal metric):
 
 ```
-field(data, lo, hi, bc [, metric])   # bc = forms.periodic | forms.neumann (per axis)
+field(data, lo, hi, bc [, metric])            # bc = forms.periodic | forms.neumann (per axis)
+field(f, lo, hi, counts, bc [, metric])       # function form: sample f at x_a = lo_a + i·dx_a
 f = field(tensor(k -> sin(2*pi*k/64), 64), 0, 2*pi, forms.periodic)
+g = field((x,y) -> exp(-(x^2+y^2)), -2, 2, (64,64), forms.neumann)   # no pre-built tensor
+tensor(f)                                     # inverse: extract grid data as a plain tensor
 # metric defaults to Euclidean; Minkowski is just (-1, 1, 1, 1)
 ```
 
@@ -382,6 +385,23 @@ code does Euclidean (`forms.laplace` of a 0-form = −∇²) and Minkowski (metr
 operators are field-polymorphic: `ops.lap(f)`, `ops.grad(f)`, `ops.poisson(f)`,
 etc. read `dx`/bc from the field and return a field (`ops.lap` uses the compact
 stencil, vs `forms.laplace`'s wider δd stencil).
+
+**Particle-in-cell (`pic`).** Couples particles to a grid field — the deposition
+and interpolation halves of a PIC scheme, exact transposes of each other:
+
+```
+pic.scatter(positions, weights, template [, kernel])  # particles → grid (ρ, J)
+pic.gather(field, positions [, kernel])               # grid → particles (force)
+# positions: [P,n] tensor (or [P] in 1-D); kernel = pic.ngp | pic.cic (default) | pic.tsc
+```
+
+`scatter` deposits `ρ_g = Σ_i w_i S(x_g−x_i)` onto `template`'s grid (scalar
+template + scalar weights → charge ρ; vector template + `[P,n]` weights → current
+J). `gather` samples a field at the particles, returning `[P]` (scalar field) or
+`[P,ncomp]` (vector field). Same kernel ⇒ adjoint (no self-force); with the shape
+function inside one Hamiltonian the scheme is canonical, so `solver.tao` advances
+the full EM system (the field-only push, sourced by a deposited J, is separable →
+`solver.verlet`). Boundaries follow the field's bc: periodic wraps, Neumann clamps.
 
 **User namespaces:** `!namespace foo` at the top of an included `.math` file
 collects its public definitions into `foo`; prefix a def with `private` to keep it

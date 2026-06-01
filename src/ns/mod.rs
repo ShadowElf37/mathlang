@@ -8,6 +8,7 @@
 pub mod ops;
 pub mod solver;
 pub mod forms;
+pub mod pic;
 pub mod special;
 pub mod bits;
 pub mod stats;
@@ -22,6 +23,7 @@ use std::sync::Arc;
 /// eval_builtin routes these to the relevant module's dispatch().
 pub fn is_ns_builtin(name: &str) -> bool {
     ops::NAMES.contains(&name) || solver::NAMES.contains(&name) || forms::NAMES.contains(&name)
+        || pic::NAMES.contains(&name)
 }
 
 /// Route a namespaced new-function call to its module. Returns None if `name`
@@ -30,6 +32,7 @@ pub fn dispatch(name: &str, vals: Vec<Val>, env: &crate::eval::Env) -> Option<Re
     if ops::NAMES.contains(&name)    { return Some(ops::dispatch(name, vals, env)); }
     if solver::NAMES.contains(&name) { return Some(solver::dispatch(name, vals, env)); }
     if forms::NAMES.contains(&name)  { return Some(forms::dispatch(name, vals, env)); }
+    if pic::NAMES.contains(&name)    { return Some(pic::dispatch(name, vals, env)); }
     None
 }
 
@@ -41,6 +44,7 @@ pub fn register_all(vars: &mut HashMap<String, Val>) {
     insert_ns(vars, "ops", ops::members());
     insert_ns(vars, "solver",    solver::members());
     insert_ns(vars, "forms",     forms::members());
+    insert_ns(vars, "pic",       pic::members());
     insert_ns(vars, "special",   special::members());
     insert_ns(vars, "bits",      bits::members());
     insert_ns(vars, "stats",     stats::members());
