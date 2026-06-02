@@ -1682,6 +1682,19 @@ else
     # residency over a 1M-cell grid for 100 steps (fixed point u=1) — exercises ping-free reuse
     run "gpu.residency.big"  "u=ones(1000,1000); GPU { sum(iterate(u -> u*0.99 + 0.01, u, 100)) }" "1000000"
     run_err "gpu.err.badstep" "GPU { iterate(f, 1, 3) }"
+
+    # stencils: shift / roll / ops.lap / ops.grad (exact parity with CPU)
+    run "gpu.roll"           "A=[1,2,3,4]; GPU { roll(A,1,0) }"               "[4, 1, 2, 3]"
+    run "gpu.shift"          "A=[1,2,3,4]; GPU { shift(A,1,0) }"              "[1, 1, 2, 3]"
+    run "gpu.lap.periodic"   "A=[0,1,4,9,16]; GPU { ops.lap(A, 1) }"          "[17, 2, 2, 2, -23]"
+    run "gpu.lap.neumann"    "A=[0,1,4,9,16]; GPU { ops.lap(A, 1, ops.neumann) }" "[1, 2, 2, 2, -7]"
+    run "gpu.lap.2d"         "T=tensor((i,j)->1.0*(i*i+j*j),5,5); GPU { sum(abs(ops.lap(T, 0.5))) }" "1472"
+    run "gpu.grad.axis"      "A=[1,2,4,7,11]; GPU { ops.grad(A, 1, 0) }"      "[-4.5, 1.5, 2.5, 3.5, -3]"
+    run_err "gpu.grad.noaxis" "A=[1,2,3]; GPU { ops.grad(A, 1) }"
+    run_err "gpu.ops.spectral" "A=[1,2,3,4]; GPU { ops.poisson(A, 1) }"
+
+    # heat equation: GPU-resident time-stepping, Neumann BC conserves total mass
+    run "gpu.heat.conserve"  "u=tensor((i,j)->1.0*((i-8)*(i-8)+(j-8)*(j-8)<9),16,16); r=GPU{iterate(u->u+0.2*ops.lap(u,1,ops.neumann),u,50)}; round(sum(r),3)" "25"
 fi
 
 # ── print summary ─────────────────────────────────────────────────────────────

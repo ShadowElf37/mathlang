@@ -1302,6 +1302,7 @@ Currently supported inside a block:
 | Unary math | `exp ln log2 log10 sqrt cbrt sin cos tan asin acos atan sinh cosh tanh abs sign floor ceil trunc frac`, negation `-T` |
 | Reductions | `sum mean min max` (whole-tensor → scalar) |
 | Min/max | two-argument elementwise form, e.g. `min(T, 0)` |
+| Stencils | `shift(T,n,axis)`, `roll(T,n,axis)`, `ops.lap(T,dx[,bc])`, `ops.grad(T,dx,axis)` |
 | Loops | `iterate(step, x0, n)`, `scan(step, x0, n)` |
 | Bindings | `name = expr;` locals, visible only inside the block |
 
@@ -1322,9 +1323,28 @@ result = [0.125, 0.25, 0.375, 0.5]
 result = [1, 2, 4, 8, 16]
 ```
 
+### Example: a large heat equation
+
+`ops.lap` is the finite-difference Laplacian (periodic by default, or `ops.neumann`
+for no-flux). Combined with `iterate`, the entire diffusion solve runs on the GPU
+with the field never leaving the device until the final download:
+
+```
+N = 2000
+u0 = tensor((i,j) -> 1.0*((i-1000)*(i-1000) + (j-1000)*(j-1000) < 2500), N, N)
+dx = 1.0; a = 0.2
+r = GPU { iterate(u -> u + a*ops.lap(u, dx, ops.neumann), u0, 200) }   # 4M cells, 200 steps
+sum(r)     # total heat is conserved under Neumann BC
+```
+
+On an 800×800 grid for 200 steps this runs ~14× faster than the CPU evaluator
+(debug build), and most of the GPU time is the one-time construction of the
+initial condition, not the stepping.
+
 Tensor/tensor operations require matching shapes (no broadcasting yet). Computation
 is performed in `f32` on the device and converted back to `f64` on download, so
 expect roughly 7 significant digits compared to a CPU result; precision-sensitive
 workloads (chaotic maps, long symplectic integrations) will diverge from the f64
 CPU result — see `docs/CONSIDERATIONS.md` §7. Still to come from that design:
-differential-operator stencils (`ops.*`/`forms.*`), `matmul`, and an FFT.
+the rest of `ops.*`/`forms.*` (`div`, `curl`, exterior calculus), `matmul`, and an FFT
+(for the spectral `ops.poisson`/`specgrad`).

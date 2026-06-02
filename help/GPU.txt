@@ -14,6 +14,8 @@ Supported inside a block:
                   sinh cosh tanh abs sign floor ceil trunc frac
   - reductions:   sum mean min max   (whole-tensor -> scalar)
   - min/max:      two-arg elementwise form, e.g. min(T, 0)
+  - stencils:     shift(T,n,axis)  roll(T,n,axis)
+                  ops.lap(T,dx[,bc])   ops.grad(T,dx,axis)   (bc: ops.neumann)
   - loops:        iterate(step, x0, n)   scan(step, x0, n)
   - bindings:     c = A + B; c * 2   (last expression is the result)
 
@@ -36,4 +38,6 @@ result = 1000000
 result = 1024
 > u=[1,2,3,4]; GPU { iterate(u -> u*0.5, u, 3) }
 result = [0.125, 0.25, 0.375, 0.5]
+> N=2000; u0=tensor((i,j)->1.0*((i-1000)^2+(j-1000)^2<2500),N,N)
+> GPU { iterate(u -> u + 0.2*ops.lap(u,1,ops.neumann), u0, 200) }   # 4M-cell heat eq
 [0m

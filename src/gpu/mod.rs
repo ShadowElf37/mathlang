@@ -171,6 +171,16 @@ fn eval_apply(
     ctx: &GpuContext,
     scope: &mut HashMap<String, GpuVal>,
 ) -> Result<GpuVal, String> {
+    // Namespaced calls, e.g. `ops.lap(T, dx)`.
+    if let Expr::Member(base, member) = f {
+        if let Expr::Var(ns) = &**base {
+            if ns == "ops" {
+                return ops_op(member, args, env, ctx, scope);
+            }
+        }
+        return Err(format!("GPU: `{}.{member}` not supported in a GPU block", fmt_member_base(base)));
+    }
+
     let name = match f {
         Expr::Var(n) => n.as_str(),
         _ => return Err("GPU: only named function calls are supported in a GPU block".into()),
@@ -178,6 +188,9 @@ fn eval_apply(
     match name {
         "iterate" => gpu_iterate(args, env, ctx, scope),
         "scan"    => gpu_scan(args, env, ctx, scope),
+
+        // Stencils available as flat builtins.
+        "shift" | "roll" => shift_roll(name, args, env, ctx, scope),
 
         // Whole-tensor reductions → scalar.
         "sum" | "mean" | "min" | "max" if args.len() == 1 => {
@@ -198,6 +211,24 @@ fn eval_apply(
         }
 
         _ => Err(format!("GPU: function `{name}` not supported in a GPU block")),
+    }
+}
+
+fn fmt_member_base(e: &Expr) -> String {
+    match e { Expr::Var(n) => n.clone(), _ => "<expr>".into() }
+}
+
+/// Evaluate a configuration scalar (dx / bc / axis / shift amount) on the CPU.
+/// This resolves literals, captured scalars, and namespace sentinels such as
+/// `ops.neumann`.
+fn cpu_scalar(e: &Expr, env: &Env) -> Result<f64, String> {
+    crate::eval::eval(e, env)?.num("GPU op argument")
+}
+
+fn expect_buffer(v: GpuVal, ctx: &str) -> Result<(Rc<wgpu::Buffer>, Vec<usize>, usize), String> {
+    match v {
+        GpuVal::Buffer { buf, shape, len } => Ok((buf, shape, len)),
+        GpuVal::Scalar(_) => Err(format!("GPU: {ctx} expects a tensor, got a scalar")),
     }
 }
 
@@ -467,6 +498,211 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,\n\
         n = groups as usize;
     }
     Ok(download(ctx, &cur, 1)?[0] as f64)
+}
+
+// ───────────────────────── stencils (ops.*, shift, roll) ─────────────────────────
+
+/// A stencil tap: an integer offset per axis and a coefficient.
+type Tap = (Vec<i64>, f64);
+
+/// Laplacian taps: Σ_axis (f[+1] + f[-1] - 2 f[0]) / dx².
+fn lap_taps(ndim: usize, dx: f64) -> Vec<Tap> {
+    let inv = 1.0 / (dx * dx);
+    let mut taps: Vec<Tap> = vec![(vec![0; ndim], -2.0 * ndim as f64 * inv)];
+    for a in 0..ndim {
+        let mut up = vec![0; ndim]; up[a] = 1; taps.push((up, inv));
+        let mut dn = vec![0; ndim]; dn[a] = -1; taps.push((dn, inv));
+    }
+    taps
+}
+
+/// Central first-derivative taps along `axis`: (f[+1] - f[-1]) / (2 dx).
+fn grad_taps(ndim: usize, dx: f64, axis: usize) -> Vec<Tap> {
+    let c = 1.0 / (2.0 * dx);
+    let mut up = vec![0; ndim]; up[axis] = 1;
+    let mut dn = vec![0; ndim]; dn[axis] = -1;
+    vec![(up, c), (dn, -c)]
+}
+
+/// Generate the WGSL for a constant stencil with the given taps and per-axis BC
+/// (Neumann = edge-clamp, else periodic = wrap). The grid dims/strides arrive in
+/// a `meta` storage buffer; everything structural (ndim, taps, BC) is baked in.
+fn stencil_wgsl(ndim: usize, taps: &[Tap], neumann: &[bool]) -> String {
+    let mut s = String::new();
+    s += "@group(0) @binding(0) var<storage, read> src: array<f32>;\n";
+    s += "@group(0) @binding(1) var<storage, read_write> out: array<f32>;\n";
+    s += "@group(0) @binding(2) var<storage, read> gdim: array<u32>;\n";
+    s += "struct Params { len: u32, row: u32, ndim: u32 };\n";
+    s += "@group(0) @binding(3) var<uniform> params: Params;\n";
+    s += "@compute @workgroup_size(256)\n";
+    s += "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n";
+    s += "  let i = gid.y * params.row + gid.x;\n";
+    s += "  if (i >= params.len) { return; }\n";
+    for a in 0..ndim {
+        s += &format!("  let d{a} = gdim[{a}u];\n");
+    }
+    for a in 0..ndim {
+        s += &format!("  let s{a} = gdim[{}u];\n", ndim + a);
+    }
+    for a in 0..ndim {
+        s += &format!("  let c{a} = i32((i / s{a}) % d{a});\n");
+    }
+    s += "  var acc: f32 = 0.0;\n";
+    for (off, coef) in taps {
+        s += "  {\n";
+        s += "    var nidx: u32 = 0u;\n";
+        for a in 0..ndim {
+            let o = off[a];
+            if neumann[a] {
+                s += &format!("    let n{a} = clamp(c{a} + ({o}), 0, i32(d{a}) - 1);\n");
+            } else {
+                s += &format!("    let m{a} = i32(d{a});\n");
+                s += &format!("    let n{a} = (((c{a} + ({o})) % m{a}) + m{a}) % m{a};\n");
+            }
+            s += &format!("    nidx += u32(n{a}) * s{a};\n");
+        }
+        s += &format!("    acc += {} * src[nidx];\n", wgsl_f32(*coef));
+        s += "  }\n";
+    }
+    s += "  out[i] = acc;\n";
+    s += "}\n";
+    s
+}
+
+/// Run a constant-stencil kernel over `src` (shape known), returning a new buffer
+/// of the same shape.
+fn run_stencil(
+    ctx: &GpuContext,
+    src: &wgpu::Buffer,
+    shape: &[usize],
+    len: usize,
+    taps: &[Tap],
+    neumann: &[bool],
+) -> Result<Rc<wgpu::Buffer>, String> {
+    let ndim = shape.len();
+    // Row-major strides.
+    let mut strides = vec![1usize; ndim];
+    for a in (0..ndim.saturating_sub(1)).rev() {
+        strides[a] = strides[a + 1] * shape[a + 1];
+    }
+    let src_wgsl = stencil_wgsl(ndim, taps, neumann);
+    let pipeline = get_pipeline(ctx, &src_wgsl);
+
+    let mut meta: Vec<u32> = shape.iter().map(|&d| d as u32).collect();
+    meta.extend(strides.iter().map(|&s| s as u32));
+    let meta_buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu-stencil-meta"),
+        contents: bytemuck::cast_slice(&meta),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    });
+
+    let out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gpu-stencil-out"),
+        size: (len.max(1) * 4) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    const WG: u32 = 256;
+    const MAX_DIM: u32 = 65535;
+    let needed = (len as u32).div_ceil(WG).max(1);
+    let groups_x = needed.min(MAX_DIM);
+    let groups_y = needed.div_ceil(groups_x).max(1);
+    let row = groups_x * WG;
+
+    let params = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu-stencil-params"),
+        contents: bytemuck::cast_slice(&[len as u32, row, ndim as u32, 0u32]),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("gpu-stencil-bg"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: src.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: out.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: meta_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: params.as_entire_binding() },
+        ],
+    });
+
+    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("gpu-stencil-encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("gpu-stencil-pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(groups_x, groups_y, 1);
+    }
+    ctx.queue.submit(Some(encoder.finish()));
+    Ok(Rc::new(out))
+}
+
+/// `ops.<name>(...)` inside a GPU block.
+fn ops_op(name: &str, args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut HashMap<String, GpuVal>) -> Result<GpuVal, String> {
+    match name {
+        // ops.lap(T, dx [, bc])  — Laplacian; bc 0=periodic (default), 1=neumann.
+        "lap" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err("ops.lap(T, dx [, bc]) expects 2 or 3 args".into());
+            }
+            let t = eval_gpu(&args[0], env, ctx, scope)?;
+            let dx = cpu_scalar(&args[1], env)?;
+            let neumann = args.len() == 3 && cpu_scalar(&args[2], env)? != 0.0;
+            let (buf, shape, len) = expect_buffer(t, "ops.lap")?;
+            if shape.is_empty() { return Err("ops.lap: need a tensor of rank >= 1".into()); }
+            let taps = lap_taps(shape.len(), dx);
+            let bcs = vec![neumann; shape.len()];
+            let out = run_stencil(ctx, &buf, &shape, len, &taps, &bcs)?;
+            Ok(GpuVal::Buffer { buf: out, shape, len })
+        }
+        // ops.grad(T, dx, axis) — central difference along one axis (same shape).
+        "grad" => {
+            if args.len() != 3 {
+                return Err("GPU: ops.grad requires an explicit axis: ops.grad(T, dx, axis)".into());
+            }
+            let t = eval_gpu(&args[0], env, ctx, scope)?;
+            let dx = cpu_scalar(&args[1], env)?;
+            let axis = cpu_scalar(&args[2], env)? as usize;
+            let (buf, shape, len) = expect_buffer(t, "ops.grad")?;
+            if axis >= shape.len() {
+                return Err(format!("ops.grad: axis {axis} out of range for rank-{} tensor", shape.len()));
+            }
+            let taps = grad_taps(shape.len(), dx, axis);
+            let bcs = vec![false; shape.len()]; // grad is periodic (matches CPU `central`)
+            let out = run_stencil(ctx, &buf, &shape, len, &taps, &bcs)?;
+            Ok(GpuVal::Buffer { buf: out, shape, len })
+        }
+        _ => Err(format!(
+            "GPU: ops.{name} not supported in a GPU block (spectral operators need an FFT — not yet on GPU)"
+        )),
+    }
+}
+
+/// `shift(T, n, axis)` (edge-clamp) and `roll(T, n, axis)` (wrap) as single-tap stencils.
+fn shift_roll(name: &str, args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut HashMap<String, GpuVal>) -> Result<GpuVal, String> {
+    if args.len() != 3 {
+        return Err(format!("{name}(T, n, axis) expects 3 args"));
+    }
+    let t = eval_gpu(&args[0], env, ctx, scope)?;
+    let n = cpu_scalar(&args[1], env)? as i64;
+    let axis = cpu_scalar(&args[2], env)? as usize;
+    let (buf, shape, len) = expect_buffer(t, name)?;
+    if axis >= shape.len() {
+        return Err(format!("{name}: axis {axis} out of range for rank-{} tensor", shape.len()));
+    }
+    let mut off = vec![0i64; shape.len()];
+    off[axis] = -n; // out[c] = in[c - n]
+    let taps = vec![(off, 1.0)];
+    let mut bcs = vec![false; shape.len()];
+    if name == "shift" { bcs[axis] = true; } // clamp; roll wraps (periodic)
+    let out = run_stencil(ctx, &buf, &shape, len, &taps, &bcs)?;
+    Ok(GpuVal::Buffer { buf: out, shape, len })
 }
 
 // ───────────────────────── iterate / scan (residency) ─────────────────────────
