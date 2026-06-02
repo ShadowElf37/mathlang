@@ -4,11 +4,16 @@
 //! If no compatible adapter exists, every GPU block fails with a clear message
 //! rather than panicking.
 
-use std::sync::{Mutex, OnceLock};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub struct GpuContext {
     pub device: wgpu::Device,
     pub queue:  wgpu::Queue,
+    /// Compute pipelines keyed by full WGSL source — a shader is compiled once
+    /// and reused across ops, blocks, and (crucially) loop iterations.
+    pub pipelines: RefCell<HashMap<String, Arc<wgpu::ComputePipeline>>>,
 }
 
 static CTX: OnceLock<Option<Mutex<GpuContext>>> = OnceLock::new();
@@ -43,7 +48,7 @@ impl GpuContext {
                 )
                 .await
                 .ok()?;
-            Some(Mutex::new(GpuContext { device, queue }))
+            Some(Mutex::new(GpuContext { device, queue, pipelines: RefCell::new(HashMap::new()) }))
         })
     }
 }

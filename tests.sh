@@ -1646,6 +1646,40 @@ else
     run_err "gpu.err.shape"  "A=[1,2,3]; B=[1,2]; GPU { A + B }"
     run_err "gpu.err.undef"  "GPU { nope + 1 }"
     run_err "gpu.err.fn"     "f = x -> x; GPU { f + 1 }"
+
+    # unary math (exact-in-f32 results, or scalar-reduced for transcendentals)
+    run "gpu.unary.sqrt"     "A=[1,4,9]; GPU { sqrt(A) }"                     "[1, 2, 3]"
+    run "gpu.unary.abs"      "A=[-1,2,-3]; GPU { abs(A) }"                    "[1, 2, 3]"
+    run "gpu.unary.floor"    "A=[1.5,2.9]; GPU { floor(A) }"                  "[1, 2]"
+    run "gpu.unary.sign"     "A=[-5,0,5]; GPU { sign(A) }"                    "[-1, 0, 1]"
+    run "gpu.unary.exp0"     "GPU { sum(exp([0,0,0])) }"                      "3"
+    run "gpu.unary.ln1"      "GPU { sum(ln([1,1,1])) }"                       "0"
+    run "gpu.unary.cos0"     "GPU { sum(cos([0,0])) }"                        "2"
+
+    # reductions
+    run "gpu.reduce.sum"     "A=[1,2,3,4]; GPU { sum(A) }"                    "10"
+    run "gpu.reduce.mean"    "A=[1,2,3,4]; GPU { mean(A) }"                   "2.5"
+    run "gpu.reduce.min"     "A=[3,1,4,1,5]; GPU { min(A) }"                  "1"
+    run "gpu.reduce.max"     "A=[3,1,4,1,5]; GPU { max(A) }"                  "5"
+    run "gpu.reduce.big"     "T=ones(1000,1000); GPU { sum(T) }"             "1000000"
+    run "gpu.reduce.compose" "A=[1,2,3,4]; GPU { sum(A*A) }"                  "30"
+    run "gpu.minmax.binary"  "A=[1,5,3]; GPU { min(A, 3) }"                   "[1, 3, 3]"
+
+    # comparisons
+    run "gpu.cmp.gt"         "A=[1,2,3,4]; GPU { A > 2 }"                     "[0, 0, 1, 1]"
+    run "gpu.cmp.le"         "A=[1,2,3,4]; GPU { A <= 2 }"                    "[1, 1, 0, 0]"
+
+    # iterate / scan (residency model)
+    run "gpu.iterate.scalar" "GPU { iterate(x -> 2*x, 1, 10) }"              "1024"
+    run "gpu.iterate.tensor" "u=[1,2,3,4]; GPU { iterate(u -> u*0.5, u, 3) }" "[0.125, 0.25, 0.375, 0.5]"
+    run "gpu.iterate.const"  "u=[1,1,1]; c=[10,20,30]; GPU { iterate(u -> u+c, u, 5) }" "[51, 101, 151]"
+    run "gpu.iterate.named"  "u=[1,2,3]; step(u)=u*u; GPU { iterate(step, u, 2) }" "[1, 16, 81]"
+    run "gpu.iterate.zero"   "u=[7,8]; GPU { iterate(u -> u*2, u, 0) }"       "[7, 8]"
+    run "gpu.scan.scalar"    "GPU { scan(x -> 2*x, 1, 4) }"                   "[1, 2, 4, 8, 16]"
+    run "gpu.scan.vector"    "u=[1,1]; GPU { scan(u -> u*2, u, 3) }"          "⎡ 1  1 ⎤ ⎢ 2  2 ⎥ ⎢ 4  4 ⎥ ⎣ 8  8 ⎦"
+    # residency over a 1M-cell grid for 100 steps (fixed point u=1) — exercises ping-free reuse
+    run "gpu.residency.big"  "u=ones(1000,1000); GPU { sum(iterate(u -> u*0.99 + 0.01, u, 100)) }" "1000000"
+    run_err "gpu.err.badstep" "GPU { iterate(f, 1, 3) }"
 fi
 
 # ── print summary ─────────────────────────────────────────────────────────────

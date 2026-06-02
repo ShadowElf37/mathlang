@@ -804,11 +804,6 @@ fn fmt_mat_e(data: &[f64], r: usize, c: usize, elide: bool) -> String {
     }).collect::<Vec<_>>().join("\n")
 }
 
-/// Box-character display for a 2D slice of data with given rows × cols.
-fn fmt_mat(data: &[f64], r: usize, c: usize) -> String {
-    fmt_mat_e(data, r, c, false)
-}
-
 pub fn fmt_val(v: &Val) -> String {
     match v {
         Val::Num(n) => fmt_f(*n),

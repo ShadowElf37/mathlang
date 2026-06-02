@@ -2,22 +2,38 @@
 
 [1mGPU { ... }[0m evaluates a block on the GPU compute backend. Captured
 variables (scalars and real tensors from the surrounding scope) are uploaded,
-the block runs on the device, and only the final result is downloaded back.
+the block runs on the device keeping intermediates GPU-resident, and only the
+final result is downloaded back.
 
 Build with the gpu feature to enable it:  cargo build --release --features gpu
 Without it, a GPU block reports "GPU backend not compiled in".
 
-Currently supported inside a block:
-  - elementwise arithmetic:  + - * / ^   (tensor/tensor, tensor/scalar, scalar/scalar)
-  - unary negation:  -T
-  - local bindings:  c = A + B; c * 2   (last expression is the result)
+Supported inside a block:
+  - elementwise:  + - * / ^   and comparisons  < > <= >= == !=  (-> 0.0/1.0)
+  - unary math:   exp ln log2 log10 sqrt cbrt sin cos tan asin acos atan
+                  sinh cosh tanh abs sign floor ceil trunc frac
+  - reductions:   sum mean min max   (whole-tensor -> scalar)
+  - min/max:      two-arg elementwise form, e.g. min(T, 0)
+  - loops:        iterate(step, x0, n)   scan(step, x0, n)
+  - bindings:     c = A + B; c * 2   (last expression is the result)
 
-Precision is f32 on the GPU; results are converted back to f64 on download,
-so expect ~7 significant digits versus a CPU computation.
+[1miterate / scan (residency)[0m keep state on the GPU across all n steps,
+so PDE/time-stepping stays on the device with no per-step round-trip. The step
+may be an inline lambda or a named function of one argument.
+
+Precision is f32 on the GPU; results convert back to f64 on download (~7
+significant digits). Sensitive workloads (chaotic maps, long symplectic runs)
+will diverge from the f64 CPU result — see docs/CONSIDERATIONS.md section 7.
 
 [1mExamples:[0m
 [0m> A=[1,2,3]; B=[10,20,30]; GPU { A + B }
 result = [11, 22, 33]
-> A=[1,2,3]; GPU { c = A + 1; c * 2 }
-result = [4, 6, 8]
+> A=[1,4,9]; GPU { sqrt(A) }
+result = [1, 2, 3]
+> T=ones(1000,1000); GPU { sum(T) }
+result = 1000000
+> GPU { iterate(x -> 2*x, 1, 10) }
+result = 1024
+> u=[1,2,3,4]; GPU { iterate(u -> u*0.5, u, 3) }
+result = [0.125, 0.25, 0.375, 0.5]
 [0m

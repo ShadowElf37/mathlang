@@ -1298,11 +1298,33 @@ Currently supported inside a block:
 | Category | Operations |
 |----------|-----------|
 | Elementwise arithmetic | `+ - * / ^` (tensor/tensor, tensor/scalar, scalar/scalar) |
-| Unary | negation `-T` |
+| Comparisons | `< > <= >= == !=` (→ `0.0`/`1.0`) |
+| Unary math | `exp ln log2 log10 sqrt cbrt sin cos tan asin acos atan sinh cosh tanh abs sign floor ceil trunc frac`, negation `-T` |
+| Reductions | `sum mean min max` (whole-tensor → scalar) |
+| Min/max | two-argument elementwise form, e.g. `min(T, 0)` |
+| Loops | `iterate(step, x0, n)`, `scan(step, x0, n)` |
 | Bindings | `name = expr;` locals, visible only inside the block |
+
+### GPU-resident loops (`iterate` / `scan`)
+
+`iterate` and `scan` keep state on the GPU across all `n` steps — the loop body
+runs on the device with no per-step upload/download — which is what makes GPU
+time-stepping actually faster than the CPU. The step may be an inline lambda or a
+named one-argument function:
+
+```
+> GPU { iterate(x -> 2*x, 1, 10) }                      # scalar recurrence
+result = 1024
+> u = [1, 2, 3, 4]
+> GPU { iterate(u -> u*0.5, u, 3) }                     # per-element decay
+result = [0.125, 0.25, 0.375, 0.5]
+> GPU { scan(x -> 2*x, 1, 4) }                          # keep every frame
+result = [1, 2, 4, 8, 16]
+```
 
 Tensor/tensor operations require matching shapes (no broadcasting yet). Computation
 is performed in `f32` on the device and converted back to `f64` on download, so
-expect roughly 7 significant digits compared to a CPU result. This is the first
-milestone of a larger backend — see `docs/CONSIDERATIONS.md` for the full design
-(differential-operator stencils, FFT, and GPU-resident time-stepping loops).
+expect roughly 7 significant digits compared to a CPU result; precision-sensitive
+workloads (chaotic maps, long symplectic integrations) will diverge from the f64
+CPU result — see `docs/CONSIDERATIONS.md` §7. Still to come from that design:
+differential-operator stencils (`ops.*`/`forms.*`), `matmul`, and an FFT.

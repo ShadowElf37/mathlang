@@ -1004,7 +1004,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     "           iterate(f,x0,n)  scan(f,x0,n)  cumsum cumprod diff\n\n",
                     "Other:     mean std  fft ifft  rand  re im arg conj  cell get set\n",
                     "           field(data,lo,hi,bc) | field(f,lo,hi,counts,bc)  — scalar field (0-form)\n",
-                    "           GPU {{ … }}  — evaluate a block on the GPU (build with --features gpu)\n",
+                    "           GPU {{ … }}  — GPU compute: elementwise/unary/reduce, iterate/scan (--features gpu)\n",
                     "           Constants: pi e phi inf i\n\n",
                     "Namespaces — use !help <ns> for members and usage:\n",
                     "  ops     PDE operators: grad div curl lap poisson specgrad\n",
