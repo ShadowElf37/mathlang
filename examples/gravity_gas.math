@@ -1,0 +1,127 @@
+# gravity_gas.math — a 2-D SELF-GRAVITATING GAS with pressure, integrated by the
+# symplectic velocity-Verlet (solver.verlet). Animates the gas density rho(x).
+#
+# Why Verlet (and not tao)? -----------------------------------------------------
+# A gas with no viscosity, a barotropic equation of state P = P(rho), and self-
+# gravity is a CONSERVATIVE, canonical system — and a SEPARABLE one:
+#
+#     H(q,p) = sum_i |p_i|^2 / 2m     (kinetic, depends only on momenta p)
+#            + V(q),                  (gravity + internal energy, only on positions q)
+#
+# Because H splits as T(p) + V(q), velocity-Verlet — the workhorse symplectic
+# integrator — applies directly (no need for tao's non-separable machinery). Being
+# symplectic, it keeps the energy bounded over long runs, so a pressure-supported
+# clump can collapse, bounce, and oscillate for thousands of steps without the
+# secular energy drift an ordinary RK integrator would suffer. This is exactly why
+# cosmological particle-mesh + SPH codes leapfrog.
+#
+# The force, the particle-mesh way ---------------------------------------------
+# This is the same scatter -> field-solve -> gather cycle as the PIC examples, with
+# charge replaced by MASS:
+#
+#     scatter mass --> rho --> solve gravity + pressure --> gather accel --> push
+#
+# Both pieces of the force are gradients of a scalar, so they combine into ONE
+# effective potential per unit mass, psi = phi_grav + h:
+#   * Self-gravity:  ∇²phi = 4πG rho,  so  phi = poisson(4πG rho)  (mathlang's
+#     convention is lap(poisson(f)) = +f), and a_grav = -grad(phi) is attractive.
+#   * Pressure of a γ=2 polytrope P = K rho²: the pressure acceleration is
+#     -(1/rho) grad P = -grad h with specific enthalpy h = 2K rho, so it is just
+#     a linear term cs2*rho in the potential. It pushes outward from overdensities
+#     and sets a Jeans length below which gravity can no longer win — that is what
+#     halts the collapse and makes the clumps bounce instead of going singular.
+#
+# The force must be the EXACT gradient, or Verlet won't conserve energy ----------
+# The potential energy is a function of the DEPOSITED field, V = sum_g v(rho_g) dA
+# with rho = scatter(x, m). Its exact gradient w.r.t. a particle position is
+#     dV/dx_i = m dA sum_g v'(rho_g) grad_x S(x_g - x_i),
+# i.e. the field v'(rho) = psi GATHERED with the gradient of the shape function S —
+# that is pic.gathergrad. The naive alternative, pic.gather(ops.grad(psi)), finite-
+# differences the field and then interpolates; it is NOT the transpose of scatter's
+# position-derivative, so it is not the gradient of any energy and it pumps energy
+# into the grid scale (the pressure term in particular goes unstable). Using
+# pic.gathergrad makes dVdq the true gradient of V, so the symplectic Verlet step
+# conserves H to a fraction of a percent over the whole run. Scatter and gathergrad
+# sharing one kernel is the discrete "grad-h" consistency of SPH — what also keeps
+# the scheme momentum-conserving and self-force-free.
+
+N   = 64                 # grid: N x N cells on the periodic box [0, 2*pi)^2
+L   = 2*pi
+dt  = 0.03
+P   = 6400               # macro-particles (mass elements)
+m   = 1.0                # mass per macro-particle
+Gg  = 12.0               # 4πG — self-gravity strength (free-fall rate)
+cs2 = 0.05               # 2K  — pressure stiffness; Jeans scale ~ sqrt(cs2/Gg)
+dA  = (L/N)^2            # cell area — the grid-integral weight in V and its gradient
+
+K     = pic.tsc                                              # smooth shape function
+zerof = field((x,y)->0.0, 0, L, (N,N), forms.periodic)      # grid template / zero field
+mw    = tensor(p -> m, P)                                    # per-particle mass weights
+
+# ── fun initial condition: a ring of co-rotating blobs ────────────────────────
+# Five Gaussian-ish blobs spaced around a ring, all orbiting the box centre the
+# same way. Gravity pulls them together while their shared rotation shears them
+# into trailing arms — they tidally interact and merge into a swirling central
+# clump, a miniature cluster/galaxy formation, with pressure keeping the core from
+# collapsing to a point. (We precompute per-particle blob angle and in-blob offset
+# so each particle's x and y stay correlated — two independent rand() draws would
+# scramble the blobs; same idiom as pic_plasma.math.)
+nb   = 5                 # number of blobs
+R    = 1.7               # ring radius about the box centre
+rb   = 0.55              # blob radius
+vrot = 0.45              # orbital (tangential) speed
+vth  = 0.12              # thermal spread within a blob
+
+cx = pi;  cy = pi
+ang  = tensor(p -> 2*pi*floor(p*nb/P)/nb, P)   # which blob (its angle on the ring)
+orad = tensor(p -> rb*sqrt(rand()), P)         # in-blob radius (uniform area)
+oth  = tensor(p -> 2*pi*rand(), P)             # in-blob angle
+X0 = tensor((p,c) -> if(c == 0, cx + R*cos(ang[p]) + orad[p]*cos(oth[p]),
+                                cy + R*sin(ang[p]) + orad[p]*sin(oth[p])), P, 2)
+# tangential orbital velocity (-sin, cos) about the centre, plus thermal noise
+V0 = tensor((p,c) -> if(c == 0, -vrot*sin(ang[p]) + vth*(rand() - 0.5),
+                                 vrot*cos(ang[p]) + vth*(rand() - 0.5)), P, 2)
+
+wrap(Z) = Z - L*floor(Z/L)
+
+# ── separable Hamiltonian gradients ───────────────────────────────────────────
+# V(q): scatter mass -> rho, form the combined gravity+pressure potential psi, then
+# dV/dq = m*dA*gathergrad(psi)  (the exact gradient; the force on a particle is its
+# negative, -m*dA*gathergrad(psi)).
+dVdq(X) = {
+  rho = pic.scatter(X, mw, zerof, K);
+  psi = ops.poisson(Gg*rho) + cs2*rho;          # phi_grav + enthalpy h
+  m * dA * pic.gathergrad(psi, X, K)
+}
+dTdp(Pp) = Pp / m                                # T = |p|²/2m  ->  v = p/m
+
+# total energy — evaluate Ham(q,p) at any time to watch Verlet conserve it.
+Ham(X, Pp) = {
+  rho = pic.scatter(X, mw, zerof, K);
+  phg = ops.poisson(Gg*rho);                     # gravitational potential
+  KE  = 0.5*sum(tensor(Pp)^2)/m;
+  Ug  = 0.5*sum(tensor(rho)*tensor(phg))*dA;     # ½∫ρφ  gravitational PE
+  Ui  = 0.5*cs2*sum(tensor(rho)^2)*dA;           # ∫ρe,  e = Kρ  internal energy
+  KE + Ug + Ui
+}
+
+# ── animate the gas density rho(x) ────────────────────────────────────────────
+# One symplectic Verlet step per frame, then show the deposited mass density. The
+# ring shears into spiral arms that wind up and merge into a pulsing central clump.
+# Tip: press C in the viewer to cycle to the "galaxy" colormap (black -> blue ->
+# yellow) — it makes the dense core glow like starlight.
+st    = cell((X0, m*V0))                         # phase space (positions, momenta)
+frame = _ -> {
+  s  = get(st);
+  s2 = solver.verlet(dVdq, dTdp, s[0], s[1], dt, 1);
+  set(st, (wrap(s2[0]), s2[1]));                  # keep positions in the periodic box
+  re(tensor(pic.scatter(s[0], mw, zerof, K)))
+}
+
+!animate2D frame, 700, 30
+
+# Companion examples: pic_plasma.math is the (also separable, also Verlet) electro-
+# static/quasi-static z-pinch — same scatter/gather machinery with charge instead
+# of mass. pic_em_tao.math is the NON-separable electromagnetic case whose (p-qA)²
+# coupling forces the use of solver.tao. Here gravity + barotropic pressure keep H
+# separable, so the simpler symplectic integrator, Verlet, is exactly right.

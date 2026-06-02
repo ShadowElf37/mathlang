@@ -509,9 +509,15 @@ pub fn import_file(path: &str, display: &str, env: &mut Env, verbose: bool) {
         // swallow the lines joined after them.
         let code = (if let Some(i) = trimmed.find('#') { &trimmed[..i] } else { trimmed }).trim_end();
         if code.is_empty() { continue; }
+        // Depth-track all bracket kinds so a statement may span lines whenever a
+        // {…}, (…) or […] is still open (mathlang has no string literals, so no
+        // quoting to escape). A line that closes everything ends the statement.
         for ch in code.chars() {
-            if ch == '{' { depth += 1; }
-            else if ch == '}' { depth -= 1; }
+            match ch {
+                '{' | '(' | '[' => depth += 1,
+                '}' | ')' | ']' => depth -= 1,
+                _ => {}
+            }
         }
         if buf.is_empty() { buf.push_str(code); } else { buf.push(' '); buf.push_str(code); }
         if depth <= 0 { stmts.push(std::mem::take(&mut buf)); depth = 0; }
@@ -948,7 +954,7 @@ fn ns_builtin_desc(ns: &str) -> Option<&'static str> {
         "ops"     => Some("spatial PDE operators (grad div curl lap poisson specgrad); field-aware"),
         "solver"  => Some("ODE time integrators: rk4(f,y0,t0,t1,n)  odeint(f,y0,ts)  verlet(dVdq,dTdp,q0,p0,dt,n)  tao(dHdq,dHdp,q0,p0,dt,n[,omega])  cfl(V,dx,dt)"),
         "forms"   => Some("exterior calculus over fields: d hodge wedge raise lower codiff laplace contract\n  field(data,lo,hi,bc[,metric])  field(f,lo,hi,counts,bc[,metric])  form(data,deg,…)  vector(data,…)"),
-        "pic"     => Some("particle-in-cell coupling: scatter(positions,weights,template[,kernel]) deposit→grid (ρ,J)\n  gather(field,positions[,kernel]) interpolate→particles  kernels: pic.ngp pic.cic pic.tsc"),
+        "pic"     => Some("particle-in-cell coupling: scatter(positions,weights,template[,kernel]) deposit→grid (ρ,J)\n  gather(field,positions[,kernel]) interpolate→particles\n  gathergrad(field,positions[,kernel]) gather a scalar field with the kernel gradient (exact variational force)\n  kernels: pic.ngp pic.cic pic.tsc"),
         "special" => Some("special functions: sinc sech csch  erf erfc  j0 j1 jinc  gaussian gaussian_cdf  delta"),
         "bits"    => Some("true bitwise ops (truncate to i64): and or xor nand nor xnor shl shr not\n  Note: operators & | ~ are LOGICAL (return 0/1); bits.and/or are bitwise"),
         "stats"   => Some("statistics beyond mean/std: median(t)  mode(t)  var(t)"),

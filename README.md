@@ -1075,6 +1075,7 @@ solve:
 ```
 > pic.scatter(positions, weights, template [, kernel])   # particles → grid
 > pic.gather(field, positions [, kernel])                # grid → particles
+> pic.gathergrad(field, positions [, kernel])            # grid → particles (∇ of the kernel)
 ```
 
 * **`scatter`** (deposition) spreads each particle's weight onto the grid through
@@ -1086,6 +1087,15 @@ solve:
 * **`gather`** (interpolation) samples a field at the particle positions:
   `E(x_i) = Σ_g E_g S(x_g − x_i)`, returning `[P]` for a scalar field or
   `[P, ncomp]` for a vector field (the force per particle).
+* **`gathergrad`** samples a *scalar* field with the **gradient of the shape
+  function**: `∂/∂x_i Σ_g f_g S(x_g − x_i) = Σ_g f_g ∇S(x_g − x_i)`, returning
+  `[P, ndim]`. Unlike `gather(ops.grad(f))` (which finite-differences the field
+  then interpolates), it differentiates the kernel itself, so it is the exact
+  transpose of `scatter`'s position-derivative. That makes it the **variational
+  force** for any energy that is a function of the deposited field: for
+  `V = Σ_g v(ρ_g)` with `ρ = scatter(x, m)`, the per-particle force is
+  `−m·dA·gathergrad(v′(ρ))`, and `solver.verlet` then conserves `H` exactly (no
+  grid-scale numerical heating) — the discrete "grad-h" consistency of SPH.
 
 `positions` is a `[P, n]` tensor (or `[P]` on a 1-D grid); kernels are
 `pic.ngp` (nearest-grid-point), `pic.cic` (cloud-in-cell / linear, the default),
@@ -1121,6 +1131,14 @@ canonical Hamiltonian (`(p − qA)²` mixes particle momentum with the field
 coordinate `A`), advanced as a single phase space by **`solver.tao`**. It's the
 example the whole symplectic-integrator thread builds toward: `pic_plasma.math` is
 *separable* and uses Verlet, this one is *non-separable* and needs Tao.
+
+`examples/gravity_gas.math` applies the same machinery to a **self-gravitating gas
+with pressure**: scatter *mass* → ρ, solve gravity (`∇²φ = 4πGρ`) plus a barotropic
+pressure (a γ=2 polytrope's enthalpy `h ∝ ρ`) into one potential `ψ`, then push
+with the variational `pic.gathergrad(ψ)` force. Being a separable `H = T(p) + V(q)`,
+it leapfrogs with **`solver.verlet`** and conserves energy to a fraction of a
+percent while a ring of co-rotating blobs collapses, shears into spiral arms, and
+merges into a pulsing core. Press **C** in the viewer for the `galaxy` colormap.
 
 ---
 

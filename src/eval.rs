@@ -685,6 +685,7 @@ pub fn builtin_sig(name: &str) -> Option<&'static str> {
         // pic namespace
         "scatter"  => Some("pic.scatter(positions, weights, template: field [, kernel]) -> field  (deposit particles → grid: ρ, J)"),
         "gather"   => Some("pic.gather(field, positions [, kernel]) -> tensor  (interpolate grid → particles; transpose of scatter)"),
+        "gathergrad" => Some("pic.gathergrad(field, positions [, kernel]) -> tensor[P,ndim]  (gather a scalar field with the gradient of the shape function; exact variational force for energies of the deposited field)"),
         _ => None,
     }
 }

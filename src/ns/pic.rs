@@ -19,7 +19,7 @@ use crate::eval::{Val, TData, FieldVal, BC, fmt_val};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub const NAMES: &[&str] = &["scatter", "gather"];
+pub const NAMES: &[&str] = &["scatter", "gather", "gathergrad"];
 
 pub fn members() -> HashMap<String, Val> {
     let mut m: HashMap<String, Val> =
@@ -33,8 +33,9 @@ pub fn members() -> HashMap<String, Val> {
 
 pub fn dispatch(name: &str, vals: Vec<Val>, _env: &crate::eval::Env) -> Result<Val, String> {
     match name {
-        "scatter" => scatter(vals),
-        "gather"  => gather(vals),
+        "scatter"    => scatter(vals),
+        "gather"     => gather(vals),
+        "gathergrad" => gathergrad(vals),
         _ => Err(format!("pic: unknown member '{name}'")),
     }
 }
@@ -171,6 +172,69 @@ fn node_stencil(f: &FieldVal, pos: &[f64], stride: &[usize], order: usize) -> Ve
     acc
 }
 
+/// Like `axis_stencil`, but also returns d(weight)/du for each node — the
+/// derivative of the 1-D shape function w.r.t. the (dimensionless) particle
+/// coordinate u. Used to assemble the gradient of the interpolation kernel.
+fn axis_stencil_d(u: f64, dim: usize, bc: BC, order: usize) -> Vec<(usize, f64, f64)> {
+    // Raw (integer node, weight, dweight/du) before the boundary map.
+    let raw: Vec<(i64, f64, f64)> = match order {
+        0 => vec![(u.round() as i64, 1.0, 0.0)], // NGP: piecewise-constant, derivative 0
+        1 => {
+            let fl = u.floor();
+            let f = u - fl;
+            let i = fl as i64;
+            vec![(i, 1.0 - f, -1.0), (i + 1, f, 1.0)]
+        }
+        _ => {
+            let i0 = u.round() as i64;
+            let d = u - i0 as f64; // ∈ [-0.5, 0.5]
+            vec![
+                (i0 - 1, 0.5 * (0.5 - d) * (0.5 - d), d - 0.5),
+                (i0,     0.75 - d * d,                -2.0 * d),
+                (i0 + 1, 0.5 * (0.5 + d) * (0.5 + d), 0.5 + d),
+            ]
+        }
+    };
+    let dim_i = dim as i64;
+    raw.into_iter()
+        .map(|(i, w, dw)| {
+            let node = match bc {
+                BC::Periodic => i.rem_euclid(dim_i) as usize,
+                BC::Neumann  => i.clamp(0, dim_i - 1) as usize,
+            };
+            (node, w, dw)
+        })
+        .collect()
+}
+
+/// n-D gradient stencil at a particle position: for each contributing grid node,
+/// the gradient (w.r.t. the particle's position) of the tensor-product shape
+/// function, ∂S/∂x along each axis. Built by the product rule — axis b uses the
+/// per-axis derivative (scaled by 1/spacing), the other axes use the plain weight.
+fn node_stencil_grad(f: &FieldVal, pos: &[f64], stride: &[usize], order: usize) -> Vec<(usize, Vec<f64>)> {
+    let n = f.grid.len();
+    let mut acc: Vec<(usize, f64, Vec<f64>)> = vec![(0usize, 1.0, vec![0.0; n])];
+    for a in 0..n {
+        let u = (pos[a] - f.lo[a]) / f.spacing[a];
+        let ax = axis_stencil_d(u, f.grid[a], f.bc[a], order);
+        let inv_dx = 1.0 / f.spacing[a];
+        let mut next = Vec::with_capacity(acc.len() * ax.len());
+        for (fi, fv, fg) in &acc {
+            for &(node, w, dw) in &ax {
+                let new_node = fi + node * stride[a];
+                let new_val = fv * w;
+                let mut new_grad = vec![0.0; n];
+                for k in 0..n {
+                    new_grad[k] = if k == a { fv * dw * inv_dx } else { fg[k] * w };
+                }
+                next.push((new_node, new_val, new_grad));
+            }
+        }
+        acc = next;
+    }
+    acc.into_iter().map(|(node, _v, g)| (node, g)).collect()
+}
+
 // ── operations ─────────────────────────────────────────────────────────────
 
 // scatter(positions, weights, template [, kernel]) — deposit weighted particles
@@ -230,5 +294,41 @@ fn gather(vals: Vec<Val>) -> Result<Val, String> {
         }
     }
     let shape = if ncomp == 1 { vec![p] } else { vec![p, ncomp] };
+    Ok(Val::Tensor { data: TData::new(out), shape })
+}
+
+// gathergrad(field, positions [, kernel]) — gather a SCALAR field at the particle
+// positions using the GRADIENT of the shape function, returning ∂/∂x_i of the
+// interpolated value: [P, ndim] (or [P] in 1-D). Unlike gather(ops.grad(field)),
+// which finite-differences the field then interpolates, this differentiates the
+// kernel itself, so it is the EXACT transpose of scatter's position-derivative.
+// That makes it the variational force for an energy that is a function of the
+// deposited field: for V = Σ_g g(ρ_g) with ρ = scatter(x, m), the per-particle
+// force is −m·dA·gathergrad(g'(ρ)) and Verlet conserves H exactly (no grid-scale
+// heating). The workhorse for self-gravitating / barotropic particle-mesh gases.
+fn gathergrad(vals: Vec<Val>) -> Result<Val, String> {
+    if vals.len() < 2 || vals.len() > 3 {
+        return Err("pic.gathergrad(field, positions [, kernel]) expects 2 or 3 args".into());
+    }
+    let order = kernel_order(vals.get(2), "pic.gathergrad")?;
+    let mut it = vals.into_iter();
+    let field = as_field(it.next().unwrap(), "pic.gathergrad")?;
+    let positions = it.next().unwrap();
+    if field.ncomp() != 1 {
+        return Err("pic.gathergrad: field must be scalar (a 0-form)".into());
+    }
+    let n = field.grid.len();
+    let (p, pos) = parse_positions(&positions, n, "pic.gathergrad")?;
+    let stride = strides(&field.grid);
+    let mut out = vec![0.0; p * n];
+    for pi in 0..p {
+        let st = node_stencil_grad(&field, &pos[pi * n..pi * n + n], &stride, order);
+        for (node, g) in st {
+            for b in 0..n {
+                out[pi * n + b] += g[b] * field.data[node];
+            }
+        }
+    }
+    let shape = if n == 1 { vec![p] } else { vec![p, n] };
     Ok(Val::Tensor { data: TData::new(out), shape })
 }

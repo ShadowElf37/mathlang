@@ -1160,6 +1160,16 @@ _file_check() {
 }
 
 _file_check "file.bang.version"   "!version"                           "mathlang v"
+# paren-aware statement splitter: a statement may span lines whenever a (…) or […]
+# is still open (not only {…}). A multi-line tensor constructor must import intact.
+_file_check "file.multiline.paren" "X = tensor((p,c) -> if(c == 0,
+                                          10*p,
+                                          20*p), 3, 2)
+!defs"                                                                  "X"
+_msl=$(mktemp /tmp/mlt_msl_XXXXXX.math)
+printf 'A = tensor((p,c) -> if(c == 0,\n    p,\n    p+1), 4, 2)\n' > "$_msl"
+run_lib "file.multiline.paren.val" "$_msl" "shape(A)" "[4, 2]"
+rm -f "$_msl"
 _file_check "file.bang.defs"      "x = 99
 !defs"                                                                  "x"
 
@@ -1519,6 +1529,17 @@ run "pic.adjoint"      "f=field(x->sin(x), 0, 6, 12, forms.periodic); X=[1.3,3.7
 # Vector-field gather returns one row per particle: shape [P, ncomp].
 run "pic.gather.vec"   "shape(pic.gather(forms.vector(tensor((i,j,c)->i+j+c, 3,3,2), (0,0),(2,2),forms.periodic), [0.5,0.5]))" "[1, 2]"
 run_err "pic.scatter.arity" "pic.scatter([2.5], [1.0])"
+# gathergrad: gather a scalar field with the GRADIENT of the shape function. For a
+# linear field f = x, CIC reproduces the exact gradient (1) at any point.
+run "pic.gathergrad.linear" "pic.gathergrad(field(x -> x, 0, 4, 5, forms.neumann), [2.5])" "[1]"
+# It is the true position-gradient of gather: matches a central difference of gather.
+run "pic.gathergrad.fd" "f=field((x,y)->sin(x)*cos(y), 0, 2*pi, (32,32), forms.periodic); mk=(a,b)->tensor((p,c)->if(c==0,a,b),1,2); h=1e-4; g=pic.gathergrad(f,mk(1.3,0.7)); gx=(pic.gather(f,mk(1.3+h,0.7))-pic.gather(f,mk(1.3-h,0.7)))/(2*h); abs(g[0,0]-gx[0]) < 1e-4" "1"
+# Vector output: one gradient row per particle, shape [P, ndim].
+run "pic.gathergrad.shape" "shape(pic.gathergrad(field((x,y)->x*y, 0, 4, (5,5), forms.neumann), tensor((p,c)->if(c==0,1.5,2.5),2,2)))" "[2, 2]"
+# Variational self-gravitating gas: the m·dA·gathergrad(psi) force is the EXACT
+# gradient of V, so Verlet conserves H to a fraction of a percent (cf. gravity_gas.math).
+run "pic.gathergrad.conserve" "N=32; L=2*pi; dt=0.03; P=400; m=1.0; Gg=12.0; cs2=0.05; K=pic.tsc; dA=(L/N)^2; zf=field((x,y)->0.0,0,L,(N,N),forms.periodic); mw=tensor(p->m,P); X0=tensor((p,c)->L*rand(),P,2); V0=tensor((p,c)->0.1*(rand()-0.5),P,2); dV=X->{rho=pic.scatter(X,mw,zf,K); psi=ops.poisson(Gg*rho)+cs2*rho; m*dA*pic.gathergrad(psi,X,K)}; dT=Pp->Pp/m; Hm=(X,Pp)->{rho=pic.scatter(X,mw,zf,K); 0.5*sum(tensor(Pp)^2)/m+0.5*sum(tensor(rho)*tensor(ops.poisson(Gg*rho)))*dA+0.5*cs2*sum(tensor(rho)^2)*dA}; H0=Hm(X0,m*V0); s=solver.verlet(dV,dT,X0,m*V0,dt,200); abs(Hm(s[0],s[1])-H0)/abs(H0) < 0.03" "1"
+run_err "pic.gathergrad.scalaronly" "pic.gathergrad(forms.vector(tensor((i,j,c)->i+j+c,3,3,2),(0,0),(2,2),forms.periodic), [0.5,0.5])"
 # solver.tao over a heterogeneous (tensor, field) phase space — the capability the
 # electromagnetic PIC example (examples/pic_em_tao.math) is built on. Must stay finite.
 run "solver.tao.fieldtuple" "f=field((x,y)->0.0,0,1,(4,4),forms.periodic); s=solver.tao((q,p)->p, (q,p)->q, ([1.0,0.0],f), ([0.0,1.0],f), 0.1, 5); shape(s[0][0])" "[2]"

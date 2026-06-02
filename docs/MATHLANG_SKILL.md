@@ -392,16 +392,24 @@ and interpolation halves of a PIC scheme, exact transposes of each other:
 ```
 pic.scatter(positions, weights, template [, kernel])  # particles → grid (ρ, J)
 pic.gather(field, positions [, kernel])               # grid → particles (force)
+pic.gathergrad(field, positions [, kernel])           # grid → particles via ∇(shape fn) → [P,ndim]
 # positions: [P,n] tensor (or [P] in 1-D); kernel = pic.ngp | pic.cic (default) | pic.tsc
 ```
 
 `scatter` deposits `ρ_g = Σ_i w_i S(x_g−x_i)` onto `template`'s grid (scalar
 template + scalar weights → charge ρ; vector template + `[P,n]` weights → current
 J). `gather` samples a field at the particles, returning `[P]` (scalar field) or
-`[P,ncomp]` (vector field). Same kernel ⇒ adjoint (no self-force); with the shape
-function inside one Hamiltonian the scheme is canonical, so `solver.tao` advances
-the full EM system (the field-only push, sourced by a deposited J, is separable →
-`solver.verlet`). Boundaries follow the field's bc: periodic wraps, Neumann clamps.
+`[P,ncomp]` (vector field). `gathergrad` samples a scalar field with the *gradient*
+of the shape function (`Σ_g f_g ∇S`, → `[P,ndim]`): the exact transpose of
+scatter's position-derivative, hence the variational (energy-conserving) force for
+energies `V = Σ_g v(ρ_g)` of a deposited field — `force = −m·dA·gathergrad(v′(ρ))`.
+Same kernel ⇒ adjoint (no self-force); with the shape function inside one
+Hamiltonian the scheme is canonical, so `solver.tao` advances the full EM system
+(the field-only push, sourced by a deposited J, is separable → `solver.verlet`).
+Boundaries follow the field's bc: periodic wraps, Neumann clamps. Worked examples:
+`examples/pic_plasma.math` (z-pinch, Verlet), `examples/pic_em_tao.math`
+(non-separable EM, Tao), `examples/gravity_gas.math` (self-gravitating polytropic
+gas with pressure via `gathergrad`, Verlet).
 
 **User namespaces:** `!namespace foo` at the top of an included `.math` file
 collects its public definitions into `foo`; prefix a def with `private` to keep it
