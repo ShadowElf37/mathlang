@@ -19,7 +19,10 @@ Supported inside a block:
   - construct:    tensor((i,j) -> expr, m, n)   — built on the GPU in one kernel;
                   the body may gather from captured tensors, e.g. T[i,j]
   - loops:        iterate(step, x0, n)   scan(step, x0, n)
+  - tuples:       (U, V) state for coupled fields; (A, B)[0] indexes a tuple
   - bindings:     c = A + B; c * 2   (last expression is the result)
+  - host helper:  get(cell) reads host-side cell state into the block (resolved
+                  up front, before any kernel; it is the ONLY host call allowed)
 
 [1mtensor((i,j) -> expr, m, n)[0m builds a tensor directly on the GPU from an index
 lambda — no slow per-cell CPU loop. The body may use the index params, captured
@@ -37,7 +40,11 @@ may be an inline lambda, a named function, or a unary builtin (exp).
 The state can be a TUPLE of tensors for coupled systems. A multi-argument step
 destructures it: iterate((U, V) -> (U', V'), (U0, V0), n) advances both fields
 together with a single round-trip (upload (U,V), run all n steps, download),
-instead of one trip per field per step. (scan keeps single-tensor/scalar state.)
+instead of one trip per field per step.
+
+scan likewise accepts a tuple state: a structured tuple (tensor fields) gives a
+tuple of per-field time-stacks, each [n+1, ...]; a flat numeric tuple gives a
+[n+1, arity] block — identical to the CPU scan.
 
 Precision is f32 on the GPU; results convert back to f64 on download (~7
 significant digits). Sensitive workloads (chaotic maps, long symplectic runs)

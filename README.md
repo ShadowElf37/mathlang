@@ -1408,9 +1408,11 @@ frame = _ -> {
 ```
 
 A GPU `iterate`/`scan` state can be a **tuple of tensors** for coupled systems;
-a multi-argument step `(U, V) -> (U', V')` destructures it. `get(cell)` and other
-pure host-side calls are evaluated on the CPU and lifted into the block, so the
-coupled state can live in a single cell. (`scan` keeps single-tensor state.)
+a multi-argument step `(U, V) -> (U', V')` destructures it, matching the CPU
+semantics exactly (`scan` of a structured tuple returns a tuple of per-field
+time-stacks). `get(cell)` reads host-side cell state into the block — it is
+resolved up front (before any kernel) and is the only host call allowed, so the
+coupled state can live in a single cell.
 
 Tensor/tensor operations require matching shapes (no broadcasting yet). Computation
 is performed in `f32` on the device and converted back to `f64` on download, so

@@ -1750,9 +1750,22 @@ else
     run "gpu.get.incell"     "st=cell(([1,2,3],[10,20,30])); r=GPU{iterate((u,v)->(u+v,v),get(st),2)}; r[0]" "[21, 42, 63]"
     # named multi-arg step function also works
     run "gpu.iterate.named"  "step(u,v)=(u+v,v); A=[1,1]; B=[2,2]; r=GPU{iterate(step,(A,B),2)}; r[0]" "[5, 5]"
-    # errors: arity mismatch and scan-on-tuple
+    # errors: arity mismatch
     run_err "gpu.err.steparity" "A=[1,2]; B=[3,4]; GPU{iterate((u,v,w)->(u,v,w),(A,B),1)}"
-    run_err "gpu.err.scantuple"  "A=[1,2]; B=[3,4]; GPU{scan((u,v)->(u,v),(A,B),2)}"
+
+    # ── scan with tuple state: must match CPU semantics exactly ────────────────
+    # structured tuple (tensor fields) → tuple of per-field time-stacks
+    run "gpu.scan.tuple0"    "A=[1,2]; B=[3,4]; s=GPU{scan((u,v)->(u+v,v),(A,B),2)}; s[0]" "⎡ 1  2 ⎤ ⎢ 4  6 ⎥ ⎣ 7  10 ⎦"
+    run "gpu.scan.tuple1"    "A=[1,2]; B=[3,4]; s=GPU{scan((u,v)->(u+v,v),(A,B),2)}; s[1]" "⎡ 3  4 ⎤ ⎢ 3  4 ⎥ ⎣ 3  4 ⎦"
+    # flat numeric tuple → row mode [k, arity] (matches CPU)
+    run "gpu.scan.flattuple" "GPU{scan((a,b)->(a+b,b),(1,3),2)}"  "⎡ 1  3 ⎤ ⎢ 4  3 ⎥ ⎣ 7  3 ⎦"
+    # GPU scan tuple == CPU scan tuple (parity check on the difference)
+    run "gpu.scan.parity"    "A=[1,2]; B=[3,4]; g=GPU{scan((u,v)->(u+v,u*v),(A,B),3)}; c=scan((u,v)->(u+v,u*v),(A,B),3); round(sum(abs(g[0]-c[0]))+sum(abs(g[1]-c[1])),4)" "0"
+
+    # ── host helpers restricted to get(cell); other host fns are NOT run on CPU ──
+    run "gpu.get.hoisted"    "st=cell(([1,2,3],[10,20,30])); r=GPU{iterate((u,v)->(u+v,v),get(st),2)}; r[0]" "[21, 42, 63]"
+    run_err "gpu.err.nofft"  "A=[1,2,3,4]; GPU { fft(A) }"
+    run_err "gpu.err.nosort" "A=[3,1,2]; GPU { sort(A) }"
 fi
 
 # ── print summary ─────────────────────────────────────────────────────────────

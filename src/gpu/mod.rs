@@ -81,11 +81,84 @@ fn lift_val(ctx: &GpuContext, v: &Val) -> Result<GpuVal, String> {
     }
 }
 
+/// Pre-pass over a GPU block body: resolve `get(cell)` — the one permitted host
+/// helper — on this initial walk, before any kernel runs. Each `get(...)` is
+/// evaluated once on the CPU, lifted into the block scope under a synthetic name,
+/// and its call site rewritten to reference that capture. This guarantees host
+/// state crosses the boundary up front (never mid-kernel), and that *only* `get`
+/// is dispatched to the host (any other unknown call is rejected during eval).
+fn hoist_gets(
+    e: &Expr,
+    env: &Env,
+    ctx: &GpuContext,
+    scope: &mut HashMap<String, GpuVal>,
+    counter: &mut usize,
+) -> Result<Expr, String> {
+    let rec = |x: &Expr, scope: &mut HashMap<String, GpuVal>, counter: &mut usize|
+        hoist_gets(x, env, ctx, scope, counter);
+    Ok(match e {
+        Expr::Apply(f, args) => {
+            if let Expr::Var(name) = &**f {
+                if name == "get" {
+                    // Host read of the cell, resolved now and captured.
+                    let v = crate::eval::eval(e, env)
+                        .map_err(|err| format!("GPU: get(cell): {err}"))?;
+                    let gv = lift_val(ctx, &v)?;
+                    let key = format!("__get{}", *counter);
+                    *counter += 1;
+                    scope.insert(key.clone(), gv);
+                    return Ok(Expr::Var(key));
+                }
+            }
+            let nf = rec(f, scope, counter)?;
+            let nargs = args.iter().map(|a| rec(a, scope, counter)).collect::<Result<Vec<_>, _>>()?;
+            Expr::Apply(Box::new(nf), nargs)
+        }
+        Expr::BinOp(l, op, r) =>
+            Expr::BinOp(Box::new(rec(l, scope, counter)?), op.clone(), Box::new(rec(r, scope, counter)?)),
+        Expr::Neg(x) => Expr::Neg(Box::new(rec(x, scope, counter)?)),
+        Expr::Not(x) => Expr::Not(Box::new(rec(x, scope, counter)?)),
+        Expr::Lambda(ps, ret, body) =>
+            Expr::Lambda(ps.clone(), ret.clone(), Box::new(rec(body, scope, counter)?)),
+        Expr::Tuple(xs) =>
+            Expr::Tuple(xs.iter().map(|x| rec(x, scope, counter)).collect::<Result<Vec<_>, _>>()?),
+        Expr::Array(xs) =>
+            Expr::Array(xs.iter().map(|x| rec(x, scope, counter)).collect::<Result<Vec<_>, _>>()?),
+        Expr::TensorLit(rows) => Expr::TensorLit(
+            rows.iter().map(|row| row.iter().map(|x| rec(x, scope, counter)).collect::<Result<Vec<_>, _>>())
+                .collect::<Result<Vec<_>, _>>()?),
+        Expr::Index(b, i) =>
+            Expr::Index(Box::new(rec(b, scope, counter)?), Box::new(rec(i, scope, counter)?)),
+        Expr::Member(b, m) => Expr::Member(Box::new(rec(b, scope, counter)?), m.clone()),
+        Expr::Range(l, r) =>
+            Expr::Range(Box::new(rec(l, scope, counter)?), Box::new(rec(r, scope, counter)?)),
+        Expr::Slice(a, b) => Expr::Slice(
+            a.as_ref().map(|x| rec(x, scope, counter)).transpose()?.map(Box::new),
+            b.as_ref().map(|x| rec(x, scope, counter)).transpose()?.map(Box::new)),
+        Expr::GpuBlock(b) => Expr::GpuBlock(Box::new(rec(b, scope, counter)?)),
+        Expr::Block(stmts) => {
+            let nstmts = stmts.iter().map(|s| Ok(match s {
+                BlockStmt::Expr(x) => BlockStmt::Expr(rec(x, scope, counter)?),
+                BlockStmt::Def(Def::Var(n, x)) => BlockStmt::Def(Def::Var(n.clone(), rec(x, scope, counter)?)),
+                BlockStmt::Def(Def::Func(n, ps, ret, x)) =>
+                    BlockStmt::Def(Def::Func(n.clone(), ps.clone(), ret.clone(), rec(x, scope, counter)?)),
+            })).collect::<Result<Vec<_>, String>>()?;
+            Expr::Block(nstmts)
+        }
+        leaf @ (Expr::Num(_) | Expr::ImagLit(_) | Expr::Var(_)) => leaf.clone(),
+    })
+}
+
 /// Entry point, called from the `Expr::GpuBlock` arm in `src/eval.rs`.
 pub fn run_gpu_block(body: &Expr, env: &Env) -> Result<Val, String> {
     let ctx_mutex = context()?;
     let ctx = ctx_mutex.lock().map_err(|_| "GPU context poisoned".to_string())?;
     let mut scope: HashMap<String, GpuVal> = HashMap::new();
+    // Resolve host helpers (`get(cell)`) up front on this initial walk, before
+    // any kernel runs — never mid-kernel. They become block-scope captures.
+    let mut gets = 0usize;
+    let body = hoist_gets(body, env, &ctx, &mut scope, &mut gets)?;
+    let body = &body;
     // Outer scope catches allocation errors from upload/download (e.g. a tensor
     // larger than the device's max buffer size) instead of panicking.
     ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -297,20 +370,15 @@ fn eval_apply(
             unary_val(ctx, name, v)
         }
 
-        // Fallback: a call that isn't a GPU op. If it can be evaluated on the
-        // host purely from the surrounding scope (e.g. `get(cell)`, or any other
-        // helper that produces a capturable value), do that and lift the result
-        // into the block. Calls that reference GPU-local state (loop params,
-        // block locals) can't be evaluated on the host and report that here.
-        _ => {
-            let call = Expr::Apply(Box::new(f.clone()), args.to_vec());
-            match crate::eval::eval(&call, env) {
-                Ok(v) => lift_val(ctx, &v),
-                Err(e) => Err(format!(
-                    "GPU: function `{name}` is not a GPU op, and evaluating it on the host failed: {e}"
-                )),
-            }
-        }
+        // `get(cell)` is the one permitted host helper. It is resolved up front
+        // by `hoist_gets` (before any kernel runs) and rewritten to a capture, so
+        // it should never reach here. If it does, it came from inside a *called*
+        // function body rather than directly in the block — reject it clearly
+        // rather than evaluating on the host mid-kernel.
+        "get" => Err(
+            "GPU: `get(cell)` must appear directly in the GPU block, not inside a called function".into()),
+
+        _ => Err(format!("GPU: function `{name}` is not available in a GPU block")),
     }
 }
 
@@ -1299,24 +1367,33 @@ fn gpu_scan(args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut HashMap<Stri
     }
     scope.retain(|k, _| keys_before.contains(k));
 
-    // Assemble the orbit into one host-side spacetime block. Each frame is
-    // downloaded once and concatenated along a new leading axis, giving shape
-    // [n+1, ...grid] — exactly what `!animate` wants from a single block, with no
-    // per-frame round-trip on the caller's side. We keep the result as a `Host`
-    // value so it is *not* re-uploaded just to be downloaded again at block exit.
+    stack_frames(ctx, frames)
+}
+
+/// Stack a scan orbit into host-side blocks, mirroring the CPU `stack_rows`
+/// semantics exactly:
+///   • scalar states            → [k]            (k = n+1 frames)
+///   • tensor states (shape s)  → [k, ...s]      (time as the leading axis)
+///   • a flat tuple of scalars  → [k, arity]     (each state is a row)
+///   • a *structured* tuple (any field is a tensor) → a tuple of per-field
+///     stacks, each stacked independently (coupled fields stay apart).
+/// Each frame is downloaded exactly once; the result is kept on the host so it
+/// is not re-uploaded just to be downloaded again when the block returns.
+fn stack_frames(ctx: &GpuContext, frames: Vec<GpuVal>) -> Result<GpuVal, String> {
+    let k = frames.len();
     match &frames[0] {
         GpuVal::Scalar(_) => {
             let data: Vec<f32> = frames.iter().map(|f| match f {
                 GpuVal::Scalar(s) => Ok(*s as f32),
-                _ => Err("GPU: scan states must all be scalars or all tensors".to_string()),
+                _ => Err("GPU: scan states must all be scalars".to_string()),
             }).collect::<Result<_, _>>()?;
             let len = data.len();
-            Ok(GpuVal::Host { data: Rc::new(data), shape: vec![n + 1], len })
+            Ok(GpuVal::Host { data: Rc::new(data), shape: vec![len], len })
         }
         GpuVal::Buffer { shape, len, .. } => {
             let d = *len;
             let frame_shape = shape.clone();
-            let mut data: Vec<f32> = Vec::with_capacity((n + 1) * d);
+            let mut data: Vec<f32> = Vec::with_capacity(k * d);
             for f in &frames {
                 match f {
                     GpuVal::Buffer { buf, len: l, .. } if *l == d => data.extend(download(ctx, buf, d)?),
@@ -1324,14 +1401,49 @@ fn gpu_scan(args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut HashMap<Stri
                 }
             }
             let mut out_shape = Vec::with_capacity(frame_shape.len() + 1);
-            out_shape.push(n + 1);
+            out_shape.push(k);
             out_shape.extend(frame_shape);
             let total = data.len();
             Ok(GpuVal::Host { data: Rc::new(data), shape: out_shape, len: total })
         }
+        GpuVal::Tuple(first) => {
+            let arity = first.len();
+            // Flat numeric tuple (all scalars) → row mode: state i is a row of
+            // width `arity`, giving [k, arity] (matches CPU's vector mode).
+            if first.iter().all(|x| matches!(x, GpuVal::Scalar(_))) {
+                let mut data: Vec<f32> = Vec::with_capacity(k * arity);
+                for f in &frames {
+                    match f {
+                        GpuVal::Tuple(items) if items.len() == arity => {
+                            for it in items {
+                                match it {
+                                    GpuVal::Scalar(s) => data.push(*s as f32),
+                                    _ => return Err("GPU: scan states must all be same-arity scalar tuples".into()),
+                                }
+                            }
+                        }
+                        _ => return Err(format!("GPU: scan structured states must all be {arity}-tuples")),
+                    }
+                }
+                let total = data.len();
+                return Ok(GpuVal::Host { data: Rc::new(data), shape: vec![k, arity], len: total });
+            }
+            // Structured tuple (some field is a tensor) → stack each field apart.
+            let mut columns: Vec<Vec<GpuVal>> = (0..arity).map(|_| Vec::with_capacity(k)).collect();
+            for f in frames {
+                match f {
+                    GpuVal::Tuple(items) if items.len() == arity => {
+                        for (j, it) in items.into_iter().enumerate() { columns[j].push(it); }
+                    }
+                    _ => return Err(format!("GPU: scan structured states must all be {arity}-tuples")),
+                }
+            }
+            let fields = columns.into_iter()
+                .map(|c| stack_frames(ctx, c))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(GpuVal::Tuple(fields))
+        }
         GpuVal::Host { .. } => Err("GPU: scan produced a host value (internal error)".into()),
-        GpuVal::Tuple(_) => Err(
-            "GPU: scan does not support tuple state yet (use iterate for coupled fields)".into()),
     }
 }
 
