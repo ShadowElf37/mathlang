@@ -1309,8 +1309,8 @@ Currently supported inside a block:
 
 `iterate` and `scan` keep state on the GPU across all `n` steps — the loop body
 runs on the device with no per-step upload/download — which is what makes GPU
-time-stepping actually faster than the CPU. The step may be an inline lambda or a
-named one-argument function:
+time-stepping actually faster than the CPU. The step may be an inline lambda, a
+named one-argument function, or a unary builtin (e.g. `exp`):
 
 ```
 > GPU { iterate(x -> 2*x, 1, 10) }                      # scalar recurrence

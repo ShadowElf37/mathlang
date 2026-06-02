@@ -19,7 +19,7 @@ Supported inside a block:
 
 [1miterate / scan (residency)[0m keep state on the GPU across all n steps,
 so PDE/time-stepping stays on the device with no per-step round-trip. The step
-may be an inline lambda or a named function of one argument.
+may be an inline lambda, a named one-argument function, or a unary builtin (exp).
 
 Precision is f32 on the GPU; results convert back to f64 on download (~7
 significant digits). Sensitive workloads (chaotic maps, long symplectic runs)

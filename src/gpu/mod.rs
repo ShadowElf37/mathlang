@@ -471,27 +471,57 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,\n\
 
 // ───────────────────────── iterate / scan (residency) ─────────────────────────
 
-/// Resolve a step function (named CPU fn or inline lambda) to its single
-/// parameter name and body expression.
-fn resolve_step<'a>(f: &'a Expr, env: &'a Env) -> Result<(String, Expr), String> {
+/// A resolved iterate/scan step function.
+enum Step {
+    /// Inline lambda or named user function: bind `param`, evaluate `body`.
+    Body { param: String, body: Expr },
+    /// A builtin applied each step (e.g. `exp`, `sin`).
+    Builtin(String),
+}
+
+/// Resolve a step function (named CPU fn, inline lambda, or builtin) for a loop.
+fn resolve_step(f: &Expr, env: &Env) -> Result<Step, String> {
     match f {
         Expr::Lambda(params, _, body) => {
             if params.len() != 1 {
                 return Err(format!("GPU: step function must take 1 argument, got {}", params.len()));
             }
-            Ok((params[0].name.clone(), (**body).clone()))
+            Ok(Step::Body { param: params[0].name.clone(), body: (**body).clone() })
         }
         Expr::Var(name) => match env.vars.get(name) {
             Some(Val::Fn(params, body, _, _, _)) => {
                 if params.len() != 1 {
                     return Err(format!("GPU: step function `{name}` must take 1 argument, got {}", params.len()));
                 }
-                Ok((params[0].clone(), body.clone()))
+                Ok(Step::Body { param: params[0].clone(), body: body.clone() })
+            }
+            Some(Val::Builtin(b)) => {
+                if unary_wgsl(b, "x").is_none() {
+                    return Err(format!("GPU: builtin `{b}` is not supported as an iterate/scan step"));
+                }
+                Ok(Step::Builtin(b.clone()))
             }
             Some(other) => Err(format!("GPU: `{name}` is not a function ({})", fmt_val(other))),
             None => Err(format!("GPU: undefined step function `{name}`")),
         },
         _ => Err("GPU: iterate/scan step must be a function or lambda".into()),
+    }
+}
+
+/// Apply one step of the loop to `state`, producing the next state.
+fn apply_step(
+    step: &Step,
+    state: GpuVal,
+    env: &Env,
+    ctx: &GpuContext,
+    scope: &mut HashMap<String, GpuVal>,
+) -> Result<GpuVal, String> {
+    match step {
+        Step::Body { param, body } => {
+            scope.insert(param.clone(), state);
+            eval_gpu(body, env, ctx, scope)
+        }
+        Step::Builtin(name) => unary_val(ctx, name, state),
     }
 }
 
@@ -507,14 +537,13 @@ fn eval_count(arg: &Expr, env: &Env, ctx: &GpuContext, scope: &mut HashMap<Strin
 /// `iterate(step, x0, n)` — apply `step` n times, keeping state GPU-resident.
 fn gpu_iterate(args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut HashMap<String, GpuVal>) -> Result<GpuVal, String> {
     if args.len() != 3 { return Err("iterate(f, x0, n) expects 3 args".into()); }
-    let (param, body) = resolve_step(&args[0], env)?;
+    let step = resolve_step(&args[0], env)?;
     let mut state = eval_gpu(&args[1], env, ctx, scope)?;
     let n = eval_count(&args[2], env, ctx, scope)?;
 
     let keys_before: Vec<String> = scope.keys().cloned().collect();
     for _ in 0..n {
-        scope.insert(param.clone(), state);
-        state = eval_gpu(&body, env, ctx, scope)?;
+        state = apply_step(&step, state, env, ctx, scope)?;
     }
     scope.retain(|k, _| keys_before.contains(k));
     Ok(state)
@@ -524,7 +553,7 @@ fn gpu_iterate(args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut HashMap<S
 /// Scalar states → a 1-D tensor [n+1]; 1-D vector states (length d) → [n+1, d].
 fn gpu_scan(args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut HashMap<String, GpuVal>) -> Result<GpuVal, String> {
     if args.len() != 3 { return Err("scan(f, x0, n) expects 3 args".into()); }
-    let (param, body) = resolve_step(&args[0], env)?;
+    let step = resolve_step(&args[0], env)?;
     let x0 = eval_gpu(&args[1], env, ctx, scope)?;
     let n = eval_count(&args[2], env, ctx, scope)?;
 
@@ -533,8 +562,7 @@ fn gpu_scan(args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut HashMap<Stri
     let mut state = x0;
     let keys_before: Vec<String> = scope.keys().cloned().collect();
     for _ in 0..n {
-        scope.insert(param.clone(), state);
-        state = eval_gpu(&body, env, ctx, scope)?;
+        state = apply_step(&step, state, env, ctx, scope)?;
         frames.push(state.clone());
     }
     scope.retain(|k, _| keys_before.contains(k));

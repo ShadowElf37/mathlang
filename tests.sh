@@ -1674,6 +1674,8 @@ else
     run "gpu.iterate.tensor" "u=[1,2,3,4]; GPU { iterate(u -> u*0.5, u, 3) }" "[0.125, 0.25, 0.375, 0.5]"
     run "gpu.iterate.const"  "u=[1,1,1]; c=[10,20,30]; GPU { iterate(u -> u+c, u, 5) }" "[51, 101, 151]"
     run "gpu.iterate.named"  "u=[1,2,3]; step(u)=u*u; GPU { iterate(step, u, 2) }" "[1, 16, 81]"
+    run "gpu.iterate.builtin" "GPU { iterate(sqrt, [16,81], 2) }"             "[2, 3]"
+    run_err "gpu.iterate.builtin.bad" "GPU { iterate(sum, [1,2], 3) }"
     run "gpu.iterate.zero"   "u=[7,8]; GPU { iterate(u -> u*2, u, 0) }"       "[7, 8]"
     run "gpu.scan.scalar"    "GPU { scan(x -> 2*x, 1, 4) }"                   "[1, 2, 4, 8, 16]"
     run "gpu.scan.vector"    "u=[1,1]; GPU { scan(u -> u*2, u, 3) }"          "⎡ 1  1 ⎤ ⎢ 2  2 ⎥ ⎢ 4  4 ⎥ ⎣ 8  8 ⎦"
