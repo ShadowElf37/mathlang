@@ -1632,6 +1632,8 @@ else
     run "gpu.tensor.neg"     "A=[1,2,3]; GPU { -A }"                          "[-1, -2, -3]"
     run "gpu.intermediate"   "A=[1,2,3]; B=[1,1,1]; GPU { c = A + B; c * 2 }" "[4, 6, 8]"
     run "gpu.matrix.add"     "A=[1,2;3,4]; B=[10,20;30,40]; GPU { A + B }"    "⎡ 11  22 ⎤ ⎣ 33  44 ⎦"
+    # >16.78M elements forces a 2-D dispatch grid (single dim caps at 65535 groups).
+    run "gpu.large.grid"     "T=ones(4096,4096); X=GPU { T + T }; (X[0,0], X[4095,4095], sum(X))" "[2, 2, 33554432]"
     run_err "gpu.err.shape"  "A=[1,2,3]; B=[1,2]; GPU { A + B }"
     run_err "gpu.err.undef"  "GPU { nope + 1 }"
     run_err "gpu.err.fn"     "f = x -> x; GPU { f + 1 }"

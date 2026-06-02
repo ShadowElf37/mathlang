@@ -38,8 +38,14 @@ pub fn run_gpu_block(body: &Expr, env: &Env) -> Result<Val, String> {
     let ctx_mutex = context()?;
     let ctx = ctx_mutex.lock().map_err(|_| "GPU context poisoned".to_string())?;
     let mut scope: HashMap<String, GpuVal> = HashMap::new();
-    let result = eval_gpu(body, env, &ctx, &mut scope)?;
-    to_val(&ctx, &result)
+    // Outer scope catches allocation errors from upload/download (e.g. a tensor
+    // larger than the device's max buffer size) instead of panicking.
+    ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let result = eval_gpu(body, env, &ctx, &mut scope).and_then(|v| to_val(&ctx, &v));
+    if let Some(err) = pollster::block_on(ctx.device.pop_error_scope()) {
+        return Err(format!("GPU: {err}"));
+    }
+    result
 }
 
 /// Recursively evaluate an expression on the GPU.
@@ -233,14 +239,18 @@ fn run_map(
     }
     let out_binding = n_in;
     let param_binding = n_in + 1;
+    // Spread work across a 2-D workgroup grid: a single dispatch dimension is
+    // capped at 65535 groups, which a large tensor (e.g. 500³) blows past. The
+    // shader recovers the linear index from a 2-D global id using `row` (the
+    // number of threads per grid row = groups_x * workgroup_size).
     let src = format!(
         "{decls}\
 @group(0) @binding({out_binding}) var<storage, read_write> out: array<f32>;\n\
-struct Params {{ len: u32 }};\n\
+struct Params {{ len: u32, row: u32 }};\n\
 @group(0) @binding({param_binding}) var<uniform> params: Params;\n\
 @compute @workgroup_size(256)\n\
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{\n\
-    let i = gid.x;\n\
+    let i = gid.y * params.row + gid.x;\n\
     if (i >= params.len) {{ return; }}\n\
     out[i] = {expr};\n\
 }}\n"
@@ -260,10 +270,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{\n\
         cache: None,
     });
 
-    // Params uniform.
+    // Dispatch grid: keep each dimension within the 65535 cap.
+    const WG: u32 = 256;
+    const MAX_DIM: u32 = 65535;
+    let needed = (len as u32).div_ceil(WG).max(1);
+    let groups_x = needed.min(MAX_DIM);
+    let groups_y = needed.div_ceil(groups_x).max(1);
+    let row = groups_x * WG;
+
+    // Params uniform (padded to 16 bytes for uniform-buffer alignment).
     let params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("gpu-params"),
-        contents: bytemuck::cast_slice(&[len as u32]),
+        contents: bytemuck::cast_slice(&[len as u32, row, 0u32, 0u32]),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
 
@@ -290,6 +308,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{\n\
         entries: &entries,
     });
 
+    // Capture validation/OOM errors as a Result instead of letting wgpu's
+    // default handler panic the whole process.
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("gpu-encoder"),
     });
@@ -300,10 +322,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{\n\
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let groups = (len as u32).div_ceil(256).max(1);
-        pass.dispatch_workgroups(groups, 1, 1);
+        pass.dispatch_workgroups(groups_x, groups_y, 1);
     }
     ctx.queue.submit(Some(encoder.finish()));
+
+    if let Some(err) = pollster::block_on(device.pop_error_scope()) {
+        return Err(format!("GPU: {err}"));
+    }
 
     Ok(Rc::new(out))
 }
