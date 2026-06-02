@@ -757,23 +757,56 @@ fn fmt_complex_elem(r: f64, i: f64) -> String {
     }
 }
 
+// ── Large-tensor display elision (numpy-style) ──────────────────────────────────
+// Tensors with more than ELIDE_TOTAL elements are summarized: any axis longer than
+// 2*ELIDE_EDGE is shown as its first and last ELIDE_EDGE entries with a `…` gap.
+const ELIDE_EDGE: usize = 3;
+const ELIDE_TOTAL: usize = 200;
+
+/// Indices to display along an axis of length `n`. `None` marks the elision gap.
+fn axis_indices(n: usize, elide: bool) -> Vec<Option<usize>> {
+    if !elide || n <= 2 * ELIDE_EDGE {
+        (0..n).map(Some).collect()
+    } else {
+        let mut v: Vec<Option<usize>> = (0..ELIDE_EDGE).map(Some).collect();
+        v.push(None);
+        v.extend((n - ELIDE_EDGE..n).map(Some));
+        v
+    }
+}
+
 /// Box-character display for a 2D slice of data with given rows × cols.
-fn fmt_mat(data: &[f64], r: usize, c: usize) -> String {
-    let cells: Vec<Vec<String>> = (0..r).map(|i| {
-        (0..c).map(|j| fmt_f(data[i * c + j])).collect()
+/// When `elide`, long rows/columns are summarized with `…`/`⋮`.
+fn fmt_mat_e(data: &[f64], r: usize, c: usize, elide: bool) -> String {
+    let rows = axis_indices(r, elide);
+    let cols = axis_indices(c, elide);
+    // Build the display cells (gaps become ellipsis glyphs).
+    let cells: Vec<Vec<String>> = rows.iter().map(|ri| {
+        cols.iter().map(|cj| match (ri, cj) {
+            (Some(i), Some(j)) => fmt_f(data[i * c + j]),
+            (None, _)          => "\u{22EE}".into(), // ⋮ (row gap)
+            (_, None)          => "\u{2026}".into(), // … (col gap)
+        }).collect()
     }).collect();
-    let col_widths: Vec<usize> = (0..c).map(|j| {
-        cells.iter().map(|row| row[j].len()).max().unwrap_or(0)
+    let ncols = cols.len();
+    let col_widths: Vec<usize> = (0..ncols).map(|j| {
+        cells.iter().map(|row| row[j].chars().count()).max().unwrap_or(0)
     }).collect();
+    let nrows = cells.len();
     cells.into_iter().enumerate().map(|(ri, row)| {
         let padded: Vec<String> = row.into_iter().zip(&col_widths)
-            .map(|(s, &w)| format!("{:>w$}", s))
+            .map(|(s, &w)| { let pad = w.saturating_sub(s.chars().count()); format!("{}{}", " ".repeat(pad), s) })
             .collect();
         let content = padded.join("  ");
-        if r == 1 || ri == 0   { format!("\u{23A1} {} \u{23A4}", content) }  // ⎡ ⎤
-        else if ri == r - 1    { format!("\u{23A3} {} \u{23A6}", content) }  // ⎣ ⎦
-        else                   { format!("\u{23A2} {} \u{23A5}", content) }  // ⎢ ⎥
+        if nrows == 1 || ri == 0   { format!("\u{23A1} {} \u{23A4}", content) }  // ⎡ ⎤
+        else if ri == nrows - 1    { format!("\u{23A3} {} \u{23A6}", content) }  // ⎣ ⎦
+        else                       { format!("\u{23A2} {} \u{23A5}", content) }  // ⎢ ⎥
     }).collect::<Vec<_>>().join("\n")
+}
+
+/// Box-character display for a 2D slice of data with given rows × cols.
+fn fmt_mat(data: &[f64], r: usize, c: usize) -> String {
+    fmt_mat_e(data, r, c, false)
 }
 
 pub fn fmt_val(v: &Val) -> String {
@@ -843,44 +876,58 @@ pub fn fmt_val(v: &Val) -> String {
         }
         Val::Tensor { data, shape } => {
             if shape.is_empty() || data.is_empty() { return "[]".into(); }
+            let elide = data.len() > ELIDE_TOTAL;
             if shape.len() == 1 {
-                let items: Vec<String> = data.iter().map(|x| fmt_f(*x)).collect();
+                let items: Vec<String> = axis_indices(shape[0], elide).iter()
+                    .map(|o| match o { Some(i) => fmt_f(data[*i]), None => "\u{2026}".into() })
+                    .collect();
                 return format!("[{}]", items.join(", "));
             }
             if shape.len() == 2 {
-                return fmt_mat(data, shape[0], shape[1]);
+                return fmt_mat_e(data, shape[0], shape[1], elide);
             }
             if shape.len() == 3 {
                 let (d0, d1, d2) = (shape[0], shape[1], shape[2]);
                 let slice_size = d1 * d2;
-                return (0..d0).map(|k| {
-                    let slice = &data[k*slice_size..(k+1)*slice_size];
-                    format!("[{k}]\n{}", fmt_mat(slice, d1, d2))
+                return axis_indices(d0, elide).iter().map(|o| match o {
+                    Some(k) => format!("[{k}]\n{}", fmt_mat_e(&data[k*slice_size..(k+1)*slice_size], d1, d2, elide)),
+                    None    => "  \u{22EE}".into(),
                 }).collect::<Vec<_>>().join("\n");
             }
             format!("<tensor shape={:?}>", shape)
         }
         Val::ComplexTensor { re, im, shape } => {
             if shape.is_empty() || re.is_empty() { return "[]".into(); }
+            let elide = re.len() > ELIDE_TOTAL;
             // Helper: matrix-style display using complex element strings.
             let fmt_cmat = |re: &[f64], im: &[f64], r: usize, c: usize| -> String {
-                let cells: Vec<Vec<String>> = (0..r).map(|i| {
-                    (0..c).map(|j| fmt_complex_elem(re[i*c+j], im[i*c+j])).collect()
+                let rows = axis_indices(r, elide);
+                let cols = axis_indices(c, elide);
+                let cells: Vec<Vec<String>> = rows.iter().map(|ri| {
+                    cols.iter().map(|cj| match (ri, cj) {
+                        (Some(i), Some(j)) => fmt_complex_elem(re[i*c+j], im[i*c+j]),
+                        (None, _)          => "\u{22EE}".into(),
+                        (_, None)          => "\u{2026}".into(),
+                    }).collect()
                 }).collect();
-                let col_widths: Vec<usize> = (0..c).map(|j| {
-                    cells.iter().map(|row| row[j].len()).max().unwrap_or(0)
+                let ncols = cols.len();
+                let col_widths: Vec<usize> = (0..ncols).map(|j| {
+                    cells.iter().map(|row| row[j].chars().count()).max().unwrap_or(0)
                 }).collect();
+                let nrows = cells.len();
                 cells.into_iter().enumerate().map(|(ri, row)| {
                     let padded: Vec<String> = row.into_iter().zip(&col_widths)
-                        .map(|(s, &w)| format!("{:>w$}", s)).collect();
+                        .map(|(s, &w)| { let pad = w.saturating_sub(s.chars().count()); format!("{}{}", " ".repeat(pad), s) }).collect();
                     let content = padded.join("  ");
-                    if r == 1 || ri == 0 { format!("\u{23A1} {} \u{23A4}", content) }
-                    else if ri == r - 1  { format!("\u{23A3} {} \u{23A6}", content) }
-                    else                 { format!("\u{23A2} {} \u{23A5}", content) }
+                    if nrows == 1 || ri == 0 { format!("\u{23A1} {} \u{23A4}", content) }
+                    else if ri == nrows - 1  { format!("\u{23A3} {} \u{23A6}", content) }
+                    else                     { format!("\u{23A2} {} \u{23A5}", content) }
                 }).collect::<Vec<_>>().join("\n")
             };
             if shape.len() == 1 {
-                let items: Vec<String> = re.iter().zip(im.iter()).map(|(&r, &i)| fmt_complex_elem(r, i)).collect();
+                let items: Vec<String> = axis_indices(shape[0], elide).iter()
+                    .map(|o| match o { Some(i) => fmt_complex_elem(re[*i], im[*i]), None => "\u{2026}".into() })
+                    .collect();
                 return format!("[{}]", items.join(", "));
             }
             if shape.len() == 2 {
@@ -889,8 +936,9 @@ pub fn fmt_val(v: &Val) -> String {
             if shape.len() == 3 {
                 let (d0, d1, d2) = (shape[0], shape[1], shape[2]);
                 let ss = d1 * d2;
-                return (0..d0).map(|k| {
-                    format!("[{k}]\n{}", fmt_cmat(&re[k*ss..(k+1)*ss], &im[k*ss..(k+1)*ss], d1, d2))
+                return axis_indices(d0, elide).iter().map(|o| match o {
+                    Some(k) => format!("[{k}]\n{}", fmt_cmat(&re[k*ss..(k+1)*ss], &im[k*ss..(k+1)*ss], d1, d2)),
+                    None    => "  \u{22EE}".into(),
                 }).collect::<Vec<_>>().join("\n");
             }
             format!("<complex tensor shape={:?}>", shape)

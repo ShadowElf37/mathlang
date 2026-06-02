@@ -1614,6 +1614,15 @@ run "tilde.tensor"     "~tensor(x -> x, 4)"           "[1, 0, 0, 0]"
 run "tilde.bits.not.agree" "bits.not(0) == ~0"        "1"
 run_err "tilde.not.flat"  "not(1)"                    ""
 
+# ── large-tensor display elision ──────────────────────────────────────────────
+section "DISPLAY ELISION"
+run_match "elide.1d"        "linspace(0,1,1000)"   "…"
+run_match "elide.1d.tail"   "linspace(0,1,1000)"   "1\]"                            # tail shown after gap
+run_match "elide.2d"        "ones(50,50)"          "⋮"
+run_match "elide.3d"        "ones(20,20,20)"       "⋮"
+run "elide.small.1d"        "linspace(0,1,5)"      "[0, 0.25, 0.5, 0.75, 1]"        # unchanged
+run "elide.small.2d"        "[1,2;3,4]"            "⎡ 1  2 ⎤ ⎣ 3  4 ⎦"             # unchanged
+
 # ── GPU compute backend (only when built with --features gpu + a GPU present) ──
 section "GPU BACKEND"
 gpu_probe=$("$M" 'GPU { 1 + 1 }' 2>&1)

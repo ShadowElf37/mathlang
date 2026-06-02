@@ -336,8 +336,6 @@ impl rustyline::Helper for MathHelper {}
 
 const REPL_TUPLE_LIMIT:   usize = 12;
 const REPL_TUPLE_PREVIEW: usize = 8;
-const REPL_VEC_LIMIT:     usize = 20;
-const REPL_VEC_PREVIEW:   usize = 10;
 
 fn fmt_repl(v: &Val) -> String {
     match v {
@@ -345,11 +343,8 @@ fn fmt_repl(v: &Val) -> String {
             let preview: Vec<String> = items[..REPL_TUPLE_PREVIEW].iter().map(fmt_val).collect();
             format!("({}, … [{} items])", preview.join(", "), items.len())
         }
-        Val::Tensor { data, shape } if shape.len() == 1 && data.len() > REPL_VEC_LIMIT => {
-            use crate::eval::fmt_f;
-            let preview: Vec<String> = data[..REPL_VEC_PREVIEW].iter().map(|x| fmt_f(*x)).collect();
-            format!("[{}, … ({} elements)]", preview.join(", "), data.len())
-        }
+        // Tensors (all ranks) are elided by fmt_val itself (numpy-style, head+tail
+        // with a `…` gap) so REPL and one-shot output stay consistent.
         other => fmt_val(other),
     }
 }
