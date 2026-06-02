@@ -67,10 +67,10 @@ mw    = tensor(p -> m, P)                                    # per-particle mass
 # so each particle's x and y stay correlated — two independent rand() draws would
 # scramble the blobs; same idiom as pic_plasma.math.)
 nb   = 5                 # number of blobs
-R    = 1.7               # ring radius about the box centre
-rb   = 0.55              # blob radius
-vrot = 0.45              # orbital (tangential) speed
-vth  = 0.12              # thermal spread within a blob
+R    = 1.0               # ring radius about the box centre
+rb   = 0.5              # blob radius
+vrot = 0.15              # orbital (tangential) speed
+vth  = 0.92              # thermal spread within a blob
 
 cx = pi;  cy = pi
 ang  = tensor(p -> 2*pi*floor(p*nb/P)/nb, P)   # which blob (its angle on the ring)
