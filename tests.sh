@@ -1737,6 +1737,22 @@ else
 
     # GPU initial condition + GPU stepper via a CPU cell (canonical animation loop)
     run "gpu.stepper.cell"   "u0=GPU{tensor((i,j)->1.0*((i-8)^2+(j-8)^2<9),16,16)}; st=cell(u0); f=t->{w=get(st); set(st, GPU{iterate(u->u+0.2*ops.lap(u,1,ops.neumann),w,1)}); w}; f(0); f(0); f(0); round(sum(get(st)),3)" "25"
+
+    # ── tuples of tensors: capture, multi-arg step, get(cell) inside the block ──
+    # Capture a tuple of tensors from the outer scope and index it.
+    run "gpu.tuple.capture"  "A=[1,2,3]; B=[10,20,30]; s=(A,B); GPU { s[1] }"  "[10, 20, 30]"
+    # Build a tuple inside the block and index it.
+    run "gpu.tuple.build"    "A=[1,2]; B=[3,4]; GPU { (A+B, A*B)[0] }"          "[4, 6]"
+    # iterate with a 2-arg step over a tuple state, returning a tuple.
+    run "gpu.iterate.tuple1" "A=[1,2,3]; B=[10,20,30]; r=GPU{iterate((u,v)->(u+v,v*2),(A,B),3)}; r[0]" "[71, 142, 213]"
+    run "gpu.iterate.tuple2" "A=[1,2,3]; B=[10,20,30]; r=GPU{iterate((u,v)->(u+v,v*2),(A,B),3)}; r[1]" "[80, 160, 240]"
+    # get(cell) read straight into the block (host helper evaluated on the CPU, lifted).
+    run "gpu.get.incell"     "st=cell(([1,2,3],[10,20,30])); r=GPU{iterate((u,v)->(u+v,v),get(st),2)}; r[0]" "[21, 42, 63]"
+    # named multi-arg step function also works
+    run "gpu.iterate.named"  "step(u,v)=(u+v,v); A=[1,1]; B=[2,2]; r=GPU{iterate(step,(A,B),2)}; r[0]" "[5, 5]"
+    # errors: arity mismatch and scan-on-tuple
+    run_err "gpu.err.steparity" "A=[1,2]; B=[3,4]; GPU{iterate((u,v,w)->(u,v,w),(A,B),1)}"
+    run_err "gpu.err.scantuple"  "A=[1,2]; B=[3,4]; GPU{scan((u,v)->(u,v),(A,B),2)}"
 fi
 
 # ── print summary ─────────────────────────────────────────────────────────────

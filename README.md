@@ -1391,13 +1391,26 @@ throttles the producer), so both sides stay in O(1) memory however long it runs;
 close the window to stop. `examples/gpu_grayscott.math` shows a live Gray-Scott
 reaction-diffusion system — unlike the heat equation (which just smooths a blob
 to nothing, and is capped at a Laplacian coefficient of 0.25 by the explicit
-CFL limit), it keeps forming new patterns forever:
+CFL limit), it keeps forming new patterns forever. The two coupled fields are
+carried as a **tuple state** through `iterate`, so all 20 substeps run on the
+device with a single round-trip per frame:
 
 ```
 st = cell((U0, V0))
-frame = _ -> { s = iterate(gsStep, get(st), 20); set(st, s); s[1] }
+frame = _ -> {
+  s = GPU { iterate((U, V) -> (
+        U + dt*(Du*ops.lap(U,1,ops.neumann) - U*V*V + F*(1-U)),
+        V + dt*(Dv*ops.lap(V,1,ops.neumann) + U*V*V - (F+k)*V)
+      ), get(st), 20) };
+  set(st, s); s[1]
+}
 !animate2Dforever frame, 30
 ```
+
+A GPU `iterate`/`scan` state can be a **tuple of tensors** for coupled systems;
+a multi-argument step `(U, V) -> (U', V')` destructures it. `get(cell)` and other
+pure host-side calls are evaluated on the CPU and lifted into the block, so the
+coupled state can live in a single cell. (`scan` keeps single-tensor state.)
 
 Tensor/tensor operations require matching shapes (no broadcasting yet). Computation
 is performed in `f32` on the device and converted back to `f64` on download, so

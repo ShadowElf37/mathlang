@@ -841,7 +841,7 @@ dependencies = [
 
 [[package]]
 name = "mathlang"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "bytemuck",
  "hdf5-metno",

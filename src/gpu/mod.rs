@@ -38,6 +38,9 @@ enum GpuVal {
         shape: Vec<usize>,
         len:   usize,
     },
+    /// A tuple of values (e.g. coupled fields `(U, V)` carried as a single
+    /// `iterate`/`scan` state). Each element is itself a `GpuVal`.
+    Tuple(Vec<GpuVal>),
 }
 
 /// Ensure a value is GPU-resident, uploading a host-side result if needed. A
@@ -53,7 +56,28 @@ fn materialize(ctx: &GpuContext, v: GpuVal) -> GpuVal {
             });
             GpuVal::Buffer { buf: Rc::new(buf), shape, len }
         }
+        GpuVal::Tuple(elems) => {
+            GpuVal::Tuple(elems.into_iter().map(|e| materialize(ctx, e)).collect())
+        }
         other => other,
+    }
+}
+
+/// Lift a CPU `Val` into a GPU value: scalars stay scalar, real tensors are
+/// uploaded, and tuples recurse. This is how a tuple of tensors (or the result
+/// of a host helper like `get(cell)`) enters a GPU block.
+fn lift_val(ctx: &GpuContext, v: &Val) -> Result<GpuVal, String> {
+    match v {
+        Val::Num(f) => Ok(GpuVal::Scalar(*f)),
+        Val::Tensor { data, shape } => Ok(upload(ctx, data, shape)),
+        Val::Tuple(items) => {
+            let elems = items.iter().map(|it| lift_val(ctx, it)).collect::<Result<Vec<_>, _>>()?;
+            Ok(GpuVal::Tuple(elems))
+        }
+        other => Err(format!(
+            "GPU: only scalars, real tensors, and tuples of them can enter a GPU block; got {}",
+            fmt_val(other)
+        )),
     }
 }
 
@@ -91,6 +115,7 @@ fn eval_gpu(
                     Ok(GpuVal::Buffer { buf: out, shape, len })
                 }
                 GpuVal::Host { .. } => unreachable!("materialized above"),
+                GpuVal::Tuple(_) => Err("GPU: cannot negate a tuple".into()),
             }
         }
 
@@ -108,8 +133,14 @@ fn eval_gpu(
                     scope.insert(name.clone(), gv.clone());
                     Ok(gv)
                 }
+                // A tuple of tensors/scalars (e.g. coupled fields) — upload each.
+                Some(v @ Val::Tuple(_)) => {
+                    let gv = lift_val(ctx, v)?;
+                    scope.insert(name.clone(), gv.clone());
+                    Ok(gv)
+                }
                 Some(other) => Err(format!(
-                    "GPU: `{name}`: only scalars and real tensors are allowed in a GPU block; got {}",
+                    "GPU: `{name}`: only scalars, real tensors, and tuples of them are allowed in a GPU block; got {}",
                     fmt_val(other)
                 )),
                 None => Err(format!("undefined variable `{name}`")),
@@ -150,6 +181,32 @@ fn eval_gpu(
 
         Expr::Apply(f, args) => eval_apply(f, args, env, ctx, scope),
 
+        // A tuple value, e.g. the `(U', V')` returned by a coupled step.
+        Expr::Tuple(xs) => {
+            let vals = xs.iter()
+                .map(|x| eval_gpu(x, env, ctx, scope))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(GpuVal::Tuple(vals))
+        }
+
+        // Indexing a tuple value, e.g. `s[1]`. (Indexing a *tensor* on the GPU
+        // is only supported as a gather inside `tensor(...)`.)
+        Expr::Index(base, idx) => {
+            let bv = eval_gpu(base, env, ctx, scope)?;
+            match bv {
+                GpuVal::Tuple(elems) => {
+                    let k = match int_lit(idx) {
+                        Some(k) if k >= 0 && (k as usize) < elems.len() => k as usize,
+                        Some(k) => return Err(format!(
+                            "GPU: tuple index {k} out of range (len {})", elems.len())),
+                        None => return Err("GPU: tuple index must be a constant integer".into()),
+                    };
+                    Ok(elems.into_iter().nth(k).unwrap())
+                }
+                _ => Err("GPU: indexing is only supported on tuples here (tensor gather lives inside tensor(...))".into()),
+            }
+        }
+
         // 1-D tensor literal `[a, b, c]` — elements must reduce to scalars.
         Expr::Array(elems) => {
             let data = eval_scalar_elems(elems, env, ctx, scope)?;
@@ -184,7 +241,7 @@ fn eval_scalar_elems(
 ) -> Result<Vec<f32>, String> {
     elems.iter().map(|e| match eval_gpu(e, env, ctx, scope)? {
         GpuVal::Scalar(s) => Ok(s as f32),
-        GpuVal::Buffer { .. } | GpuVal::Host { .. } =>
+        GpuVal::Buffer { .. } | GpuVal::Host { .. } | GpuVal::Tuple(_) =>
             Err("GPU: tensor literals must contain scalar elements".to_string()),
     }).collect()
 }
@@ -240,7 +297,20 @@ fn eval_apply(
             unary_val(ctx, name, v)
         }
 
-        _ => Err(format!("GPU: function `{name}` not supported in a GPU block")),
+        // Fallback: a call that isn't a GPU op. If it can be evaluated on the
+        // host purely from the surrounding scope (e.g. `get(cell)`, or any other
+        // helper that produces a capturable value), do that and lift the result
+        // into the block. Calls that reference GPU-local state (loop params,
+        // block locals) can't be evaluated on the host and report that here.
+        _ => {
+            let call = Expr::Apply(Box::new(f.clone()), args.to_vec());
+            match crate::eval::eval(&call, env) {
+                Ok(v) => lift_val(ctx, &v),
+                Err(e) => Err(format!(
+                    "GPU: function `{name}` is not a GPU op, and evaluating it on the host failed: {e}"
+                )),
+            }
+        }
     }
 }
 
@@ -259,6 +329,7 @@ fn expect_buffer(gctx: &GpuContext, v: GpuVal, what: &str) -> Result<(Rc<wgpu::B
     match materialize(gctx, v) {
         GpuVal::Buffer { buf, shape, len } => Ok((buf, shape, len)),
         GpuVal::Scalar(_) => Err(format!("GPU: {what} expects a tensor, got a scalar")),
+        GpuVal::Tuple(_) => Err(format!("GPU: {what} expects a tensor, got a tuple")),
         GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
@@ -312,6 +383,8 @@ fn binop(ctx: &GpuContext, op: &Op, lhs: GpuVal, rhs: GpuVal) -> Result<GpuVal, 
             let out = run_map(ctx, &[&a, &b], la, &expr)?;
             Ok(GpuVal::Buffer { buf: out, shape: sa, len: la })
         }
+        (GpuVal::Tuple(_), _) | (_, GpuVal::Tuple(_)) =>
+            Err("GPU: arithmetic on a tuple is not supported (operate on its fields)".into()),
         _ => unreachable!("Host values are materialized above"),
     }
 }
@@ -403,6 +476,7 @@ fn unary_val(ctx: &GpuContext, name: &str, v: GpuVal) -> Result<GpuVal, String> 
             let out = run_map(ctx, &[&buf], len, &expr)?;
             Ok(GpuVal::Buffer { buf: out, shape, len })
         }
+        GpuVal::Tuple(_) => Err(format!("GPU: {name} does not apply to a tuple")),
         GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
@@ -428,6 +502,8 @@ fn binary_minmax(ctx: &GpuContext, name: &str, a: GpuVal, b: GpuVal) -> Result<G
             let out = run_map(ctx, &[&a, &b], la, &format!("{f}(in0[i], in1[i])"))?;
             Ok(GpuVal::Buffer { buf: out, shape: sa, len: la })
         }
+        (GpuVal::Tuple(_), _) | (_, GpuVal::Tuple(_)) =>
+            Err(format!("GPU: {f} does not apply to a tuple")),
         _ => unreachable!("Host values are materialized above"),
     }
 }
@@ -444,6 +520,7 @@ fn reduce_val(ctx: &GpuContext, name: &str, v: GpuVal) -> Result<GpuVal, String>
             let total = reduce(ctx, buf, len, kind)?;
             Ok(GpuVal::Scalar(if name == "mean" { total / len as f64 } else { total }))
         }
+        GpuVal::Tuple(_) => Err(format!("GPU: {name} does not apply to a tuple")),
         GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
@@ -1107,8 +1184,10 @@ fn gpu_tensor(args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut HashMap<St
 
 /// A resolved iterate/scan step function.
 enum Step {
-    /// Inline lambda or named user function: bind `param`, evaluate `body`.
-    Body { param: String, body: Expr },
+    /// Inline lambda or named user function: bind `params`, evaluate `body`.
+    /// One param binds the whole state; several params destructure a tuple
+    /// state (coupled fields), e.g. `(U, V) -> (…, …)`.
+    Body { params: Vec<String>, body: Expr },
     /// A builtin applied each step (e.g. `exp`, `sin`).
     Builtin(String),
 }
@@ -1117,17 +1196,17 @@ enum Step {
 fn resolve_step(f: &Expr, env: &Env) -> Result<Step, String> {
     match f {
         Expr::Lambda(params, _, body) => {
-            if params.len() != 1 {
-                return Err(format!("GPU: step function must take 1 argument, got {}", params.len()));
+            if params.is_empty() {
+                return Err("GPU: step function must take at least 1 argument".into());
             }
-            Ok(Step::Body { param: params[0].name.clone(), body: (**body).clone() })
+            Ok(Step::Body { params: params.iter().map(|p| p.name.clone()).collect(), body: (**body).clone() })
         }
         Expr::Var(name) => match env.vars.get(name) {
             Some(Val::Fn(params, body, _, _, _)) => {
-                if params.len() != 1 {
-                    return Err(format!("GPU: step function `{name}` must take 1 argument, got {}", params.len()));
+                if params.is_empty() {
+                    return Err(format!("GPU: step function `{name}` must take at least 1 argument"));
                 }
-                Ok(Step::Body { param: params[0].clone(), body: body.clone() })
+                Ok(Step::Body { params: params.clone(), body: body.clone() })
             }
             Some(Val::Builtin(b)) => {
                 if unary_wgsl(b, "x").is_none() {
@@ -1151,8 +1230,26 @@ fn apply_step(
     scope: &mut HashMap<String, GpuVal>,
 ) -> Result<GpuVal, String> {
     match step {
-        Step::Body { param, body } => {
-            scope.insert(param.clone(), state);
+        Step::Body { params, body } => {
+            if params.len() == 1 {
+                scope.insert(params[0].clone(), state);
+            } else {
+                match state {
+                    GpuVal::Tuple(elems) if elems.len() == params.len() => {
+                        for (p, e) in params.iter().zip(elems) {
+                            scope.insert(p.clone(), e);
+                        }
+                    }
+                    GpuVal::Tuple(elems) => return Err(format!(
+                        "GPU: step takes {} arguments but the state is a {}-tuple",
+                        params.len(), elems.len()
+                    )),
+                    _ => return Err(format!(
+                        "GPU: step takes {} arguments, so the state must be a {}-tuple",
+                        params.len(), params.len()
+                    )),
+                }
+            }
             eval_gpu(body, env, ctx, scope)
         }
         Step::Builtin(name) => unary_val(ctx, name, state),
@@ -1164,7 +1261,8 @@ fn eval_count(arg: &Expr, env: &Env, ctx: &GpuContext, scope: &mut HashMap<Strin
     match eval_gpu(arg, env, ctx, scope)? {
         GpuVal::Scalar(s) if s >= 0.0 && s.fract() == 0.0 => Ok(s as usize),
         GpuVal::Scalar(s) => Err(format!("GPU: iterate/scan count must be a non-negative integer, got {s}")),
-        GpuVal::Buffer { .. } | GpuVal::Host { .. } => Err("GPU: iterate/scan count must be a scalar".into()),
+        GpuVal::Buffer { .. } | GpuVal::Host { .. } | GpuVal::Tuple(_) =>
+            Err("GPU: iterate/scan count must be a scalar".into()),
     }
 }
 
@@ -1232,6 +1330,8 @@ fn gpu_scan(args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut HashMap<Stri
             Ok(GpuVal::Host { data: Rc::new(data), shape: out_shape, len: total })
         }
         GpuVal::Host { .. } => Err("GPU: scan produced a host value (internal error)".into()),
+        GpuVal::Tuple(_) => Err(
+            "GPU: scan does not support tuple state yet (use iterate for coupled fields)".into()),
     }
 }
 
@@ -1414,6 +1514,9 @@ fn to_val(ctx: &GpuContext, v: &GpuVal) -> Result<Val, String> {
             data: TData::new(data.iter().map(|&x| x as f64).collect()),
             shape: shape.clone(),
         }),
+        GpuVal::Tuple(elems) => Ok(Val::Tuple(
+            elems.iter().map(|e| to_val(ctx, e)).collect::<Result<Vec<_>, _>>()?,
+        )),
     }
 }
 

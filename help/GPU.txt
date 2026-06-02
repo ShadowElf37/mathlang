@@ -32,7 +32,12 @@ to build large initial conditions: u0 = GPU { tensor(...) }.
 
 [1miterate / scan (residency)[0m keep state on the GPU across all n steps,
 so PDE/time-stepping stays on the device with no per-step round-trip. The step
-may be an inline lambda, a named one-argument function, or a unary builtin (exp).
+may be an inline lambda, a named function, or a unary builtin (exp).
+
+The state can be a TUPLE of tensors for coupled systems. A multi-argument step
+destructures it: iterate((U, V) -> (U', V'), (U0, V0), n) advances both fields
+together with a single round-trip (upload (U,V), run all n steps, download),
+instead of one trip per field per step. (scan keeps single-tensor/scalar state.)
 
 Precision is f32 on the GPU; results convert back to f64 on download (~7
 significant digits). Sensitive workloads (chaotic maps, long symplectic runs)
@@ -59,7 +64,12 @@ result = [0.125, 0.25, 0.375, 0.5]
 > # …or precompute the whole [n+1,N,N] spacetime block (time first) and play it:
 > !animate2D (GPU { scan(step, u0, 400) })           # see examples/gpu_heat2D.math
 >
-> # …or run a live sim FOREVER (bounded memory + backpressure, close window to stop):
-> st = cell((U0,V0)); frame = _ -> { s=iterate(gsStep,get(st),20); set(st,s); s[1] }
+> # …or run a live sim FOREVER (bounded memory + backpressure, close window to stop).
+> # Coupled (U,V) state lives in one cell; the multi-arg step runs all n substeps
+> # on the device with a single round-trip per frame:
+> st = cell((U0, V0))
+> step(U,V) = (U + Du*ops.lap(U,1,ops.neumann) - U*V*V + F*(1-U),
+>              V + Dv*ops.lap(V,1,ops.neumann) + U*V*V - (F+k)*V)
+> frame = _ -> { s = GPU { iterate(step, get(st), 20) }; set(st, s); s[1] }
 > !animate2Dforever frame, 30                         # see examples/gpu_grayscott.math
 [0m

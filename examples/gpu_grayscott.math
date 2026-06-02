@@ -27,20 +27,21 @@ SUBSTEPS = 20   # GPU steps per displayed frame — bigger = faster evolution
 V0 = tensor((r,c) -> if((r-N/2)^2 + (c-N/2)^2 < 200, 0.25 + 0.5*rand(), 0.0), N, N)
 U0 = 1 - V0
 
-# One coupled Gray-Scott step.  Each field updates in its own GPU block; the
-# captured scalars (Du, Dv, F, k, dt) and tensors (U, V) are uploaded, the
-# Laplacian + reaction run on the device, and the new field comes back.
-gsStep(s) = {
-  U = s[0];  V = s[1]
-  Un = GPU { U + dt*(Du*ops.lap(U, 1, ops.neumann) - U*V*V + F*(1-U)) }
-  Vn = GPU { V + dt*(Dv*ops.lap(V, 1, ops.neumann) + U*V*V - (F+k)*V) }
-  (Un, Vn)
+# A CPU cell holds the coupled state (U, V) between frames.  Each frame advances
+# SUBSTEPS steps entirely on the GPU — the whole orbit stays device-resident, so
+# there is exactly ONE round-trip per frame (upload (U,V), run, download), not
+# 2·SUBSTEPS of them.  The step is a TWO-argument lambda over the tuple state and
+# returns the next tuple; get(st) reads the cell straight into the block.
+st = cell((U0, V0))
+frame = _ -> {
+  s = GPU {
+    iterate((U, V) -> (
+      U + dt*(Du*ops.lap(U, 1, ops.neumann) - U*V*V + F*(1-U)),
+      V + dt*(Dv*ops.lap(V, 1, ops.neumann) + U*V*V - (F+k)*V)
+    ), get(st), SUBSTEPS)
+  };
+  set(st, s);
+  s[1]   # display V
 }
-
-# A CPU cell holds (U, V) between frames; each frame advances SUBSTEPS coupled
-# GPU steps and displays V.  Memory stays O(1) — the animator drops old frames
-# and applies backpressure, so this runs forever.
-st    = cell((U0, V0))
-frame = _ -> { s = iterate(gsStep, get(st), SUBSTEPS); set(st, s); s[1] }
 
 !animate2Dforever frame, 30
