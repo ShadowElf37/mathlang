@@ -1432,6 +1432,15 @@ _repl_check "help.builtin.zeros"     "!help zeros"        "zeros"
 _repl_check "help.bang.graph"        "!help !graph"       "!graph"
 _repl_check "help.bang.graph_nob"    "!help graph"        "!graph"
 _repl_check "help.bang.animate2D"    "!help !animate2D"   "animate2D"
+_repl_check "help.bang.animateForever" "!help !animate2Dforever" "animate2Dforever"
+# animate2Dforever: argument validation happens before any animator is spawned
+_repl_check "animfvr.notfn"   "!animate2Dforever 5"        "must be a function"
+_repl_check "animfvr.arity"   "!animate2Dforever sin, 1, 2" "expects f"
+_repl_check "animfvr.usage"   "!animate2Dforever"          "forever"
+# Regression: function form resolving to 0 frames must error cleanly, not panic
+# (use _raw so no animator window is spawned during tests).
+_repl_check "animate.empty_frames" "f(t) = zeros(2,2)
+!animate2D_raw f, 0"                                       "no frames to animate"
 _repl_check "help.bang.type"         "!help !type"        "!type"
 _repl_check "help.bang.include"      "!help include"      "!include"
 _repl_check "help.bang.quit"         "!help !quit"        "quit"

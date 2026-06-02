@@ -58,4 +58,8 @@ result = [0.125, 0.25, 0.375, 0.5]
 > !animate2D frame, 0, 400, 400
 > # …or precompute the whole [n+1,N,N] spacetime block (time first) and play it:
 > !animate2D (GPU { scan(step, u0, 400) })           # see examples/gpu_heat2D.math
+>
+> # …or run a live sim FOREVER (bounded memory + backpressure, close window to stop):
+> st = cell((U0,V0)); frame = _ -> { s=iterate(gsStep,get(st),20); set(st,s); s[1] }
+> !animate2Dforever frame, 30                         # see examples/gpu_grayscott.math
 [0m

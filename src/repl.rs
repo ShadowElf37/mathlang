@@ -157,7 +157,7 @@ fn highlight_line(line: &str, user_fns: &[String], user_vars: &[String],
         let rest = &line[cmd_end..];
         let cmd_colored = format!("\x1b[33m{}\x1b[0m", &line[..cmd_end]);
         return match cmd_name {
-            "type" | "graph" | "animate2D" | "animate2D_raw" =>
+            "type" | "graph" | "animate2D" | "animate2Dforever" | "animate2D_raw" =>
                 format!("{}{}", cmd_colored, highlight_line(rest, user_fns, user_vars, namespaces)),
             "print" =>
                 format!("{}{}", cmd_colored, highlight_print_args(rest, user_fns, user_vars, namespaces)),
@@ -279,7 +279,7 @@ impl rustyline::completion::Completer for MathHelper {
         -> rustyline::Result<(usize, Vec<String>)>
     {
         if line.starts_with('!') {
-            let cmds = ["!animate2D ", "!animate2D_raw ", "!clear", "!defs", "!exit", "!graph ", "!help", "!include ", "!loadhdf5 ", "!loadnpy ", "!loadtensor ", "!print ", "!q", "!quit", "!savehdf5 ", "!savenpy ", "!savetensor ", "!type ", "!version"];
+            let cmds = ["!animate2D ", "!animate2Dforever ", "!animate2D_raw ", "!clear", "!defs", "!exit", "!graph ", "!help", "!include ", "!loadhdf5 ", "!loadnpy ", "!loadtensor ", "!print ", "!q", "!quit", "!savehdf5 ", "!savenpy ", "!savetensor ", "!type ", "!version"];
             return Ok((0, cmds.iter().filter(|&&c| c.starts_with(line)).map(|s| s.to_string()).collect()));
         }
         let start = line[..pos].rfind(|c: char| !c.is_alphanumeric() && c != '_').map_or(0, |i| i+1);
@@ -977,6 +977,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     "           !graph f [,a,b]  — plot f over [a,b] (default -10..10)\n",
                     "           !animate2D f n [fps]  — animate f(t) returning [nx,ny] tensor\n",
                     "           !animate2D f t0 t1 n [fps] | !animate2D T [fps]\n",
+                    "           !animate2Dforever f [fps]  — animate f(t) forever (t=0,1,2,…)\n",
                     "           !print text with {{expr}} interpolation\n",
                     "           !savetensor/loadtensor  !savenpy/loadnpy  !savehdf5/loadhdf5\n",
                     "           !helpdef <ns> <text>  — set help text for a user namespace\n",
@@ -1156,6 +1157,22 @@ fn bang_command(cmd: &str, env: &mut Env) {
                 }
                 Ok(_) => eprintln!("usage: !animate2D T [fps] | !animate2D f n [fps] | ..."),
                 Err(e) => eprintln!("!animate2D: {e}"),
+            }
+        }
+        "animate2Dforever" => {
+            if arg.is_empty() {
+                eprintln!("usage: !animate2Dforever f [fps]  — animate f(t) for t=0,1,2,… forever");
+                return;
+            }
+            let toks = Lexer::new(arg).tokenize();
+            match Parser::new(toks).parse_args() {
+                Ok(exprs) if !exprs.is_empty() => {
+                    if let Err(e) = crate::animate::eval_animate2d_forever(&exprs, env) {
+                        eprintln!("animate2Dforever: {e}");
+                    }
+                }
+                Ok(_) => eprintln!("usage: !animate2Dforever f [fps]"),
+                Err(e) => eprintln!("!animate2Dforever: {e}"),
             }
         }
         "animate2D_raw" => {

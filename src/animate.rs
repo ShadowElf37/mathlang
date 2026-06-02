@@ -152,6 +152,12 @@ fn stream_frames(
             };
 
             let n_frames = t_vals.len();
+            if n_frames == 0 {
+                return Err(
+                    "animate2D: no frames to animate (count is 0 / empty timestamp list).\n  \
+                     for a range use 4 args: !animate2D f t0 t1 n".into()
+                );
+            }
             eprintln!("animate2D: computing and streaming {n_frames} frames …");
 
             let (first_data, nx, ny) = call_for_frame(&f_val, t_vals[0], env)?;
@@ -252,6 +258,90 @@ pub fn eval_animate2d_raw(args: &[Expr], env: &Env) -> Result<Val, String> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let n = stream_frames(first, &args[1..], env, &mut out)?;
+    Ok(Val::Num(n as f64))
+}
+
+/// animate2Dforever — spawn wgpu_animator in --stream mode and feed it frames
+/// f(0), f(1), f(2), … forever.  The animator keeps only the current frame and
+/// applies backpressure (bounded buffer), so this runs in O(1) memory on both
+/// sides no matter how long it plays.  Stops when the animator window is closed
+/// (the write fails with a broken pipe).
+///
+///   !animate2Dforever f          — f: t→2-D Tensor [nx,ny], t = 0,1,2,…
+///   !animate2Dforever f fps      — same, with playback fps
+pub fn eval_animate2d_forever(args: &[Expr], env: &Env) -> Result<Val, String> {
+    if args.is_empty() {
+        return Err("animate2Dforever(f [,fps]) — f: t -> 2-D tensor [nx,ny]".into());
+    }
+
+    let f_val = match eval(&args[0], env)? {
+        v @ (Val::Fn(..) | Val::Builtin(..)) => v,
+        other => return Err(format!(
+            "animate2Dforever: first arg must be a function t -> [nx,ny] tensor, got {}",
+            crate::eval::fmt_val(&other)
+        )),
+    };
+
+    let fps = match args.len() {
+        1 => 30.0,
+        2 => eval(&args[1], env)?.num("animate2Dforever fps")?,
+        n => return Err(format!(
+            "animate2Dforever: expects f [,fps], got {} args", n
+        )),
+    };
+
+    let animator = find_animator();
+    let mut cmd_args: Vec<String> = vec![
+        "--stdin".into(), "--stream".into(),
+        "--colormap".into(), "heat".into(),
+        "--fps".into(), format!("{}", fps as u32),
+    ];
+    if let Ok(title) = std::env::var("WGPU_TITLE") {
+        cmd_args.push("--title".into());
+        cmd_args.push(title);
+    }
+    eprintln!("animate2Dforever: spawning '{animator}' (close the window to stop)");
+
+    let mut child = std::process::Command::new(&animator)
+        .args(&cmd_args)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!(
+            "animate2Dforever: failed to spawn '{animator}': {e}\n  hint: set WGPU_ANIMATOR=/path/to/wgpu_animator"
+        ))?;
+
+    let mut n: u64 = 0;
+    {
+        let child_stdin = child.stdin.take()
+            .ok_or_else(|| "animate2Dforever: could not get animator stdin".to_string())?;
+        let mut out = std::io::BufWriter::new(child_stdin);
+
+        // First frame establishes the grid shape.
+        let (first_data, nx, ny) = call_for_frame(&f_val, 0.0, env)?;
+        eprintln!("animate2Dforever: grid {nx}×{ny}, streaming t = 0,1,2,…");
+        if write_frame_xy(&mut out, &first_data, nx, ny, 0.0).is_ok() {
+            n = 1;
+            let mut t = 1.0_f64;
+            loop {
+                let (data, fnx, fny) = call_for_frame(&f_val, t, env)?;
+                if fnx != nx || fny != ny {
+                    return Err(format!(
+                        "animate2Dforever: frame at t={t} has shape [{fnx},{fny}], expected [{nx},{ny}]"
+                    ));
+                }
+                // A write error means the animator window was closed — stop.
+                if write_frame_xy(&mut out, &data, fnx, fny, t).is_err() {
+                    break;
+                }
+                n += 1;
+                t += 1.0;
+            }
+        }
+        // `out` dropped here → stdin closed.
+    }
+
+    let _ = child.wait();
+    eprintln!("animate2Dforever: stopped ({n} frames)");
     Ok(Val::Num(n as f64))
 }
 

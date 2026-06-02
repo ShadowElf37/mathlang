@@ -89,6 +89,7 @@ result = 10
 | `!animate2D T [fps]` | animate a 3-D tensor `[frames,H,W]`; spawns animator |
 | `!animate2D f n [fps]` | animate f(t) for t=0..n-1 |
 | `!animate2D f t0 t1 n [fps]` | animate f(t) over linspace(t0,t1,n) |
+| `!animate2Dforever f [fps]` | animate f(t) for t=0,1,2,… forever (bounded memory, backpressure) |
 | `!animate2D_raw …` | write MXFR frames to stdout (for piping) |
 | `!savetensor <var> <file>` | save tensor to binary `.mlt` file |
 | `!loadtensor <var> <file>` | load tensor from `.mlt` file |
@@ -1382,6 +1383,21 @@ pass, one download) and play it back:
 
 (Avoid `t -> GPU { iterate(step, u0, t) }` as the per-frame function: it restarts
 from `u0` every frame, doing O(t²) total work.)
+
+For a simulation that should run **indefinitely**, use `!animate2Dforever f`,
+which calls `f(0), f(1), f(2), …` without end. The animator keeps only the
+current frame and applies backpressure (it buffers at most ~100 frames and
+throttles the producer), so both sides stay in O(1) memory however long it runs;
+close the window to stop. `examples/gpu_grayscott.math` shows a live Gray-Scott
+reaction-diffusion system — unlike the heat equation (which just smooths a blob
+to nothing, and is capped at a Laplacian coefficient of 0.25 by the explicit
+CFL limit), it keeps forming new patterns forever:
+
+```
+st = cell((U0, V0))
+frame = _ -> { s = iterate(gsStep, get(st), 20); set(st, s); s[1] }
+!animate2Dforever frame, 30
+```
 
 Tensor/tensor operations require matching shapes (no broadcasting yet). Computation
 is performed in `f32` on the device and converted back to `f64` on download, so

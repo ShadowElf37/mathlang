@@ -1,0 +1,46 @@
+# gpu_grayscott.math — Gray-Scott reaction-diffusion, on the GPU, forever.
+#
+#   du/dt = Du·∇²u − u·v² + F·(1−u)
+#   dv/dt = Dv·∇²v + u·v² − (F+k)·v
+#
+# Unlike the heat equation (which just smooths an initial blob into a flat
+# nothing and is capped at ∇²-coefficient ≤ 0.25 by the explicit-Euler CFL
+# limit), Gray-Scott is a *pattern former*: it keeps generating spots, stripes
+# and coral-like structures indefinitely.  That makes it the perfect thing to
+# watch with !animate2Dforever — it never settles down.
+#
+# Build with the GPU backend:  cargo build --release --features gpu
+# Run:  ./target/release/m examples/gpu_grayscott.math   (needs wgpu_animator)
+#
+# Try the parameter presets below for different patterns.
+
+N  = 256
+Du = 0.16
+Dv = 0.08
+F  = 0.035   # spots.  stripes: F=0.060,k=0.062   coral: F=0.025,k=0.060
+k  = 0.060
+dt = 1.0
+SUBSTEPS = 20   # GPU steps per displayed frame — bigger = faster evolution
+
+# Seed: a noisy patch of V at the centre (rand() + if are CPU-side, done once).
+# U starts near 1 (full of "food") everywhere; V is the autocatalytic product.
+V0 = tensor((r,c) -> if((r-N/2)^2 + (c-N/2)^2 < 200, 0.25 + 0.5*rand(), 0.0), N, N)
+U0 = 1 - V0
+
+# One coupled Gray-Scott step.  Each field updates in its own GPU block; the
+# captured scalars (Du, Dv, F, k, dt) and tensors (U, V) are uploaded, the
+# Laplacian + reaction run on the device, and the new field comes back.
+gsStep(s) = {
+  U = s[0];  V = s[1]
+  Un = GPU { U + dt*(Du*ops.lap(U, 1, ops.neumann) - U*V*V + F*(1-U)) }
+  Vn = GPU { V + dt*(Dv*ops.lap(V, 1, ops.neumann) + U*V*V - (F+k)*V) }
+  (Un, Vn)
+}
+
+# A CPU cell holds (U, V) between frames; each frame advances SUBSTEPS coupled
+# GPU steps and displays V.  Memory stays O(1) — the animator drops old frames
+# and applies backpressure, so this runs forever.
+st    = cell((U0, V0))
+frame = _ -> { s = iterate(gsStep, get(st), SUBSTEPS); set(st, s); s[1] }
+
+!animate2Dforever frame, 30

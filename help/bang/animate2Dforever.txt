@@ -1,0 +1,20 @@
+[1;4m!animate2Dforever[0m
+
+Animate a 2D field FOREVER — call f(t) for t = 0, 1, 2, … without end and stream
+each [nx, ny] frame to the wgpu animator. The animator keeps only the current
+frame and applies backpressure (bounded buffer, default 100 frames), so both
+sides run in O(1) memory no matter how long it plays. Uses T[x, y] axis
+convention. Stops when you close the animator window.
+
+This is the way to watch a live simulation evolve indefinitely — pair it with a
+GPU stepper that keeps its state in a CPU cell (see examples/gpu_grayscott.math).
+
+[1mUsage:[0m
+- [33m!animate2Dforever f[0m — call f(t) for t = 0,1,2,… at 30 fps
+- [33m!animate2Dforever f fps[0m — same, with a playback fps
+
+[1mExamples:[0m
+[0m> st = cell(u0); step = w -> GPU { iterate(s -> s + 0.2*ops.lap(s,1,ops.neumann), w, 1) }
+> frame = _ -> { w = get(st); set(st, step(w)); w }
+> !animate2Dforever frame 30
+[0m
