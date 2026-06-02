@@ -1264,3 +1264,45 @@ loaded D (4 elements, complex) ← data.h5:/C
 > re(D[0]), im(D[1])
 result = 2  -1
 ```
+
+## GPU compute (`GPU { … }`)
+
+A `GPU { … }` block evaluates its body on the GPU compute backend (via
+[wgpu](https://github.com/gfx-rs/wgpu), so Metal / Vulkan / DX12 / GL all work).
+Scalars and real tensors referenced from the surrounding scope are uploaded to the
+device, the block runs there, and only the final result is downloaded back as an
+ordinary value.
+
+**Build requirement:** pass `--features gpu` at build time.
+
+```zsh
+cargo build --release --features gpu
+```
+
+Without the feature, a GPU block reports `GPU backend not compiled in`. With the
+feature but no compatible adapter, it reports `no adapter found on this system`.
+
+```
+> A = [1, 2, 3, 4]
+> B = [10, 20, 30, 40]
+> GPU { A + B }
+result = [11, 22, 33, 44]
+
+> A = [1, 2, 3]
+> GPU { c = A + 1; c * 2 }     # local bindings; last expression is the result
+result = [4, 6, 8]
+```
+
+Currently supported inside a block:
+
+| Category | Operations |
+|----------|-----------|
+| Elementwise arithmetic | `+ - * / ^` (tensor/tensor, tensor/scalar, scalar/scalar) |
+| Unary | negation `-T` |
+| Bindings | `name = expr;` locals, visible only inside the block |
+
+Tensor/tensor operations require matching shapes (no broadcasting yet). Computation
+is performed in `f32` on the device and converted back to `f64` on download, so
+expect roughly 7 significant digits compared to a CPU result. This is the first
+milestone of a larger backend — see `docs/CONSIDERATIONS.md` for the full design
+(differential-operator stencils, FFT, and GPU-resident time-stepping loops).

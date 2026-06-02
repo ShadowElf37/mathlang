@@ -7,6 +7,8 @@ mod ns;
 mod repl;
 mod graph;
 mod animate;
+#[cfg(feature = "gpu")]
+mod gpu;
 
 fn main() {
     // Run the evaluator on a worker thread with a large stack. mathlang's only

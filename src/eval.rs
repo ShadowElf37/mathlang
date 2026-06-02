@@ -458,6 +458,7 @@ pub fn infer_type(expr: &Expr, params: &HashMap<String, TypeHint>, env: &Env) ->
         },
         Expr::Slice(..)  => Any,
         Expr::Member(..) => Any,
+        Expr::GpuBlock(body) => infer_type(body, params, env),
         Expr::Lambda(..) => Fn,
         Expr::Block(stmts) => {
             let mut p = params.clone();
@@ -3293,6 +3294,7 @@ fn cfv(
             if let Some(e) = lo { cfv(e, inner_params, outer_params, outer_locals, outer_captured, vars, seen); }
             if let Some(e) = hi { cfv(e, inner_params, outer_params, outer_locals, outer_captured, vars, seen); }
         }
+        Expr::GpuBlock(body) => cfv(body, inner_params, outer_params, outer_locals, outer_captured, vars, seen),
     }
 }
 
@@ -3329,6 +3331,7 @@ fn expr_contains_var(expr: &Expr, target: &str) -> bool {
         Expr::Range(lo, hi)  => expr_contains_var(lo, target) || expr_contains_var(hi, target),
         Expr::Slice(lo, hi)  => lo.as_ref().map_or(false, |e| expr_contains_var(e, target))
                              || hi.as_ref().map_or(false, |e| expr_contains_var(e, target)),
+        Expr::GpuBlock(body) => expr_contains_var(body, target),
     }
 }
 
@@ -4489,6 +4492,12 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
         }
         Expr::Var(n) => env.vars.get(n).cloned()
             .ok_or_else(|| format!("undefined: {n}")),
+        Expr::GpuBlock(body) => {
+            #[cfg(feature = "gpu")]
+            { crate::gpu::run_gpu_block(body, env) }
+            #[cfg(not(feature = "gpu"))]
+            { let _ = body; Err("GPU backend not compiled in (rebuild with --features gpu)".into()) }
+        }
         Expr::Member(base, field) => {
             let base_val = eval(base, env)?;
             match base_val {

@@ -61,6 +61,9 @@ pub enum Expr {
     /// Index-position slice: T[lo..hi]  T[lo..]  T[..hi]  T[..]
     /// Only produced by parse_index_item; never appears outside Index children.
     Slice(Option<Box<Expr>>, Option<Box<Expr>>),
+    /// `GPU { ... }` — a block evaluated on the GPU compute backend.
+    /// The body is a standard `Expr::Block`.
+    GpuBlock(Box<Expr>),
 }
 
 #[derive(Debug, Clone)]

@@ -1,0 +1,23 @@
+[1;4mGPU[0m
+
+[1mGPU { ... }[0m evaluates a block on the GPU compute backend. Captured
+variables (scalars and real tensors from the surrounding scope) are uploaded,
+the block runs on the device, and only the final result is downloaded back.
+
+Build with the gpu feature to enable it:  cargo build --release --features gpu
+Without it, a GPU block reports "GPU backend not compiled in".
+
+Currently supported inside a block:
+  - elementwise arithmetic:  + - * / ^   (tensor/tensor, tensor/scalar, scalar/scalar)
+  - unary negation:  -T
+  - local bindings:  c = A + B; c * 2   (last expression is the result)
+
+Precision is f32 on the GPU; results are converted back to f64 on download,
+so expect ~7 significant digits versus a CPU computation.
+
+[1mExamples:[0m
+[0m> A=[1,2,3]; B=[10,20,30]; GPU { A + B }
+result = [11, 22, 33]
+> A=[1,2,3]; GPU { c = A + 1; c * 2 }
+result = [4, 6, 8]
+[0m

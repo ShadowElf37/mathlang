@@ -219,7 +219,10 @@ fn highlight_line(line: &str, user_fns: &[String], user_vars: &[String],
                 }
                 continue;
             }
-            if BUILTIN_CONSTS.contains(&name) {
+            if name == "GPU" {
+                // GPU compute block keyword — bold red to flag a different context.
+                out.push_str(&format!("\x1b[1;31m{name}\x1b[0m"));
+            } else if BUILTIN_CONSTS.contains(&name) {
                 out.push_str(&format!("\x1b[36m{name}\x1b[0m"));
             } else if BUILTIN_FNS.contains(&name) || user_fns.iter().any(|u| u == name) {
                 out.push_str(&format!("\x1b[95m{name}\x1b[0m"));
@@ -1006,6 +1009,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     "           iterate(f,x0,n)  scan(f,x0,n)  cumsum cumprod diff\n\n",
                     "Other:     mean std  fft ifft  rand  re im arg conj  cell get set\n",
                     "           field(data,lo,hi,bc) | field(f,lo,hi,counts,bc)  — scalar field (0-form)\n",
+                    "           GPU {{ … }}  — evaluate a block on the GPU (build with --features gpu)\n",
                     "           Constants: pi e phi inf i\n\n",
                     "Namespaces — use !help <ns> for members and usage:\n",
                     "  ops     PDE operators: grad div curl lap poisson specgrad\n",

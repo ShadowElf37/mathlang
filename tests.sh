@@ -1614,6 +1614,29 @@ run "tilde.tensor"     "~tensor(x -> x, 4)"           "[1, 0, 0, 0]"
 run "tilde.bits.not.agree" "bits.not(0) == ~0"        "1"
 run_err "tilde.not.flat"  "not(1)"                    ""
 
+# ── GPU compute backend (only when built with --features gpu + a GPU present) ──
+section "GPU BACKEND"
+gpu_probe=$("$M" 'GPU { 1 + 1 }' 2>&1)
+if echo "$gpu_probe" | grep -qiE 'not compiled in|no adapter found'; then
+    echo "  (skipped: GPU backend unavailable — $(norm "$gpu_probe"))"
+else
+    run "gpu.scalar.add"     "GPU { 3 + 4 }"                                  "7"
+    run "gpu.scalar.expr"    "GPU { 2 * (3 + 4) }"                            "14"
+    run "gpu.tensor.add"     "A=[1,2,3,4]; B=[10,20,30,40]; GPU { A + B }"    "[11, 22, 33, 44]"
+    run "gpu.tensor.sub"     "A=[10,20,30]; B=[1,2,3]; GPU { A - B }"         "[9, 18, 27]"
+    run "gpu.tensor.mul"     "A=[1,2,3]; B=[4,5,6]; GPU { A * B }"            "[4, 10, 18]"
+    run "gpu.tensor.scalar"  "A=[1,2,3]; GPU { A + 10 }"                      "[11, 12, 13]"
+    run "gpu.scalar.tensor"  "A=[1,2,3]; GPU { 100 - A }"                     "[99, 98, 97]"
+    run "gpu.tensor.div"     "A=[10,20,30]; GPU { A / 10 }"                   "[1, 2, 3]"
+    run "gpu.tensor.pow"     "A=[1,2,3]; GPU { A ^ 2 }"                       "[1, 4, 9]"
+    run "gpu.tensor.neg"     "A=[1,2,3]; GPU { -A }"                          "[-1, -2, -3]"
+    run "gpu.intermediate"   "A=[1,2,3]; B=[1,1,1]; GPU { c = A + B; c * 2 }" "[4, 6, 8]"
+    run "gpu.matrix.add"     "A=[1,2;3,4]; B=[10,20;30,40]; GPU { A + B }"    "⎡ 11  22 ⎤ ⎣ 33  44 ⎦"
+    run_err "gpu.err.shape"  "A=[1,2,3]; B=[1,2]; GPU { A + B }"
+    run_err "gpu.err.undef"  "GPU { nope + 1 }"
+    run_err "gpu.err.fn"     "f = x -> x; GPU { f + 1 }"
+fi
+
 # ── print summary ─────────────────────────────────────────────────────────────
 echo
 echo "================================"

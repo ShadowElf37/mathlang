@@ -569,6 +569,13 @@ impl Parser {
             Token::Minus => { self.bump(); Ok(Expr::Neg(self.primary()?.into())) }
             Token::Ident(name) => {
                 self.bump();
+                // `GPU { ... }` — a GPU compute block. Only treated specially when
+                // immediately followed by `{`, so `GPU` stays usable as a name.
+                if name == "GPU" && *self.peek() == Token::LBrace {
+                    self.bump();
+                    let body = self.parse_block_inner()?;
+                    return Ok(Expr::GpuBlock(Box::new(body)));
+                }
                 if *self.peek() == Token::Arrow {
                     self.bump();
                     Ok(Expr::Lambda(vec![Param { name, hint: None }], None, self.expr()?.into()))

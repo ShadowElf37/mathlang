@@ -1,6 +1,6 @@
 [package]
 name = "mathlang"
-version = "0.27.0"
+version = "0.28.0"
 edition = "2024"
 
 [[bin]]
@@ -17,6 +17,10 @@ image = { version = "0.24", default-features = false, features = ["png"] }
 libm = "0.2"
 rustfft = "6"
 hdf5 = { package = "hdf5-metno", version = "0.12", optional = true }
+wgpu = { version = "22", optional = true }
+bytemuck = { version = "1", optional = true, features = ["derive"] }
+pollster = { version = "0.3", optional = true }
 
 [features]
 hdf5 = ["dep:hdf5"]
+gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
