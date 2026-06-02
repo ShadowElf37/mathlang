@@ -32,16 +32,21 @@ use crate::eval::{Val, Env, eval, apply_val};
 fn write_frame_xy(out: &mut impl Write, data: &[f64], nx: usize, ny: usize, t: f64)
     -> std::io::Result<()>
 {
-    out.write_all(b"MXFR")?;
-    out.write_all(&(nx as u32).to_le_bytes())?;  // width  = nx
-    out.write_all(&(ny as u32).to_le_bytes())?;  // height = ny
-    out.write_all(&1u32.to_le_bytes())?;
-    out.write_all(&t.to_le_bytes())?;
+    // Build the whole MXFR frame in one buffer, then write it with a single
+    // call. Writing per-pixel (nx*ny `write_all`s) is dramatically slower for
+    // large grids, even through a BufWriter.
+    let mut buf: Vec<u8> = Vec::with_capacity(24 + nx * ny * 4);
+    buf.extend_from_slice(b"MXFR");
+    buf.extend_from_slice(&(nx as u32).to_le_bytes());  // width  = nx
+    buf.extend_from_slice(&(ny as u32).to_le_bytes());  // height = ny
+    buf.extend_from_slice(&1u32.to_le_bytes());
+    buf.extend_from_slice(&t.to_le_bytes());
     for y in 0..ny {
         for x in 0..nx {
-            out.write_all(&(data[x * ny + y] as f32).to_le_bytes())?;
+            buf.extend_from_slice(&(data[x * ny + y] as f32).to_le_bytes());
         }
     }
+    out.write_all(&buf)?;
     out.flush()?;
     Ok(())
 }

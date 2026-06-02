@@ -141,6 +141,17 @@ run "block.fn_in_block"     "{f(x) = x^2; f(5)}"                   "25"
 run "block.as_expr"         "1 + {x=3; x*2}"                        "7"
 run "block.multi_out"       "{a=1; b=2; (a, b)}"                    "[1, 2]"
 
+# ── Top-level ';' is a statement separator (defs/exprs interleave; last is result)
+section "TOP-LEVEL SEMICOLONS"
+run "top.def_expr"          "x = 5; x + 1"                          "6"
+run "top.interleave"        "x = 5; x + 1; y = x * 2; y"            "10"
+run "top.expr_seq"          "1 + 1; 2 + 2; 3 + 3"                   "6"
+run "top.comma_tuple"       "sin(0), cos(0)"                        "[0, 1]"
+run "top.trailing_semi"     "a = 3; a;"                             "3"
+run "top.leading_semi"      ";; 7"                                  "7"
+run "top.fn_then_calls"     "f(x) = x*x; f(2); f(3); f(4)"          "16"
+run "top.lambda_block_seq"  "g = t -> {a = t+1; a*a}; g(1); g(2)"   "9"
+
 # ── Comparisons ───────────────────────────────────────────────────────────────
 section "COMPARISONS"
 run "cmp.lt_true"   "3 < 5"     "1"
@@ -1693,8 +1704,30 @@ else
     run_err "gpu.grad.noaxis" "A=[1,2,3]; GPU { ops.grad(A, 1) }"
     run_err "gpu.ops.spectral" "A=[1,2,3,4]; GPU { ops.poisson(A, 1) }"
 
+    # GPU-side tensor construction from index lambdas (no CPU per-cell loop)
+    run "gpu.tensor.1d"      "GPU { tensor(i -> i*i, 6) }"                     "[0, 1, 4, 9, 16, 25]"
+    run "gpu.tensor.2d"      "GPU { tensor((i,j) -> i*10 + j, 3, 4) }"        "⎡ 0  1  2  3 ⎤ ⎢ 10  11  12  13 ⎥ ⎣ 20  21  22  23 ⎦"
+    run "gpu.tensor.pow2"    "GPU { tensor(i -> (i-2)^2, 5) }"                "[4, 1, 0, 1, 4]"
+    run "gpu.tensor.unary"   "GPU { tensor(i -> sqrt(1.0*i), 4) }"            "[0, 1, 1.4142135381698608, 1.7320507764816284]"
+    run "gpu.tensor.scalarcap" "c=100; GPU { tensor(i -> i + c, 3) }"         "[100, 101, 102]"
+    run "gpu.tensor.gather"  "T=[1,2,3;4,5,6]; GPU { tensor((i,j) -> T[i,j]*2, 2, 3) }" "⎡ 2  4  6 ⎤ ⎣ 8  10  12 ⎦"
+    run "gpu.tensor.gather1d" "T=[10,20,30,40]; GPU { tensor(i -> T[i] + 1, 4) }" "[11, 21, 31, 41]"
+    run "gpu.tensor.cpuparity" "a=GPU{tensor((i,j)->1.0*((i-5)^2+(j-5)^2<9),11,11)}; b=tensor((i,j)->1.0*((i-5)^2+(j-5)^2<9),11,11); sum(abs(a-b))" "0"
+    run "gpu.tensor.compose" "GPU { sum(tensor((i,j) -> i+j, 3, 3)) }"        "18"
+    run_err "gpu.tensor.notfn"  "GPU { tensor(5, 3) }"
+    run_err "gpu.tensor.arity"  "GPU { tensor((i,j) -> i, 4) }"
+
+    # n-D scan: stack the orbit with TIME as the first axis -> [n+1, ...grid]
+    run "gpu.scan.matrix"    "GPU { scan(u -> u + 1, [10,20], 2) }"           "⎡ 10  20 ⎤ ⎢ 11  21 ⎥ ⎣ 12  22 ⎦"
+    run "gpu.scan.2dstate"   "u=[1,2;3,4]; b=GPU{scan(u -> u*2, u, 2)}; shape(b)" "[3, 2, 2]"
+    run "gpu.scan.timefirst" "u=[5,7]; b=GPU{scan(u -> u+10, u, 3)}; b[0]"     "[5, 7]"
+    run "gpu.scan.consume"   "GPU { sum(scan(x -> x+1, 0, 4)) }"              "10"
+
     # heat equation: GPU-resident time-stepping, Neumann BC conserves total mass
     run "gpu.heat.conserve"  "u=tensor((i,j)->1.0*((i-8)*(i-8)+(j-8)*(j-8)<9),16,16); r=GPU{iterate(u->u+0.2*ops.lap(u,1,ops.neumann),u,50)}; round(sum(r),3)" "25"
+
+    # GPU initial condition + GPU stepper via a CPU cell (canonical animation loop)
+    run "gpu.stepper.cell"   "u0=GPU{tensor((i,j)->1.0*((i-8)^2+(j-8)^2<9),16,16)}; st=cell(u0); f=t->{w=get(st); set(st, GPU{iterate(u->u+0.2*ops.lap(u,1,ops.neumann),w,1)}); w}; f(0); f(0); f(0); round(sum(get(st)),3)" "25"
 fi
 
 # ── print summary ─────────────────────────────────────────────────────────────

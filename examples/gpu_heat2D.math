@@ -1,0 +1,30 @@
+# GPU heat equation, animated — two canonical patterns.
+#
+# Build the REPL with the GPU backend:  cargo build --release --features gpu
+# Run:  ./target/release/m examples/gpu_heat2D.math   (needs the wgpu_animator)
+
+N = 400
+
+# Initial condition built ON THE GPU from an index lambda (no slow CPU loop):
+# a hot disk in the middle of a cold plate.
+u0 = GPU { tensor((i,j) -> 1.0*((i-N/2)^2 + (j-N/2)^2 < (N/8)^2), N, N) }
+
+# One explicit diffusion step (Neumann walls): u <- u + 0.2*∇²u.
+step(u) = u + 0.2*ops.lap(u, 1, ops.neumann)
+
+# ── Pattern A: streaming stepper (one resident GPU step per frame) ────────────
+# A CPU cell holds the state between frames; each frame downloads the current
+# field, advances it ONE step on the GPU, and stores it back. O(1) work per
+# frame (vs. the O(t²) trap of `t -> GPU { iterate(step, u0, t) }`, which
+# restarts from u0 every frame). Frames go back and forth like a game loop.
+st = cell(u0)
+frame = t -> { w = get(st); set(st, GPU { iterate(step, w, 1) }); w }
+!animate2D frame, 0, 400, 400
+
+# ── Pattern B: precompute the whole spacetime block, then play it ─────────────
+# `scan` keeps the field GPU-resident across all steps and returns the stacked
+# orbit with TIME AS THE FIRST AXIS: shape [n+1, N, N] — exactly what animate2D
+# wants. One download of the whole block, then smooth playback.
+#
+# block = GPU { scan(step, u0, 400) }
+# !animate2D block

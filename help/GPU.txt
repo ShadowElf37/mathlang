@@ -16,8 +16,19 @@ Supported inside a block:
   - min/max:      two-arg elementwise form, e.g. min(T, 0)
   - stencils:     shift(T,n,axis)  roll(T,n,axis)
                   ops.lap(T,dx[,bc])   ops.grad(T,dx,axis)   (bc: ops.neumann)
+  - construct:    tensor((i,j) -> expr, m, n)   — built on the GPU in one kernel;
+                  the body may gather from captured tensors, e.g. T[i,j]
   - loops:        iterate(step, x0, n)   scan(step, x0, n)
   - bindings:     c = A + B; c * 2   (last expression is the result)
+
+[1mtensor((i,j) -> expr, m, n)[0m builds a tensor directly on the GPU from an index
+lambda — no slow per-cell CPU loop. The body may use the index params, captured
+scalars, unary math, and gather from captured tensors (T[i,j]). This is the way
+to build large initial conditions: u0 = GPU { tensor(...) }.
+
+[1mscan[0m stacks the whole orbit with TIME AS THE FIRST AXIS: a scalar state gives
+[n+1]; a grid state of shape [..] gives [n+1, ..] — a spacetime block ready for
+!animate2D in a single download.
 
 [1miterate / scan (residency)[0m keep state on the GPU across all n steps,
 so PDE/time-stepping stays on the device with no per-step round-trip. The step
@@ -38,6 +49,13 @@ result = 1000000
 result = 1024
 > u=[1,2,3,4]; GPU { iterate(u -> u*0.5, u, 3) }
 result = [0.125, 0.25, 0.375, 0.5]
-> N=2000; u0=tensor((i,j)->1.0*((i-1000)^2+(j-1000)^2<2500),N,N)
+> N=2000; u0=GPU { tensor((i,j)->1.0*((i-1000)^2+(j-1000)^2<2500), N, N) }  # IC on GPU
 > GPU { iterate(u -> u + 0.2*ops.lap(u,1,ops.neumann), u0, 200) }   # 4M-cell heat eq
+>
+> # Animate a GPU sim — stream one resident step per frame (state in a CPU cell):
+> step(u) = u + 0.2*ops.lap(u, 1, ops.neumann)
+> st = cell(u0); frame = t -> { w = get(st); set(st, GPU { iterate(step, w, 1) }); w }
+> !animate2D frame, 0, 400, 400
+> # …or precompute the whole [n+1,N,N] spacetime block (time first) and play it:
+> !animate2D (GPU { scan(step, u0, 400) })           # see examples/gpu_heat2D.math
 [0m

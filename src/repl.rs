@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use crate::lexer::Lexer;
-use crate::ast::Def;
+use crate::ast::{BlockStmt, Def};
 use crate::parser::Parser;
 use crate::eval::{Val, Env, TData, eval, fmt_val, is_protected, FnSig, builtin_sig, infer_type, hint_of_val};
 
@@ -354,13 +354,16 @@ pub fn eval_line(line: &str, env: &mut Env, repl: bool) -> bool {
     if line.is_empty() { return true; }
     let toks = Lexer::new(line).tokenize();
     let mut parser = Parser::new(toks);
-    let (defs, exprs) = match parser.parse_repl() {
+    let stmts = match parser.parse_repl() {
         Ok(v) => v,
         Err(e) => { eprintln!("error: {e}"); return false; }
     };
-    for def in &defs {
-        match def {
-            Def::Var(name, expr) => {
+    // Execute statements in source order: definitions persist into the REPL
+    // environment, expressions evaluate; the last expression is the result.
+    let mut last_val: Option<Val> = None;
+    for stmt in &stmts {
+        match stmt {
+            BlockStmt::Def(Def::Var(name, expr)) => {
                 if is_protected(name) {
                     eprintln!("error: cannot redefine built-in '{name}'");
                     return false;
@@ -370,7 +373,7 @@ pub fn eval_line(line: &str, env: &mut Env, repl: bool) -> bool {
                     Err(e) => { eprintln!("error: {e}"); return false; }
                 }
             }
-            Def::Func(name, params, ret_hint, body) => {
+            BlockStmt::Def(Def::Func(name, params, ret_hint, body)) => {
                 if is_protected(name) {
                     eprintln!("error: cannot redefine built-in '{name}'");
                     return false;
@@ -385,20 +388,15 @@ pub fn eval_line(line: &str, env: &mut Env, repl: bool) -> bool {
                 captured.insert(name.clone(), fn_val);
                 env.define(name.clone(), Val::make_fn_with_sig(names, sig, body.clone(), std::sync::Arc::new(captured)));
             }
-        }
-    }
-    let vals: Vec<Val> = {
-        let mut acc = vec![];
-        for expr in &exprs {
-            match eval(expr, env) {
-                Ok(v) => acc.push(v),
-                Err(e) => { eprintln!("error: {e}"); return false; }
+            BlockStmt::Expr(expr) => {
+                match eval(expr, env) {
+                    Ok(v) => { last_val = Some(v); }
+                    Err(e) => { eprintln!("error: {e}"); return false; }
+                }
             }
         }
-        acc
-    };
-    if !vals.is_empty() {
-        let v = if vals.len() == 1 { vals.into_iter().next().unwrap() } else { Val::Tuple(vals) };
+    }
+    if let Some(v) = last_val {
         if repl {
             let formatted = fmt_repl(&v);
             if formatted.contains('\n') {
@@ -1004,7 +1002,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     "           iterate(f,x0,n)  scan(f,x0,n)  cumsum cumprod diff\n\n",
                     "Other:     mean std  fft ifft  rand  re im arg conj  cell get set\n",
                     "           field(data,lo,hi,bc) | field(f,lo,hi,counts,bc)  — scalar field (0-form)\n",
-                    "           GPU {{ … }}  — GPU compute: elementwise/unary/reduce, iterate/scan (--features gpu)\n",
+                    "           GPU {{ … }}  — GPU compute: elementwise/unary/reduce, stencils, tensor(...), iterate/scan (--features gpu)\n",
                     "           Constants: pi e phi inf i\n\n",
                     "Namespaces — use !help <ns> for members and usage:\n",
                     "  ops     PDE operators: grad div curl lap poisson specgrad\n",
@@ -1134,8 +1132,8 @@ fn bang_command(cmd: &str, env: &mut Env) {
         "graph" => {
             if arg.is_empty() { eprintln!("usage: !graph f [, a, b]"); return; }
             let toks = Lexer::new(arg).tokenize();
-            match Parser::new(toks).parse_repl() {
-                Ok((_, exprs)) if !exprs.is_empty() => {
+            match Parser::new(toks).parse_args() {
+                Ok(exprs) if !exprs.is_empty() => {
                     if let Err(e) = crate::graph::eval_graph(&exprs, env) {
                         eprintln!("graph: {e}");
                     }
@@ -1150,8 +1148,8 @@ fn bang_command(cmd: &str, env: &mut Env) {
                 return;
             }
             let toks = Lexer::new(arg).tokenize();
-            match Parser::new(toks).parse_repl() {
-                Ok((_, exprs)) if !exprs.is_empty() => {
+            match Parser::new(toks).parse_args() {
+                Ok(exprs) if !exprs.is_empty() => {
                     if let Err(e) = crate::animate::eval_animate2d(&exprs, env) {
                         eprintln!("animate2D: {e}");
                     }
@@ -1166,8 +1164,8 @@ fn bang_command(cmd: &str, env: &mut Env) {
                 return;
             }
             let toks = Lexer::new(arg).tokenize();
-            match Parser::new(toks).parse_repl() {
-                Ok((_, exprs)) if !exprs.is_empty() => {
+            match Parser::new(toks).parse_args() {
+                Ok(exprs) if !exprs.is_empty() => {
                     if let Err(e) = crate::animate::eval_animate2d_raw(&exprs, env) {
                         eprintln!("animate2D_raw: {e}");
                     }
@@ -1201,9 +1199,9 @@ fn bang_command(cmd: &str, env: &mut Env) {
                             }
                         }
                         let toks = Lexer::new(expr_src.trim()).tokenize();
-                        match Parser::new(toks).parse_repl() {
+                        match Parser::new(toks).parse_args() {
                             Err(e) => out.push_str(&format!("<parse error: {e}>")),
-                            Ok((_, exprs)) => match exprs.first() {
+                            Ok(exprs) => match exprs.first() {
                                 None => {}
                                 Some(node) => match eval(node, env) {
                                     Ok(val) => out.push_str(&fmt_val(&val)),
@@ -1433,8 +1431,8 @@ fn bang_command(cmd: &str, env: &mut Env) {
             if let Some(sig) = builtin_sig(name) { println!("{sig}"); return; }
             // Otherwise, parse and statically infer the type of the expression.
             let toks = Lexer::new(name).tokenize();
-            match Parser::new(toks).parse_repl() {
-                Ok((_, exprs)) => match exprs.first() {
+            match Parser::new(toks).parse_args() {
+                Ok(exprs) => match exprs.first() {
                     Some(e) => {
                         let empty = std::collections::HashMap::new();
                         println!("{}", infer_type(e, &empty, env).display());

@@ -22,7 +22,9 @@ use wgpu::util::DeviceExt;
 use context::GpuContext;
 
 /// A value living in the GPU evaluation scope: either a CPU-side scalar (passed
-/// into shaders as a literal) or a GPU-resident f32 buffer.
+/// into shaders as a literal), a GPU-resident f32 buffer, or a result that has
+/// already been downloaded to host memory (`scan`'s assembled spacetime block —
+/// kept on the host to avoid a pointless re-upload/re-download round-trip).
 #[derive(Clone)]
 enum GpuVal {
     Scalar(f64),
@@ -31,6 +33,28 @@ enum GpuVal {
         shape: Vec<usize>,
         len:   usize,
     },
+    Host {
+        data:  Rc<Vec<f32>>,
+        shape: Vec<usize>,
+        len:   usize,
+    },
+}
+
+/// Ensure a value is GPU-resident, uploading a host-side result if needed. A
+/// `Host` value only stays on the host when it flows straight to the final
+/// download; if it is consumed by another GPU op we materialize it here.
+fn materialize(ctx: &GpuContext, v: GpuVal) -> GpuVal {
+    match v {
+        GpuVal::Host { data, shape, len } => {
+            let buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("gpu-host-upload"),
+                contents: bytemuck::cast_slice(if data.is_empty() { &[0.0f32][..] } else { &data[..] }),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            });
+            GpuVal::Buffer { buf: Rc::new(buf), shape, len }
+        }
+        other => other,
+    }
 }
 
 /// Entry point, called from the `Expr::GpuBlock` arm in `src/eval.rs`.
@@ -59,13 +83,14 @@ fn eval_gpu(
         Expr::Num(n) => Ok(GpuVal::Scalar(*n)),
 
         Expr::Neg(x) => {
-            let v = eval_gpu(x, env, ctx, scope)?;
+            let v = materialize(ctx, eval_gpu(x, env, ctx, scope)?);
             match v {
                 GpuVal::Scalar(s) => Ok(GpuVal::Scalar(-s)),
                 GpuVal::Buffer { buf, shape, len } => {
                     let out = run_map(ctx, &[&buf], len, "-in0[i]")?;
                     Ok(GpuVal::Buffer { buf: out, shape, len })
                 }
+                GpuVal::Host { .. } => unreachable!("materialized above"),
             }
         }
 
@@ -159,7 +184,8 @@ fn eval_scalar_elems(
 ) -> Result<Vec<f32>, String> {
     elems.iter().map(|e| match eval_gpu(e, env, ctx, scope)? {
         GpuVal::Scalar(s) => Ok(s as f32),
-        GpuVal::Buffer { .. } => Err("GPU: tensor literals must contain scalar elements".to_string()),
+        GpuVal::Buffer { .. } | GpuVal::Host { .. } =>
+            Err("GPU: tensor literals must contain scalar elements".to_string()),
     }).collect()
 }
 
@@ -188,6 +214,10 @@ fn eval_apply(
     match name {
         "iterate" => gpu_iterate(args, env, ctx, scope),
         "scan"    => gpu_scan(args, env, ctx, scope),
+
+        // GPU-side tensor construction from an index lambda (built on the device,
+        // never materialized cell-by-cell on the CPU). See `gpu_tensor`.
+        "tensor"  => gpu_tensor(args, env, ctx, scope),
 
         // Stencils available as flat builtins.
         "shift" | "roll" => shift_roll(name, args, env, ctx, scope),
@@ -225,10 +255,11 @@ fn cpu_scalar(e: &Expr, env: &Env) -> Result<f64, String> {
     crate::eval::eval(e, env)?.num("GPU op argument")
 }
 
-fn expect_buffer(v: GpuVal, ctx: &str) -> Result<(Rc<wgpu::Buffer>, Vec<usize>, usize), String> {
-    match v {
+fn expect_buffer(gctx: &GpuContext, v: GpuVal, what: &str) -> Result<(Rc<wgpu::Buffer>, Vec<usize>, usize), String> {
+    match materialize(gctx, v) {
         GpuVal::Buffer { buf, shape, len } => Ok((buf, shape, len)),
-        GpuVal::Scalar(_) => Err(format!("GPU: {ctx} expects a tensor, got a scalar")),
+        GpuVal::Scalar(_) => Err(format!("GPU: {what} expects a tensor, got a scalar")),
+        GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
 
@@ -252,7 +283,7 @@ fn op_expr(op: &Op, a: &str, b: &str) -> Result<String, String> {
 
 /// Evaluate `lhs op rhs` on the GPU (or CPU for scalar/scalar).
 fn binop(ctx: &GpuContext, op: &Op, lhs: GpuVal, rhs: GpuVal) -> Result<GpuVal, String> {
-    match (lhs, rhs) {
+    match (materialize(ctx, lhs), materialize(ctx, rhs)) {
         (GpuVal::Scalar(x), GpuVal::Scalar(y)) => Ok(GpuVal::Scalar(scalar_op(op, x, y)?)),
 
         (GpuVal::Buffer { buf, shape, len }, GpuVal::Scalar(s)) => {
@@ -281,6 +312,7 @@ fn binop(ctx: &GpuContext, op: &Op, lhs: GpuVal, rhs: GpuVal) -> Result<GpuVal, 
             let out = run_map(ctx, &[&a, &b], la, &expr)?;
             Ok(GpuVal::Buffer { buf: out, shape: sa, len: la })
         }
+        _ => unreachable!("Host values are materialized above"),
     }
 }
 
@@ -364,20 +396,21 @@ fn unary_cpu(name: &str, x: f64) -> f64 {
 }
 
 fn unary_val(ctx: &GpuContext, name: &str, v: GpuVal) -> Result<GpuVal, String> {
-    match v {
+    match materialize(ctx, v) {
         GpuVal::Scalar(s) => Ok(GpuVal::Scalar(unary_cpu(name, s))),
         GpuVal::Buffer { buf, shape, len } => {
             let expr = unary_wgsl(name, "in0[i]").unwrap();
             let out = run_map(ctx, &[&buf], len, &expr)?;
             Ok(GpuVal::Buffer { buf: out, shape, len })
         }
+        GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
 
 /// Elementwise `min`/`max` of two operands.
 fn binary_minmax(ctx: &GpuContext, name: &str, a: GpuVal, b: GpuVal) -> Result<GpuVal, String> {
     let f = name; // "min" | "max"
-    match (a, b) {
+    match (materialize(ctx, a), materialize(ctx, b)) {
         (GpuVal::Scalar(x), GpuVal::Scalar(y)) =>
             Ok(GpuVal::Scalar(if f == "min" { x.min(y) } else { x.max(y) })),
         (GpuVal::Buffer { buf, shape, len }, GpuVal::Scalar(s)) => {
@@ -395,6 +428,7 @@ fn binary_minmax(ctx: &GpuContext, name: &str, a: GpuVal, b: GpuVal) -> Result<G
             let out = run_map(ctx, &[&a, &b], la, &format!("{f}(in0[i], in1[i])"))?;
             Ok(GpuVal::Buffer { buf: out, shape: sa, len: la })
         }
+        _ => unreachable!("Host values are materialized above"),
     }
 }
 
@@ -402,7 +436,7 @@ fn binary_minmax(ctx: &GpuContext, name: &str, a: GpuVal, b: GpuVal) -> Result<G
 
 /// Reduce a value with `sum`/`mean`/`min`/`max`, returning a scalar.
 fn reduce_val(ctx: &GpuContext, name: &str, v: GpuVal) -> Result<GpuVal, String> {
-    match v {
+    match materialize(ctx, v) {
         GpuVal::Scalar(s) => Ok(GpuVal::Scalar(s)),
         GpuVal::Buffer { buf, len, .. } => {
             if len == 0 { return Err(format!("GPU: {name} of an empty tensor")); }
@@ -410,6 +444,7 @@ fn reduce_val(ctx: &GpuContext, name: &str, v: GpuVal) -> Result<GpuVal, String>
             let total = reduce(ctx, buf, len, kind)?;
             Ok(GpuVal::Scalar(if name == "mean" { total / len as f64 } else { total }))
         }
+        GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
 
@@ -654,7 +689,7 @@ fn ops_op(name: &str, args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut Ha
             let t = eval_gpu(&args[0], env, ctx, scope)?;
             let dx = cpu_scalar(&args[1], env)?;
             let neumann = args.len() == 3 && cpu_scalar(&args[2], env)? != 0.0;
-            let (buf, shape, len) = expect_buffer(t, "ops.lap")?;
+            let (buf, shape, len) = expect_buffer(ctx, t, "ops.lap")?;
             if shape.is_empty() { return Err("ops.lap: need a tensor of rank >= 1".into()); }
             let taps = lap_taps(shape.len(), dx);
             let bcs = vec![neumann; shape.len()];
@@ -669,7 +704,7 @@ fn ops_op(name: &str, args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut Ha
             let t = eval_gpu(&args[0], env, ctx, scope)?;
             let dx = cpu_scalar(&args[1], env)?;
             let axis = cpu_scalar(&args[2], env)? as usize;
-            let (buf, shape, len) = expect_buffer(t, "ops.grad")?;
+            let (buf, shape, len) = expect_buffer(ctx, t, "ops.grad")?;
             if axis >= shape.len() {
                 return Err(format!("ops.grad: axis {axis} out of range for rank-{} tensor", shape.len()));
             }
@@ -692,7 +727,7 @@ fn shift_roll(name: &str, args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mu
     let t = eval_gpu(&args[0], env, ctx, scope)?;
     let n = cpu_scalar(&args[1], env)? as i64;
     let axis = cpu_scalar(&args[2], env)? as usize;
-    let (buf, shape, len) = expect_buffer(t, name)?;
+    let (buf, shape, len) = expect_buffer(ctx, t, name)?;
     if axis >= shape.len() {
         return Err(format!("{name}: axis {axis} out of range for rank-{} tensor", shape.len()));
     }
@@ -702,6 +737,369 @@ fn shift_roll(name: &str, args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mu
     let mut bcs = vec![false; shape.len()];
     if name == "shift" { bcs[axis] = true; } // clamp; roll wraps (periodic)
     let out = run_stencil(ctx, &buf, &shape, len, &taps, &bcs)?;
+    Ok(GpuVal::Buffer { buf: out, shape, len })
+}
+
+// ───────────────────────── tensor construction (index lambdas) ─────────────────────────
+//
+// `tensor((i,j)->expr, m, n)` builds a tensor on the GPU: one fused kernel runs
+// per output cell, recovering the multi-index from the thread id, binding the
+// index parameters, and evaluating the lambda body — which is compiled directly
+// from the AST to WGSL (no CPU per-cell evaluation). The body may also gather
+// from captured tensors via `T[i,j]`. This is the GPU-side answer to slow
+// CPU-built initial conditions.
+
+/// A captured tensor referenced inside a tensor-lambda body, with the binding it
+/// is wired to and its row-major strides (for gather index math).
+struct TensorBind {
+    binding: usize,
+    shape:   Vec<usize>,
+    strides: Vec<usize>,
+}
+
+/// Context threaded through the AST→WGSL emitter for a tensor lambda.
+struct LamCtx<'a> {
+    params:  &'a [String],
+    tensors: &'a HashMap<String, TensorBind>,
+    env:     &'a Env,
+    scope:   &'a HashMap<String, GpuVal>,
+}
+
+/// Resolve the lambda argument of `tensor(...)` to (param names, body).
+fn resolve_lambda(f: &Expr, env: &Env) -> Result<(Vec<String>, Expr), String> {
+    match f {
+        Expr::Lambda(ps, _, body) => {
+            Ok((ps.iter().map(|p| p.name.clone()).collect(), (**body).clone()))
+        }
+        Expr::Var(name) => match env.vars.get(name) {
+            Some(Val::Fn(ps, body, _, _, _)) => Ok((ps.clone(), body.clone())),
+            Some(other) => Err(format!("GPU: tensor: `{name}` is not a function ({})", fmt_val(other))),
+            None => Err(format!("GPU: undefined function `{name}`")),
+        },
+        _ => Err("GPU: tensor's first argument must be an index lambda".into()),
+    }
+}
+
+/// Is `name` a tensor available for capture (already GPU-resident, or a CPU
+/// tensor in the enclosing scope)?
+fn is_tensor_capture(name: &str, env: &Env, scope: &HashMap<String, GpuVal>) -> bool {
+    matches!(scope.get(name), Some(GpuVal::Buffer { .. }) | Some(GpuVal::Host { .. }))
+        || matches!(env.vars.get(name), Some(Val::Tensor { .. }))
+}
+
+/// Walk a lambda body collecting the names of captured tensors it references
+/// (so they can be uploaded and bound before the kernel runs).
+fn collect_lambda_tensors(
+    e: &Expr,
+    params: &[String],
+    env: &Env,
+    scope: &HashMap<String, GpuVal>,
+    out: &mut Vec<String>,
+) {
+    match e {
+        Expr::Var(name) => {
+            if !params.iter().any(|p| p == name)
+                && is_tensor_capture(name, env, scope)
+                && !out.iter().any(|o| o == name)
+            {
+                out.push(name.clone());
+            }
+        }
+        Expr::Neg(x) | Expr::Not(x) => collect_lambda_tensors(x, params, env, scope, out),
+        Expr::BinOp(l, _, r) | Expr::Range(l, r) => {
+            collect_lambda_tensors(l, params, env, scope, out);
+            collect_lambda_tensors(r, params, env, scope, out);
+        }
+        Expr::Index(b, i) => {
+            collect_lambda_tensors(b, params, env, scope, out);
+            collect_lambda_tensors(i, params, env, scope, out);
+        }
+        Expr::Apply(f, args) => {
+            collect_lambda_tensors(f, params, env, scope, out);
+            for a in args { collect_lambda_tensors(a, params, env, scope, out); }
+        }
+        Expr::Tuple(xs) | Expr::Array(xs) => {
+            for x in xs { collect_lambda_tensors(x, params, env, scope, out); }
+        }
+        Expr::TensorLit(rows) => {
+            for row in rows { for x in row { collect_lambda_tensors(x, params, env, scope, out); } }
+        }
+        Expr::Member(b, _) | Expr::GpuBlock(b) => collect_lambda_tensors(b, params, env, scope, out),
+        Expr::Block(stmts) => {
+            for s in stmts {
+                match s {
+                    BlockStmt::Expr(x) => collect_lambda_tensors(x, params, env, scope, out),
+                    BlockStmt::Def(Def::Var(_, x)) => collect_lambda_tensors(x, params, env, scope, out),
+                    BlockStmt::Def(Def::Func(..)) => {}
+                }
+            }
+        }
+        Expr::Slice(a, b) => {
+            if let Some(a) = a { collect_lambda_tensors(a, params, env, scope, out); }
+            if let Some(b) = b { collect_lambda_tensors(b, params, env, scope, out); }
+        }
+        _ => {}
+    }
+}
+
+/// A non-negative integer literal, if `e` is one.
+fn int_lit(e: &Expr) -> Option<i64> {
+    match e {
+        Expr::Num(n) if n.fract() == 0.0 => Some(*n as i64),
+        _ => None,
+    }
+}
+
+/// Resolve a bare variable to a CPU-known scalar (captured `Num`, or a scalar
+/// block-local) so it can be baked into the kernel as a literal.
+fn lookup_scalar(name: &str, ctx: &LamCtx) -> Option<f64> {
+    if let Some(GpuVal::Scalar(s)) = ctx.scope.get(name) { return Some(*s); }
+    if let Some(Val::Num(f)) = ctx.env.vars.get(name) { return Some(*f); }
+    None
+}
+
+/// Emit a WGSL f32-valued expression for a tensor-lambda body node.
+fn emit_expr(e: &Expr, ctx: &LamCtx) -> Result<String, String> {
+    match e {
+        Expr::Num(n) => Ok(wgsl_f32(*n)),
+        Expr::Neg(x) => Ok(format!("(-({}))", emit_expr(x, ctx)?)),
+        Expr::Not(x) => Ok(format!("f32(({}) == f32(0.0))", emit_expr(x, ctx)?)),
+
+        Expr::Var(name) => {
+            if ctx.params.iter().any(|p| p == name) {
+                Ok(name.clone()) // declared as an f32 coordinate in the kernel preamble
+            } else if let Some(s) = lookup_scalar(name, ctx) {
+                Ok(wgsl_f32(s))
+            } else if ctx.tensors.contains_key(name) {
+                Err(format!("GPU: tensor `{name}` used without an index in a tensor lambda; write `{name}[i, …]`"))
+            } else {
+                Err(format!("GPU: undefined variable `{name}` in tensor lambda"))
+            }
+        }
+
+        // Integer powers expand to repeated multiplication: exact and sign-correct
+        // (WGSL `pow` returns NaN for a negative base, which breaks e.g. (i-c)^2).
+        Expr::BinOp(l, Op::Pow, r) if int_lit(r).map_or(false, |k| (0..=16).contains(&k)) => {
+            let k = int_lit(r).unwrap();
+            if k == 0 { return Ok("f32(1.0)".into()); }
+            let a = emit_expr(l, ctx)?;
+            let factors = std::iter::repeat(format!("({a})")).take(k as usize).collect::<Vec<_>>().join(" * ");
+            Ok(format!("({factors})"))
+        }
+        Expr::BinOp(l, op, r) => {
+            let a = emit_expr(l, ctx)?;
+            let b = emit_expr(r, ctx)?;
+            op_expr(op, &a, &b)
+        }
+
+        Expr::Apply(f, args) => emit_apply(f, args, ctx),
+        Expr::Index(base, idx) => emit_index(base, idx, ctx),
+
+        Expr::Block(stmts) => {
+            let mut last = None;
+            for s in stmts {
+                match s {
+                    BlockStmt::Expr(x) => last = Some(emit_expr(x, ctx)?),
+                    BlockStmt::Def(_) => return Err(
+                        "GPU: local bindings inside a tensor lambda are not supported; inline the expression".into()),
+                }
+            }
+            last.ok_or_else(|| "GPU: tensor lambda block has no result expression".to_string())
+        }
+
+        other => Err(format!("GPU: unsupported expression in tensor lambda: {other:?}")),
+    }
+}
+
+/// Emit a function call inside a tensor lambda (unary math, or 2-arg min/max).
+fn emit_apply(f: &Expr, args: &[Expr], ctx: &LamCtx) -> Result<String, String> {
+    let name = match f {
+        Expr::Var(n) => n.as_str(),
+        _ => return Err("GPU: only named function calls are supported in a tensor lambda".into()),
+    };
+    if args.len() == 1 {
+        if unary_wgsl(name, "x").is_some() {
+            let a = emit_expr(&args[0], ctx)?;
+            return Ok(unary_wgsl(name, &a).unwrap());
+        }
+    }
+    if args.len() == 2 && (name == "min" || name == "max") {
+        let a = emit_expr(&args[0], ctx)?;
+        let b = emit_expr(&args[1], ctx)?;
+        return Ok(format!("{name}({a}, {b})"));
+    }
+    Err(format!("GPU: function `{name}` not supported in a tensor lambda"))
+}
+
+/// Emit a captured-tensor gather `T[i, j, …]` as a clamped linear-index read.
+fn emit_index(base: &Expr, idx: &Expr, ctx: &LamCtx) -> Result<String, String> {
+    let name = match base {
+        Expr::Var(n) => n,
+        _ => return Err("GPU: indexing in a tensor lambda requires a captured tensor".into()),
+    };
+    let tb = ctx.tensors.get(name)
+        .ok_or_else(|| format!("GPU: `{name}` is not a captured tensor"))?;
+    let comps: Vec<&Expr> = match idx {
+        Expr::Tuple(v) => v.iter().collect(),
+        single => vec![single],
+    };
+    if comps.len() != tb.shape.len() {
+        return Err(format!(
+            "GPU: `{name}` has rank {} but was indexed with {} {}",
+            tb.shape.len(), comps.len(), if comps.len() == 1 { "index" } else { "indices" }
+        ));
+    }
+    let mut terms = Vec::with_capacity(comps.len());
+    for (k, c) in comps.iter().enumerate() {
+        let ce = emit_expr(c, ctx)?;
+        let max = tb.shape[k] as i64 - 1;
+        terms.push(format!("u32(clamp(i32({ce}), 0i, {max}i)) * {}u", tb.strides[k]));
+    }
+    Ok(format!("t{}[{}]", tb.binding, terms.join(" + ")))
+}
+
+/// Generate the WGSL for a tensor-construction kernel.
+fn tensor_lambda_wgsl(
+    params:  &[String],
+    shape:   &[usize],
+    strides: &[usize],
+    tensors: &HashMap<String, TensorBind>,
+    body:    &str,
+) -> String {
+    let mut s = String::new();
+    s += "@group(0) @binding(0) var<storage, read_write> out: array<f32>;\n";
+    let mut tv: Vec<&TensorBind> = tensors.values().collect();
+    tv.sort_by_key(|t| t.binding);
+    for t in &tv {
+        s += &format!("@group(0) @binding({0}) var<storage, read> t{0}: array<f32>;\n", t.binding);
+    }
+    let pbind = tensors.len() + 1;
+    s += "struct Params { len: u32, row: u32 };\n";
+    s += &format!("@group(0) @binding({pbind}) var<uniform> params: Params;\n");
+    s += "@compute @workgroup_size(256)\n";
+    s += "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n";
+    s += "  let lin = gid.y * params.row + gid.x;\n";
+    s += "  if (lin >= params.len) { return; }\n";
+    for (k, p) in params.iter().enumerate() {
+        // Recover the index along axis k from the linear id (row-major).
+        s += &format!("  let {p} = f32((lin / {}u) % {}u);\n", strides[k], shape[k]);
+    }
+    s += &format!("  out[lin] = {body};\n");
+    s += "}\n";
+    s
+}
+
+/// Dispatch a tensor-construction kernel, returning the output buffer.
+fn run_tensor_lambda(
+    ctx:   &GpuContext,
+    tbufs: &[Rc<wgpu::Buffer>],
+    len:   usize,
+    src:   &str,
+) -> Result<Rc<wgpu::Buffer>, String> {
+    let pipeline = get_pipeline(ctx, src);
+
+    let out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gpu-tensor-out"),
+        size: (len.max(1) * 4) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    const WG: u32 = 256;
+    const MAX_DIM: u32 = 65535;
+    let needed = (len as u32).div_ceil(WG).max(1);
+    let groups_x = needed.min(MAX_DIM);
+    let groups_y = needed.div_ceil(groups_x).max(1);
+    let row = groups_x * WG;
+
+    let params = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu-tensor-params"),
+        contents: bytemuck::cast_slice(&[len as u32, row]),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+
+    let mut entries: Vec<wgpu::BindGroupEntry> = Vec::with_capacity(tbufs.len() + 2);
+    entries.push(wgpu::BindGroupEntry { binding: 0, resource: out.as_entire_binding() });
+    for (j, b) in tbufs.iter().enumerate() {
+        entries.push(wgpu::BindGroupEntry { binding: (j + 1) as u32, resource: b.as_entire_binding() });
+    }
+    let pbind = tbufs.len() + 1;
+    entries.push(wgpu::BindGroupEntry { binding: pbind as u32, resource: params.as_entire_binding() });
+
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("gpu-tensor-bg"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &entries,
+    });
+
+    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("gpu-tensor-encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("gpu-tensor-pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(groups_x, groups_y, 1);
+    }
+    ctx.queue.submit(Some(encoder.finish()));
+    Ok(Rc::new(out))
+}
+
+/// `tensor(f, n1, n2, …)` — build a tensor on the GPU from an index lambda.
+fn gpu_tensor(args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut HashMap<String, GpuVal>) -> Result<GpuVal, String> {
+    if args.len() < 2 {
+        return Err("tensor(f, n1, n2, …) expects an index lambda and at least one dimension".into());
+    }
+    let (params, body) = resolve_lambda(&args[0], env)?;
+
+    let shape: Vec<usize> = args[1..].iter().map(|a| {
+        let d = cpu_scalar(a, env)?;
+        if d < 0.0 || d.fract() != 0.0 {
+            return Err(format!("GPU: tensor dimension must be a non-negative integer, got {d}"));
+        }
+        Ok(d as usize)
+    }).collect::<Result<_, _>>()?;
+
+    if params.len() != shape.len() {
+        return Err(format!(
+            "GPU: tensor lambda takes {} index argument(s) but {} dimension(s) were given",
+            params.len(), shape.len()
+        ));
+    }
+    let ndim = shape.len();
+    let len: usize = shape.iter().product();
+
+    // Row-major strides for the output grid.
+    let mut strides = vec![1usize; ndim];
+    for a in (0..ndim.saturating_sub(1)).rev() {
+        strides[a] = strides[a + 1] * shape[a + 1];
+    }
+
+    // Upload + bind every captured tensor the body gathers from.
+    let mut tnames: Vec<String> = Vec::new();
+    collect_lambda_tensors(&body, &params, env, scope, &mut tnames);
+    let mut tensors: HashMap<String, TensorBind> = HashMap::new();
+    let mut tbufs: Vec<Rc<wgpu::Buffer>> = Vec::with_capacity(tnames.len());
+    for (k, name) in tnames.iter().enumerate() {
+        let gv = eval_gpu(&Expr::Var(name.clone()), env, ctx, scope)?;
+        let (buf, tshape, _) = expect_buffer(ctx, gv, name)?;
+        let mut tstrides = vec![1usize; tshape.len()];
+        for a in (0..tshape.len().saturating_sub(1)).rev() {
+            tstrides[a] = tstrides[a + 1] * tshape[a + 1];
+        }
+        tensors.insert(name.clone(), TensorBind { binding: k + 1, shape: tshape, strides: tstrides });
+        tbufs.push(buf);
+    }
+
+    let body_wgsl = {
+        let lctx = LamCtx { params: &params, tensors: &tensors, env, scope };
+        emit_expr(&body, &lctx)?
+    };
+    let src = tensor_lambda_wgsl(&params, &shape, &strides, &tensors, &body_wgsl);
+    let out = run_tensor_lambda(ctx, &tbufs, len, &src)?;
     Ok(GpuVal::Buffer { buf: out, shape, len })
 }
 
@@ -766,7 +1164,7 @@ fn eval_count(arg: &Expr, env: &Env, ctx: &GpuContext, scope: &mut HashMap<Strin
     match eval_gpu(arg, env, ctx, scope)? {
         GpuVal::Scalar(s) if s >= 0.0 && s.fract() == 0.0 => Ok(s as usize),
         GpuVal::Scalar(s) => Err(format!("GPU: iterate/scan count must be a non-negative integer, got {s}")),
-        GpuVal::Buffer { .. } => Err("GPU: iterate/scan count must be a scalar".into()),
+        GpuVal::Buffer { .. } | GpuVal::Host { .. } => Err("GPU: iterate/scan count must be a scalar".into()),
     }
 }
 
@@ -774,7 +1172,7 @@ fn eval_count(arg: &Expr, env: &Env, ctx: &GpuContext, scope: &mut HashMap<Strin
 fn gpu_iterate(args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut HashMap<String, GpuVal>) -> Result<GpuVal, String> {
     if args.len() != 3 { return Err("iterate(f, x0, n) expects 3 args".into()); }
     let step = resolve_step(&args[0], env)?;
-    let mut state = eval_gpu(&args[1], env, ctx, scope)?;
+    let mut state = materialize(ctx, eval_gpu(&args[1], env, ctx, scope)?);
     let n = eval_count(&args[2], env, ctx, scope)?;
 
     let keys_before: Vec<String> = scope.keys().cloned().collect();
@@ -790,7 +1188,7 @@ fn gpu_iterate(args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut HashMap<S
 fn gpu_scan(args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut HashMap<String, GpuVal>) -> Result<GpuVal, String> {
     if args.len() != 3 { return Err("scan(f, x0, n) expects 3 args".into()); }
     let step = resolve_step(&args[0], env)?;
-    let x0 = eval_gpu(&args[1], env, ctx, scope)?;
+    let x0 = materialize(ctx, eval_gpu(&args[1], env, ctx, scope)?);
     let n = eval_count(&args[2], env, ctx, scope)?;
 
     let mut frames: Vec<GpuVal> = Vec::with_capacity(n + 1);
@@ -803,29 +1201,37 @@ fn gpu_scan(args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut HashMap<Stri
     }
     scope.retain(|k, _| keys_before.contains(k));
 
-    // Assemble frames into a single tensor (uploaded so it flows like any buffer).
+    // Assemble the orbit into one host-side spacetime block. Each frame is
+    // downloaded once and concatenated along a new leading axis, giving shape
+    // [n+1, ...grid] — exactly what `!animate` wants from a single block, with no
+    // per-frame round-trip on the caller's side. We keep the result as a `Host`
+    // value so it is *not* re-uploaded just to be downloaded again at block exit.
     match &frames[0] {
         GpuVal::Scalar(_) => {
             let data: Vec<f32> = frames.iter().map(|f| match f {
                 GpuVal::Scalar(s) => Ok(*s as f32),
-                GpuVal::Buffer { .. } => Err("GPU: scan states must all be scalars or all tensors".to_string()),
+                _ => Err("GPU: scan states must all be scalars or all tensors".to_string()),
             }).collect::<Result<_, _>>()?;
-            Ok(upload_f32(ctx, data, vec![n + 1]))
+            let len = data.len();
+            Ok(GpuVal::Host { data: Rc::new(data), shape: vec![n + 1], len })
         }
         GpuVal::Buffer { shape, len, .. } => {
-            if shape.len() != 1 {
-                return Err("GPU: scan tensor states must be 1-D".into());
-            }
             let d = *len;
+            let frame_shape = shape.clone();
             let mut data: Vec<f32> = Vec::with_capacity((n + 1) * d);
             for f in &frames {
                 match f {
                     GpuVal::Buffer { buf, len: l, .. } if *l == d => data.extend(download(ctx, buf, d)?),
-                    _ => return Err("GPU: scan states must all have the same length".into()),
+                    _ => return Err("GPU: scan states must all have the same shape".into()),
                 }
             }
-            Ok(upload_f32(ctx, data, vec![n + 1, d]))
+            let mut out_shape = Vec::with_capacity(frame_shape.len() + 1);
+            out_shape.push(n + 1);
+            out_shape.extend(frame_shape);
+            let total = data.len();
+            Ok(GpuVal::Host { data: Rc::new(data), shape: out_shape, len: total })
         }
+        GpuVal::Host { .. } => Err("GPU: scan produced a host value (internal error)".into()),
     }
 }
 
@@ -1002,6 +1408,12 @@ fn to_val(ctx: &GpuContext, v: &GpuVal) -> Result<Val, String> {
                 shape: shape.clone(),
             })
         }
+        // Already on the host (e.g. a `scan` spacetime block): convert directly,
+        // skipping the upload→download round-trip a `Buffer` would incur.
+        GpuVal::Host { data, shape, .. } => Ok(Val::Tensor {
+            data: TData::new(data.iter().map(|&x| x as f64).collect()),
+            shape: shape.clone(),
+        }),
     }
 }
 

@@ -206,7 +206,7 @@ Unit conversion factors and functions for physics, chemistry, and engineering.
 
 ## Syntax
 
-Inside the REPL or a `.math` file, each line is an expression or a definition (`name = expr`). Multiple definitions on one line are separated by `;`.
+Inside the REPL or a `.math` file, each line is an expression or a definition (`name = expr`). Definitions and expressions may be freely interleaved on one line, separated by `;` — it is a statement separator, and the value of the last expression is the result.
 
 For shell one-liners, the full argument is parsed as a sequence of statements separated by `;`; the value of the last expression is printed:
 
@@ -1303,8 +1303,23 @@ Currently supported inside a block:
 | Reductions | `sum mean min max` (whole-tensor → scalar) |
 | Min/max | two-argument elementwise form, e.g. `min(T, 0)` |
 | Stencils | `shift(T,n,axis)`, `roll(T,n,axis)`, `ops.lap(T,dx[,bc])`, `ops.grad(T,dx,axis)` |
+| Construction | `tensor((i,j) -> expr, m, n)` — built on the GPU in one kernel; the body may gather captured tensors (`T[i,j]`) |
 | Loops | `iterate(step, x0, n)`, `scan(step, x0, n)` |
 | Bindings | `name = expr;` locals, visible only inside the block |
+
+### GPU-side tensor construction (`tensor`)
+
+`tensor((i,j) -> expr, m, n)` builds a tensor **on the device** from an index
+lambda — the lambda body is compiled straight to a single GPU kernel, so large
+initial conditions don't crawl through a per-cell CPU loop. The body may use the
+index parameters, captured scalars, unary math, and **gather from captured
+tensors** with `T[i,j]`:
+
+```
+> GPU { tensor((i,j) -> i*10 + j, 3, 4) }              # built on the GPU
+> u0 = GPU { tensor((i,j) -> 1.0*((i-1000)^2 + (j-1000)^2 < 2500), 2000, 2000) }
+> T = [1,2,3; 4,5,6]; GPU { tensor((i,j) -> T[i,j]*2, 2, 3) }   # gather + transform
+```
 
 ### GPU-resident loops (`iterate` / `scan`)
 
@@ -1323,6 +1338,10 @@ result = [0.125, 0.25, 0.375, 0.5]
 result = [1, 2, 4, 8, 16]
 ```
 
+`scan` stacks the whole orbit with **time as the first axis**: a scalar state
+gives `[n+1]`, and a grid state of shape `[…]` gives `[n+1, …]` — a spacetime
+block that feeds straight into `!animate2D` in a single download.
+
 ### Example: a large heat equation
 
 `ops.lap` is the finite-difference Laplacian (periodic by default, or `ops.neumann`
@@ -1331,15 +1350,38 @@ with the field never leaving the device until the final download:
 
 ```
 N = 2000
-u0 = tensor((i,j) -> 1.0*((i-1000)*(i-1000) + (j-1000)*(j-1000) < 2500), N, N)
+u0 = GPU { tensor((i,j) -> 1.0*((i-1000)^2 + (j-1000)^2 < 2500), N, N) }  # IC on GPU
 dx = 1.0; a = 0.2
 r = GPU { iterate(u -> u + a*ops.lap(u, dx, ops.neumann), u0, 200) }   # 4M cells, 200 steps
 sum(r)     # total heat is conserved under Neumann BC
 ```
 
 On an 800×800 grid for 200 steps this runs ~14× faster than the CPU evaluator
-(debug build), and most of the GPU time is the one-time construction of the
-initial condition, not the stepping.
+(debug build); building the initial condition on the GPU too (above) keeps the
+whole pipeline on the device.
+
+### Animating a GPU simulation
+
+Two canonical patterns (see `examples/gpu_heat2D.math`). A CPU `cell` holds the
+state between frames; each frame advances it **one GPU-resident step** — O(1) per
+frame, frames going back and forth like a game loop:
+
+```
+step(u) = u + 0.2*ops.lap(u, 1, ops.neumann)
+st = cell(u0)
+frame = t -> { w = get(st); set(st, GPU { iterate(step, w, 1) }); w }
+!animate2D frame, 0, 400, 400
+```
+
+Or precompute the whole `[n+1, N, N]` spacetime block with `scan` (one residency
+pass, one download) and play it back:
+
+```
+!animate2D (GPU { scan(step, u0, 400) })
+```
+
+(Avoid `t -> GPU { iterate(step, u0, t) }` as the per-frame function: it restarts
+from `u0` every frame, doing O(t²) total work.)
 
 Tensor/tensor operations require matching shapes (no broadcasting yet). Computation
 is performed in `f32` on the device and converted back to `f64` on download, so

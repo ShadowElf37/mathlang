@@ -173,17 +173,44 @@ impl Parser {
         Ok(Param { name, hint })
     }
 
-    pub fn parse_repl(&mut self) -> Result<(Vec<Def>, Vec<Expr>), String> {
-        let mut defs = vec![];
-        while self.is_def_start() {
-            defs.push(self.parse_def()?);
-            if *self.peek() == Token::Semicolon { self.bump(); } else { break; }
+    /// Parse a top-level input as a sequence of `;`-separated statements, each a
+    /// definition or an expression, in source order. `;` is just a statement
+    /// separator (defs and expressions may be freely interleaved); the last
+    /// expression is the result. A statement may still be a comma-separated list
+    /// (→ a tuple), so `a, b` keeps working.
+    pub fn parse_repl(&mut self) -> Result<Vec<BlockStmt>, String> {
+        let mut stmts = vec![];
+        loop {
+            while *self.peek() == Token::Semicolon { self.bump(); }
+            if *self.peek() == Token::Eof { break; }
+            if self.is_def_start() {
+                stmts.push(BlockStmt::Def(self.parse_def()?));
+            } else {
+                let exprs = self.parse_expr_list()?;
+                let e = if exprs.len() == 1 {
+                    exprs.into_iter().next().unwrap()
+                } else {
+                    Expr::Tuple(exprs)
+                };
+                stmts.push(BlockStmt::Expr(e));
+            }
+            match self.peek() {
+                Token::Semicolon | Token::Eof => {}
+                t => return Err(format!("unexpected token: {:?}", t)),
+            }
         }
+        Ok(stmts)
+    }
+
+    /// Parse a bare comma-separated expression list to EOF — used by `!`-commands
+    /// (`!graph`, `!animate2D`, `!type`, …) whose argument is an argument list,
+    /// not a statement sequence.
+    pub fn parse_args(&mut self) -> Result<Vec<Expr>, String> {
         let exprs = if *self.peek() == Token::Eof { vec![] } else { self.parse_expr_list()? };
         if *self.peek() != Token::Eof {
             return Err(format!("unexpected token: {:?}", self.peek()));
         }
-        Ok((defs, exprs))
+        Ok(exprs)
     }
 
     // Defs separated by ';'; stops when next item is not a def.
