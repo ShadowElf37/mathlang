@@ -36,8 +36,8 @@ st = cell((U0, V0))
 frame = _ -> {
   s = GPU {
     iterate((U, V) -> (
-      U + dt*(Du*ops.lap(U, 1, ops.neumann) - U*V*V + F*(1-U)),
-      V + dt*(Dv*ops.lap(V, 1, ops.neumann) + U*V*V - (F+k)*V)
+      U + dt*(Du*ops.lap(U, 1, ops.periodic) - U*V*V + F*(1-U)),
+      V + dt*(Dv*ops.lap(V, 1, ops.periodic) + U*V*V - (F+k)*V)
     ), get(st), SUBSTEPS)
   };
   set(st, s);

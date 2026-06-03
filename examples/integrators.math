@@ -162,3 +162,13 @@ nonsepEnergy = s -> (1 + s[0]^2) * (1 + s[1]^2) / 2     # H(q,p) = (1+q²)(1+p²
 nonsepStep   = taoStep((q,p) -> q*(1+p^2), (q,p) -> p*(1+q^2), 40.0, 0.01)
 nonsepOrbit  = scan(nonsepStep, (1.0, 0.0, 1.0, 0.0), 500)        # [501, 4], cols q,p,x,y
 nonsepDrift  = nonsepEnergy(iterate(nonsepStep, (1.0, 0.0, 1.0, 0.0), 500)) - 1.0  # ≈ 0
+
+# ── Demo: tree broadcasting over a HETEROGENEOUS tuple state ───────────────────
+#
+# Because arithmetic broadcasts over a tuple's leaves, the *same* rk4Step above
+# runs over a state that bundles unlike objects — here a length-2 position tensor
+# coupled to a single scalar — with no per-component bookkeeping in the stepper.
+# `y + h*k` just maps over the whole tree. (Before tree broadcasting this errored:
+# a tuple had no arithmetic.) The physics coupling lives entirely in f.
+coupledF    = (t, y) -> (y[1] * ones(2), -sum(y[0]))    # y = (pos: [2], vel: scalar)
+coupledFin  = rk4Final(coupledF, 0.0, ([1.0, 2.0], 0.0), 0.001, 100)   # (tensor, scalar)

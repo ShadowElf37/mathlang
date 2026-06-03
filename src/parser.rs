@@ -545,8 +545,8 @@ impl Parser {
                     self.eat(&Token::RParen)?;
                     if row0.len() == 1 {
                         if trailing_comma {
-                            // (x,) → length-1 tensor, identical to [x] (singleton literal).
-                            Ok(Expr::Array(row0))
+                            // (x,) → a 1-element tuple (use [x] for a length-1 array).
+                            Ok(Expr::Tuple(row0))
                         } else {
                             Ok(row0.into_iter().next().unwrap())
                         }

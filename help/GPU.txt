@@ -9,17 +9,22 @@ Build with the gpu feature to enable it:  cargo build --release --features gpu
 Without it, a GPU block reports "GPU backend not compiled in".
 
 Supported inside a block:
-  - elementwise:  + - * / ^   and comparisons  < > <= >= == !=  (-> 0.0/1.0)
+  - elementwise:  + - * / ^ // %   comparisons  < > <= >= == !=  logic  & |
+  - conditional:  if(cond, a, b)   (per-element select inside a tensor lambda;
+                  lazy scalar-cond form at tensor level, like the CPU)
   - unary math:   exp ln log2 log10 sqrt cbrt sin cos tan asin acos atan
                   sinh cosh tanh abs sign floor ceil trunc frac
-  - reductions:   sum mean min max   (whole-tensor -> scalar)
+                  isnan isinf isfinite
+  - reductions:   sum mean min max  any all   (whole-tensor -> scalar)
   - min/max:      two-arg elementwise form, e.g. min(T, 0)
   - stencils:     shift(T,n,axis)  roll(T,n,axis)
                   ops.lap(T,dx[,bc])   ops.grad(T,dx,axis)   (bc: ops.neumann)
   - construct:    tensor((i,j) -> expr, m, n)   — built on the GPU in one kernel;
                   the body may gather from captured tensors, e.g. T[i,j]
   - loops:        iterate(step, x0, n)   scan(step, x0, n)
-  - tuples:       (U, V) state for coupled fields; (A, B)[0] indexes a tuple
+  - tuples:       (U, V) state for coupled fields; (A, B)[0] indexes a tuple;
+                  arithmetic & unary math broadcast over tuple leaves (tree)
+  - lambdas:      bind and apply: f = x -> x*x; f(A)  (inlined; no recursion)
   - bindings:     c = A + B; c * 2   (last expression is the result)
   - host helper:  get(cell) reads host-side cell state into the block (resolved
                   up front, before any kernel; it is the ONLY host call allowed)

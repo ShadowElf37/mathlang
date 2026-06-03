@@ -139,14 +139,14 @@ run "block.semicolon_out"   "{a = 2; b = 3; a * b}"                 "6"
 run "block.isolation"       "x=99; {x = 1; x}"                      "1"
 run "block.fn_in_block"     "{f(x) = x^2; f(5)}"                   "25"
 run "block.as_expr"         "1 + {x=3; x*2}"                        "7"
-run "block.multi_out"       "{a=1; b=2; (a, b)}"                    "[1, 2]"
+run "block.multi_out"       "{a=1; b=2; (a, b)}"                    "(1, 2)"
 
 # ── Top-level ';' is a statement separator (defs/exprs interleave; last is result)
 section "TOP-LEVEL SEMICOLONS"
 run "top.def_expr"          "x = 5; x + 1"                          "6"
 run "top.interleave"        "x = 5; x + 1; y = x * 2; y"            "10"
 run "top.expr_seq"          "1 + 1; 2 + 2; 3 + 3"                   "6"
-run "top.comma_tuple"       "sin(0), cos(0)"                        "[0, 1]"
+run "top.comma_tuple"       "sin(0), cos(0)"                        "(0, 1)"
 run "top.trailing_semi"     "a = 3; a;"                             "3"
 run "top.leading_semi"      ";; 7"                                  "7"
 run "top.fn_then_calls"     "f(x) = x*x; f(2); f(3); f(4)"          "16"
@@ -210,44 +210,70 @@ run "fact.ten"      "10!"   "3628800"
 run "fact.fn"       "fact(7)" "5040"
 run "fact.expr"     "(3+2)!" "120"
 
-# ── Vectors (formerly tuples; (a,b,c) → 1D Tensor) ──────────────────────────
-section "VECTORS"
-run "tup.create"        "(1, 2, 3)"                         "[1, 2, 3]"
+# ── Arrays: [a,b,c] is the dense numeric tensor; tensor ops live here ────────
+section "ARRAYS"
+run "arr.create"        "[1, 2, 3]"                         "[1, 2, 3]"
+run "arr.index0"        "[10, 20, 30][0]"                   "10"
+run "arr.index1"        "[10, 20, 30][1]"                   "20"
+run "arr.index_last"    "[10, 20, 30][2]"                   "30"
+run "arr.neg_index"     "[1, 2, 3][-1]"                     "3"
+run "arr.neg_index2"    "[1, 2, 3][-2]"                     "2"
+run "arr.range_index"   "[1,2,3,4,5][1..3]"                 "[2, 3, 4]"
+run "arr.nested"        "shape([1,2,3])"                    "[3]"
+run "arr.len"           "len([1,2,3,4,5])"                  "5"
+run "arr.add"           "[1,2,3] + [4,5,6]"                 "[5, 7, 9]"
+run "arr.sub"           "[5,6,7] - [1,2,3]"                 "[4, 4, 4]"
+run "arr.scalar_mul"    "[1,2,3] * 3"                       "[3, 6, 9]"
+run "arr.scalar_mul_l"  "3 * [1,2,3]"                       "[3, 6, 9]"
+run "arr.scalar_div"    "[4,6,8] / 2"                       "[2, 3, 4]"
+run "arr.scalar_pow"    "[1,2,3]^2"                         "[1, 4, 9]"
+run "arr.scalar_add"    "[1,2,3] + 10"                      "[11, 12, 13]"
+run "arr.eq_ew"         "[1,2,3] == [1,2,3]"                "[1, 1, 1]"
+run "arr.neq_ew"        "[1,2,3] == [1,2,4]"                "[1, 1, 0]"
+run "arr.all_eq"        "sum([1,2,3] == [1,2,3])"           "3"
+run "arr.neg"           "-[1,2,3]"                          "[-1, -2, -3]"
+run "arr.fn_apply"      "f(x)=x^2; f([1,2,3])"              "[1, 4, 9]"
+run "arr.append"        "append([1,2,3], 4)"                "[1, 2, 3, 4]"
+run "arr.concat"        "concat([1,2],[3,4])"               "[1, 2, 3, 4]"
+run "arr.flatten"       "flatten(zeros(2,3))"               "[0, 0, 0, 0, 0, 0]"
+run "arr.zip"           "shape(zip([1,2,3],[4,5,6]))"       "[3, 2]"
+run "arr.zip_val"       "zip([1,2],[3,4])[0,0]"             "1"
+run "arr.dot"           "dot([1,2,3],[4,5,6])"              "32"
+run "arr.sort"          "sort([3,1,4,1,5,9])"               "[1, 1, 3, 4, 5, 9]"
+run "arr.argmin"        "argmin([3,1,4,1,5])"               "1"
+run "arr.argmax"        "argmax([3,1,4,1,5])"               "4"
+# 2-D: argmax/argmin return [row, col]
+run "arr.argmax_2d"     "argmax([1,8; 8,1])"                "[0, 1]"
+run "arr.argmin_2d"     "argmin([1,8; 8,1])"                "[0, 0]"
+# 3-D: returns [i, j, k]
+run "arr.argmax_3d"     "argmax(tensor((i,j,k)->if(i+j+k==6,99,0), 2,3,4))"  "[1, 2, 3]"
+run "arr.matmul"        "[1,2,3] @ [1,2,3]"                 "14"
+
+# ── Tuple trees: (a,b,c) is a heterogeneous tree; ops broadcast over leaves ──
+section "TUPLE TREES"
+run "tup.create"        "(1, 2, 3)"                         "(1, 2, 3)"
 run "tup.index0"        "(10, 20, 30)[0]"                   "10"
-run "tup.index1"        "(10, 20, 30)[1]"                   "20"
-run "tup.index_last"    "(10, 20, 30)[2]"                   "30"
 run "tup.neg_index"     "(1, 2, 3)[-1]"                     "3"
-run "tup.neg_index2"    "(1, 2, 3)[-2]"                     "2"
-run "tup.range_index"   "(1,2,3,4,5)[1..3]"                 "[2, 3, 4]"
-run "tup.nested"        "shape((1,2,3))"                    "[3]"
+run "tup.range_index"   "(1,2,3,4,5)[1..3]"                 "(2, 3, 4)"
 run "tup.len"           "len((1,2,3,4,5))"                  "5"
-run "tup.add"           "(1,2,3) + (4,5,6)"                 "[5, 7, 9]"
-run "tup.sub"           "(5,6,7) - (1,2,3)"                 "[4, 4, 4]"
-run "tup.scalar_mul"    "(1,2,3) * 3"                       "[3, 6, 9]"
-run "tup.scalar_mul_l"  "3 * (1,2,3)"                       "[3, 6, 9]"
-run "tup.scalar_div"    "(4,6,8) / 2"                       "[2, 3, 4]"
-run "tup.scalar_pow"    "(1,2,3)^2"                         "[1, 4, 9]"
-run "tup.scalar_add"    "(1,2,3) + 10"                      "[11, 12, 13]"
-run "tup.eq_ew"         "(1,2,3) == (1,2,3)"                "[1, 1, 1]"
-run "tup.neq_ew"        "(1,2,3) == (1,2,4)"                "[1, 1, 0]"
-run "tup.all_eq"        "sum((1,2,3) == (1,2,3))"           "3"
-run "tup.neg"           "-(1,2,3)"                          "[-1, -2, -3]"
-run "tup.fn_apply"      "f(x)=x^2; f((1,2,3))"            "[1, 4, 9]"
-run "tup.append"        "append((1,2,3), 4)"                "[1, 2, 3, 4]"
-run "tup.concat"        "concat((1,2),(3,4))"               "[1, 2, 3, 4]"
-run "tup.flatten"       "flatten(zeros(2,3))"               "[0, 0, 0, 0, 0, 0]"
-run "tup.zip"           "shape(zip((1,2,3),(4,5,6)))"       "[3, 2]"
-run "tup.zip_val"       "zip((1,2),(3,4))[0,0]"             "1"
+run "tup.single"        "(5,)"                              "(5)"
+run "tup.add"           "(1,2,3) + (4,5,6)"                 "(5, 7, 9)"
+run "tup.sub"           "(5,6,7) - (1,2,3)"                 "(4, 4, 4)"
+run "tup.scalar_mul"    "(1,2,3) * 3"                       "(3, 6, 9)"
+run "tup.scalar_mul_l"  "3 * (1,2,3)"                       "(3, 6, 9)"
+run "tup.scalar_add"    "(1,2,3) + 10"                      "(11, 12, 13)"
+run "tup.scalar_pow"    "(1,2,3)^2"                         "(1, 4, 9)"
+run "tup.neg"           "-(1,2,3)"                          "(-1, -2, -3)"
+run "tup.whole_eq"      "(1,2,3) == (1,2,3)"               "1"
+run "tup.whole_neq"     "(1,2,3) == (1,2,4)"               "0"
+run "tup.fn_apply"      "f(x)=x^2; f((1,2,3))"             "(1, 4, 9)"
+run "tup.append"        "append((1,2,3), 4)"                "(1, 2, 3, 4)"
+run "tup.concat"        "concat((1,2),(3,4))"               "(1, 2, 3, 4)"
+# Heterogeneous leaves (tensor + scalar) broadcast structurally.
+run "tup.hetero"        "([1,2], 3) + 10"                   "([11, 12], 13)"
+run "tup.hetero_tree"   "([1,2], 3) + ([10,20], 100)"       "([11, 22], 103)"
 run "tup.dot"           "dot((1,2,3),(4,5,6))"              "32"
 run "tup.sort"          "sort((3,1,4,1,5,9))"               "[1, 1, 3, 4, 5, 9]"
-run "tup.argmin"        "argmin((3,1,4,1,5))"               "1"
-run "tup.argmax"        "argmax((3,1,4,1,5))"               "4"
-# 2-D: argmax/argmin return [row, col]
-run "tup.argmax_2d"     "argmax((1,8; 8,1))"                "[0, 1]"
-run "tup.argmin_2d"     "argmin((1,8; 8,1))"                "[0, 0]"
-# 3-D: returns [i, j, k]
-run "tup.argmax_3d"     "argmax(tensor((i,j,k)->if(i+j+k==6,99,0), 2,3,4))"  "[1, 2, 3]"
-run "tup.matmul"        "(1,2,3) @ (1,2,3)"                 "14"
 
 # ── Aggregates on tuples ──────────────────────────────────────────────────────
 section "AGGREGATES"
@@ -256,10 +282,10 @@ run "agg.prod_tuple"  "prod((1,2,3,4))"           "24"
 run "agg.sum_fn"      "sum(x -> x, 1, 100)"       "5050"
 run "agg.prod_fn"     "prod(x -> x, 1, 10)"       "3628800"
 run "agg.sum_x2"      "sum(x -> x^2, 1, 10)"      "385"
-run "agg.map_sq"      "map(x -> x^2, (1,2,3,4))"  "[1, 4, 9, 16]"
-run "agg.map_neg"     "map(x -> -x, (1,2,3))"     "[-1, -2, -3]"
-run "agg.filter"      "filter(x -> x > 2, (1,2,3,4))" "[3, 4]"
-run "agg.filter_none" "filter(x -> x > 9, (1,2,3))"   "[]"
+run "agg.map_sq"      "map(x -> x^2, [1,2,3,4])"  "[1, 4, 9, 16]"
+run "agg.map_neg"     "map(x -> -x, [1,2,3])"     "[-1, -2, -3]"
+run "agg.filter"      "filter(x -> x > 2, [1,2,3,4])" "[3, 4]"
+run "agg.filter_none" "filter(x -> x > 9, [1,2,3])"   "[]"
 run "agg.reduce_add"  "reduce((a,b) -> a+b, (1,2,3,4))" "10"
 run "agg.reduce_mul"  "reduce((a,b) -> a*b, (1,2,3,4))" "24"
 run "agg.reduce_max"  "reduce((a,b) -> if(a>b,a,b), (3,1,4,1,5))" "5"
@@ -277,14 +303,28 @@ run "stat.sum_tup"    "sum((1,2,3,4,5))"     "15"
 run_match "stat.std"  "std((2,4,4,4,5,5,7,9))" "^2"
 run_match "stat.var"  "stats.var((2,4,4,4,5,5,7,9))" "^4"
 
+section "ANY / ALL / FINITENESS"
+run "any.true"        "any([0,0,1])"               "1"
+run "any.false"       "any([0,0,0])"               "0"
+run "all.true"        "all([1,2,3])"               "1"
+run "all.false"       "all([1,0,3])"               "0"
+run "any.scalar"      "any(0)"                     "0"
+run "all.empty"       "all([])"                    "1"
+run "any.tree"        "any(([0,0], (0, 1)))"       "1"
+run "isnan.basic"     "isnan([1, 0/0, 3])"         "[0, 1, 0]"
+run "isinf.basic"     "isinf([1, 1/0, -1/0])"      "[0, 1, 1]"
+run "isfinite.basic"  "isfinite([1, 1/0, 0/0])"    "[1, 0, 0]"
+run "isfinite.tree"   "all(isfinite(([1,2], 3.0)))" "1"
+run "any.isinf.tree"  "any(isinf(([1,2], 1/0)))"   "1"
+
 # ── Higher-order functions ────────────────────────────────────────────────────
 section "HIGHER-ORDER"
 run "ho.compose"          "compose(x -> x+1, x -> x^2)(3)"         "10"
 run "ho.compose_builtins" "compose(sqrt, abs)(-9)"                  "3"
 run "ho.partial_add"      "add5 = partial((x,y) -> x+y, 5); add5(3)" "8"
 run "ho.partial_builtin"  "sq = partial(pow, 2); sq(10)"           "1024"
-run "ho.map_partial"      "map(partial((x,y) -> x+y, 10), (1,2,3))"  "[11, 12, 13]"
-run "ho.filter_partial"   "map(partial(pow,2), (1,2,3,4))"          "[2, 4, 8, 16]"
+run "ho.map_partial"      "map(partial((x,y) -> x+y, 10), [1,2,3])"  "[11, 12, 13]"
+run "ho.filter_partial"   "map(partial(pow,2), [1,2,3,4])"          "[2, 4, 8, 16]"
 
 # ── Calculus ──────────────────────────────────────────────────────────────────
 section "CALCULUS"
@@ -433,11 +473,11 @@ run    "rand.1d_len"  "len(rand(7))"          "7"
 
 # ── FFT ──────────────────────────────────────────────────────────────────────
 section "FFT"
-run_match "fft.dc"        "re(fft((1,1,1,1))[0])"          "^4"
-run_match "fft.nyquist"   "abs(fft((1,-1,1,-1))[2])"       "^4"
-run_match "fft.roundtrip" "re(ifft(fft((1,2,3,4)))[0])"    "^1"
-run_match "fft.roundtrip1" "re(ifft(fft((1,2,3,4)))[1])"   "^2"
-run_match "fft.zero_ac"   "re(fft((1,-1,1,-1))[0])"        "^0"
+run_match "fft.dc"        "re(fft([1,1,1,1])[0])"          "^4"
+run_match "fft.nyquist"   "abs(fft([1,-1,1,-1])[2])"       "^4"
+run_match "fft.roundtrip" "re(ifft(fft([1,2,3,4]))[0])"    "^1"
+run_match "fft.roundtrip1" "re(ifft(fft([1,2,3,4]))[1])"   "^2"
+run_match "fft.zero_ac"   "re(fft([1,-1,1,-1])[0])"        "^0"
 
 # ── Tensor constructors ───────────────────────────────────────────────────────
 section "TENSORS - CONSTRUCTORS"
@@ -534,7 +574,7 @@ run "cmpfn.eq"    "eq(4,4)"    "1"
 run "cmpfn.eq2"   "eq(4,5)"    "0"
 run "cmpfn.neq"   "neq(4,5)"   "1"
 run "cmpfn.neq2"  "neq(4,4)"   "0"
-run "cmpfn.map"   "map(partial(lt,3), (1,2,3,4,5))" "[0, 0, 0, 1, 1]"
+run "cmpfn.map"   "map(partial(lt,3), [1,2,3,4,5])" "[0, 0, 0, 1, 1]"
 
 # ── gaussian ──────────────────────────────────────────────────────────────────
 section "GAUSSIAN"
@@ -577,7 +617,7 @@ run_err   "negidx.under_big"   "(10,20,30)[-100]"
 run_err   "negidx.mat_row"     "(1,2;3,4)[-3]"
 run_err   "negidx.mat_col"     "(1,2,3;4,5,6)[0,-5]"
 run_err   "negidx.tuple"       "{t=(1,(2,3),4); t[-9]}"
-run       "negidx.slice_ok"    "(1,2,3,4,5)[1..3]"     "[2, 3, 4]"
+run       "negidx.slice_ok"    "(1,2,3,4,5)[1..3]"     "(2, 3, 4)"
 
 # ── Recursion depth guard (regression: catchable error, not stack overflow) ───
 section "RECURSION GUARD"
@@ -590,7 +630,7 @@ section "ITERATE / SCAN"
 run       "iter.scalar"      "iterate(x->2*x, 1, 10)"                      "1024"
 run       "iter.zero"        "iterate(x->x+1, 5, 0)"                       "5"
 run       "iter.big"         "iterate(x->x+1, 0, 1000000)"                 "1000000"
-run       "iter.vector"      "iterate(v->(v[1], -v[0]), (1,0), 4)"         "[1, 0]"
+run       "iter.vector"      "iterate(v->(v[1], -v[0]), (1,0), 4)"         "(1, 0)"
 run       "iter.complex"     "iterate(z->z*i, 1, 2)"                       "-1"
 run_err   "iter.neg"         "iterate(x->x, 0, -1)"
 run_err   "iter.arity"       "iterate(x->x, 0)"
@@ -611,20 +651,21 @@ run_err   "scan.struct.bad"    "scan(s->5, ((1,2),(3,4)), 2)"
 
 section "CUMSUM / CUMPROD / DIFF"
 run       "cumsum.basic"     "cumsum([1,2,3,4])"                           "[1, 3, 6, 10]"
-run       "cumsum.tuple"     "cumsum((1,2,3,4))"                           "[1, 3, 6, 10]"
+run       "cumsum.array"     "cumsum([1,2,3,4])"                           "[1, 3, 6, 10]"
 run       "cumprod.basic"    "cumprod([1,2,3,4])"                          "[1, 2, 6, 24]"
 run       "diff.basic"       "diff([1,4,9,16])"                            "[3, 5, 7]"
 run       "diff.single"      "diff([5])"                                   "[]"
 run       "diff.cumsum_inv"  "diff(cumsum([3,1,4,1,5]))"                   "[1, 4, 1, 5]"
-run_err   "cumsum.2d"        "cumsum((1,2;3,4))"
+run_err   "cumsum.2d"        "cumsum([1,2;3,4])"
 
+# (x,) is a 1-element tuple; (x) is just x; [x] is a length-1 array.
 section "SINGLETON LITERAL"
-run       "single.value"     "(5,)"                                        "[5]"
+run       "single.value"     "(5,)"                                        "(5)"
 run       "single.shape"     "shape((5,))"                                 "[1]"
-run       "single.append"    "append((5,), 6)"                             "[5, 6]"
-run       "single.expr"      "(2+3,)"                                      "[5]"
+run       "single.append"    "append((5,), 6)"                             "(5, 6)"
+run       "single.expr"      "(2+3,)"                                      "(5)"
 run       "single.no_comma"  "(5)"                                         "5"
-run       "single.pair"      "(1,2,)"                                      "[1, 2]"
+run       "single.pair"      "(1,2,)"                                      "(1, 2)"
 
 section "GENERALIZED STACKING"
 run       "vstack.vec_vec"   "shape(vstack((1,2,3),(4,5,6)))"              "[2, 3]"
@@ -798,11 +839,11 @@ run "sl.1d_open_lo"    "tensor(i->i+1, 5)[2..]"            "[3, 4, 5]"
 run "sl.1d_open_hi"    "tensor(i->i+1, 5)[..2]"            "[1, 2, 3]"
 run "sl.3d_all"        "shape(zeros(2,3,4)[..,1,..])"      "[2, 4]"
 run "sl.neg_all"       "(1,2,3; 4,5,6; 7,8,9)[-1, ..]"    "[7, 8, 9]"
-# tuple slices
-run "sl.tup_all"       "(10,20,30,40)[..]"                 "[10, 20, 30, 40]"
-run "sl.tup_open_lo"   "(10,20,30,40)[2..]"                "[30, 40]"
-run "sl.tup_open_hi"   "(10,20,30,40)[..1]"                "[10, 20]"
-run "sl.tup_range"     "(10,20,30,40)[1..2]"               "[20, 30]"
+# tuple slices preserve tuple-ness
+run "sl.tup_all"       "(10,20,30,40)[..]"                 "(10, 20, 30, 40)"
+run "sl.tup_open_lo"   "(10,20,30,40)[2..]"                "(30, 40)"
+run "sl.tup_open_hi"   "(10,20,30,40)[..1]"                "(10, 20)"
+run "sl.tup_range"     "(10,20,30,40)[1..2]"               "(20, 30)"
 
 # ── outer product ─────────────────────────────────────────────────────────────
 section "OUTER PRODUCT"
@@ -1107,7 +1148,7 @@ _repl_check() {
     fi
 }
 
-_repl_check "mlt.roundtrip.val"   "T=(1.5,2.5,3.5)
+_repl_check "mlt.roundtrip.val"   "T=[1.5,2.5,3.5]
 !savetensor T $_TMLT
 !loadtensor U $_TMLT
 U[1]"                                      "2\.5"
@@ -1191,14 +1232,14 @@ _file_check "file.bang.include.chain"  "!include $_TLIB
 sq(4)"                                                                  "16"
 rm -f "$_TLIB"
 
-_file_check "file.bang.savetensor" "T = (1.0,2.0,3.0)
+_file_check "file.bang.savetensor" "T = [1.0,2.0,3.0]
 !savetensor T /tmp/mlt_file_bang_test.mlt"                              "saved T"
 
-_file_check "file.bang.loadtensor" "T = (1.0,2.0,3.0)
+_file_check "file.bang.loadtensor" "T = [1.0,2.0,3.0]
 !savetensor T /tmp/mlt_file_bang_test.mlt
 !loadtensor U /tmp/mlt_file_bang_test.mlt"                              "loaded U"
 
-_file_check "file.bang.tensor.val" "T = (4.0,5.0,6.0)
+_file_check "file.bang.tensor.val" "T = [4.0,5.0,6.0]
 !savetensor T /tmp/mlt_file_bang_test.mlt
 !loadtensor U /tmp/mlt_file_bang_test.mlt
 U[1]"                                                                   "5"
@@ -1217,7 +1258,7 @@ b = 4
 !print {a} {b} {sqrt(a^2+b^2)}"                                    "3 4 5"
 _repl_check "print.blank"       "!print"                           "^$"
 _repl_check "print.escape"      "!print {{x}} is a placeholder"   "\{x\} is a placeholder"
-_repl_check "print.tensor"      "!print {(1,2,3)}"                 "\[1, 2, 3\]"
+_repl_check "print.tensor"      "!print {[1,2,3]}"                 "\[1, 2, 3\]"
 _repl_check "print.err"         "!print {nosuchvar}"               "<error:"
 _file_check  "print.in_file"    "n = 5
 !print sum = {sum(x -> x, 1, n)}"                                  "sum = 15"
@@ -1385,7 +1426,9 @@ run_err "bug1a.bare_typed_lambda_reject" 'f = x: nat -> x; f(-1)'
 # Bug 1b: 1-element tensor should NOT be destructured when param has tensor hint
 run    "bug1b.tensor_hint_no_destruct"   'f = (x: tensor) -> len(x); f([5])'          "1"
 run    "bug1b.tensor_hint_multi_elem"    'f = (x: tensor) -> sum(x); f([1,2,3])'      "6"
-run_ok "bug1b.no_hint_still_works"      'f = (x, y) -> x + y; f([3, 4])'
+# A 1-D tensor is no longer splat into multiple scalar params (use a tuple).
+run_err "bug1b.no_tensor_splat"         'f = (x, y) -> x + y; f([3, 4])'
+run    "bug1b.tuple_destructure_ok"     'f = (x, y) -> x + y; f((3, 4))'             "7"
 
 # Bug 2: !type <fn> shows the function name
 _repl_check "bug2.type_shows_name" "f = (x: tensor) -> x
@@ -1456,14 +1499,14 @@ run "ns.vec.lerp"        "vec.lerp(0, 10, 0.5)"      "5"
 run "ns.vec.clamp"       "vec.clamp(12, 0, 10)"      "10"
 run "ns.stats.median"    "stats.median((3,1,2,5,4))" "3"
 run_match "ns.special.erf" "special.erf(1)"          "0.8427"
-run_match "ns.linalg.outer" "linalg.outer((1,2),(3,4))" "3  4"
+run_match "ns.linalg.outer" "linalg.outer([1,2],[3,4])" "3  4"
 # …and are no longer bound flat (freed as reserved words)
 run_err "ns.flat.xor.gone"   "xor(6,3)"              ""
 run_err "ns.flat.lerp.gone"  "lerp(0,10,0.5)"        ""
 run "ns.freed.reserved"      "xor = 5; xor"          "5"
 # Common builtins stay flat
 run_ok "ns.flat.inv"     "inv(eye(2))"               ""
-run_ok "ns.flat.fft"     "fft((1,0,0,0))"            ""
+run_ok "ns.flat.fft"     "fft([1,0,0,0])"            ""
 run "ns.flat.mean"       "mean((1,2,3,4))"           "2.5"
 # Namespace as a value, member errors, not callable
 run_match "ns.value.display" "bits"                  "namespace\{"
@@ -1514,8 +1557,12 @@ run_match "solver.verlet.deriv" "V=q->q^2/2; T=p->p^2/2; s=solver.verlet(q->deri
 # Vector-valued state (2-D orbit) conserves energy over a long run.
 run_match "solver.verlet.vec"   "s=solver.verlet(q->q, p->p, [1.0,0.0], [0.0,1.0], 0.01, 1000); round((sum(s[0]*s[0])+sum(s[1]*s[1]))/2, 3)" "^1($|\\.0|\\.00)"
 run_err "solver.verlet.arity"   "solver.verlet(q->q, p->p, 1.0, 0.0, 0.05)"
-# Heterogeneous tuple state (scalar + vector) survives the flatten/rebuild round trip.
+# Heterogeneous tuple state (scalar + vector) broadcasts through the stepper.
 run "solver.verlet.tuple"   "s=solver.verlet(q->q, p->p, (0.0,[1.0,2.0]), (1.0,[0.0,0.0]), 0.01, 50); shape(s[0][1])" "[2]"
+# A verlet written in pure mathlang (tree broadcast) matches the builtin exactly.
+run "solver.tree.mathlang"  "vl=(dV,dT,q0,p0,dt,n)->iterate((q,p)->{ph=p-0.5*dt*dV(q);qn=q+dt*dT(ph);pn=ph-0.5*dt*dV(qn);(qn,pn)},(q0,p0),n); a=vl(q->q,p->p,1.0,0.0,0.01,200); b=solver.verlet(q->q,p->p,1.0,0.0,0.01,200); round(abs(a[0]-b[0])+abs(a[1]-b[1]),9)" "0"
+# Tree broadcast lets rk4Step run over a heterogeneous (tensor, scalar) state.
+run "solver.tree.rk4hetero" "rk4=(f,t,y,h)->{k1=f(t,y);k2=f(t+h/2,y+h/2*k1);k3=f(t+h/2,y+h/2*k2);k4=f(t+h,y+h*k3);y+h/6*(k1+2*k2+2*k3+k4)}; s=rk4((t,y)->(y[1]*ones(2),-sum(y[0])),0.0,([1.0,2.0],0.0),0.001); shape(s[0])" "[2]"
 # Field-valued state: a 0-form field round-trips and stays a field (1-D wave eq).
 run "solver.verlet.field"   "f=field(tensor((i)->exp(-((i-8.0)/2.0)^2),16),0,16,forms.periodic); z=field(tensor((i)->0.0,16),0,16,forms.periodic); s=solver.verlet(q->forms.laplace(q), p->p, f, z, 0.2, 50); shape(s[0])" "[16]"
 # tao: separable SHO — Tao must also conserve energy ≈ 0.5 (sanity vs verlet).
@@ -1523,7 +1570,7 @@ run_match "solver.tao.sho"  "s=solver.tao((q,p)->q, (q,p)->p, 1.0, 0.0, 0.05, 40
 # tao on a NON-separable H = p²/2 + q²/2 + 0.3 q²p²: energy stays bounded near 0.5.
 run_match "solver.tao.nonsep" "dq=(q,p)->q+0.6*q*p^2; dp=(q,p)->p+0.6*q^2*p; s=solver.tao(dq,dp,1.0,0.0,0.02,1000); round(0.5*s[1]^2+0.5*s[0]^2+0.3*s[0]^2*s[1]^2, 2)" "0\\.5"
 run_err "solver.tao.arity"  "solver.tao((q,p)->q, (q,p)->p, 1.0, 0.0)"
-run "solver.cfl"            "solver.cfl((1,2,3), 0.1, 0.02)" "0.6"
+run "solver.cfl"            "solver.cfl([1,2,3], 0.1, 0.02)" "0.6"
 
 # ── field constructors: function form + tensor() conversion ──────────────────
 # field(f, lo, hi, counts, bc): evaluate f at physical grid coords (x = lo + i·dx).
@@ -1580,14 +1627,14 @@ run "bug6.zeroarg.lambda.ok"  "g = () -> 3; g()"        "3"
 # ── fields & differential forms ─────────────────────────────────────────────────
 section "FIELDS & FORMS"
 # construction: a scalar field is a 0-form; display shows degree/extent/bc.
-run_match "field.ctor.0form"  "field((1,2,3,4), 0, 1, forms.periodic)" "0-form \[4\] on \[0, 1\] periodic"
-run_match "field.ctor.neumann.extent" "field((1,2,3,4), 0, 1, forms.neumann)" "on \[0, 1\] neumann"
+run_match "field.ctor.0form"  "field([1,2,3,4], 0, 1, forms.periodic)" "0-form \[4\] on \[0, 1\] periodic"
+run_match "field.ctor.neumann.extent" "field([1,2,3,4], 0, 1, forms.neumann)" "on \[0, 1\] neumann"
 run_match "field.ctor.metric.show" "field(zeros(4,4), (0,0), (1,1), forms.periodic, (-1,1))" "metric\(-1, 1\)"
 # arithmetic preserves field-ness: 2*f + f == 3*f.
-run "field.arith.scale"       "f=field((1,2,3,4),0,1,forms.neumann); g=2*f+f; re(g)" "[3, 6, 9, 12]"
+run "field.arith.scale"       "f=field([1,2,3,4],0,1,forms.neumann); g=2*f+f; re(g)" "[3, 6, 9, 12]"
 run_err "field.arith.mismatch" "a=field((1,2,3),0,1,forms.periodic); b=field((1,2,3),0,1,forms.neumann); a+b" ""
 # named builtins decay a field to its component tensor.
-run "field.decay.re"          "round(sum(re(field((1,2,3,4),0,1,forms.periodic))),6)" "10"
+run "field.decay.re"          "round(sum(re(field([1,2,3,4],0,1,forms.periodic))),6)" "10"
 # d: exterior derivative of sin ≈ cos (central diff), and d∘d = 0.
 run_match "forms.d.sin"       "f=field(tensor(k->sin(2*pi*k/64),64),0,2*pi,forms.periodic); max(abs(re(forms.d(f))-tensor(k->cos(2*pi*k/64),64)))" "0.001[0-9]"
 run "forms.dd.zero"           "f=field(tensor((i,j)->sin(2*pi*i/8)*cos(2*pi*j/8),8,8),0,2*pi,forms.periodic); round(max(abs(forms.d(forms.d(f)))),9)" "0"
@@ -1619,7 +1666,7 @@ run "forms.contract.graddot"  "h=tensor((i,j)->sin(2*pi*i/16)*cos(2*pi*j/16),16,
 run "forms.contract.nilpotent" "w=forms.form(tensor((i,j,k,c)->sin(i+2*j+3*k+c),4,4,4,3),2,0,2*pi,forms.periodic); X=forms.vector(tensor((i,j,k,c)->cos(i+j+k+2*c),4,4,4,3),0,2*pi,forms.periodic); round(max(abs(forms.contract(X,forms.contract(X,w)))),9)" "0"
 run_err "forms.contract.needsvec" "a=forms.d(field(tensor((i,j)->1.0*i,4,4),0,1,forms.periodic)); forms.contract(a,a)" ""
 # cell/get/set are field-transparent (regression: must not decay a field to a tensor).
-run_ok "field.cell.transparent" "{st=cell(field((1.0,2,3,4),0,1,forms.periodic)); set(st,2*get(st)); re(ops.grad(get(st)))}"
+run_ok "field.cell.transparent" "{st=cell(field([1.0,2,3,4],0,1,forms.periodic)); set(st,2*get(st)); re(ops.grad(get(st)))}"
 
 # ── ~ (logical not) operator — 5.4 ───────────────────────────────────────────
 section "TILDE NOT OPERATOR"
@@ -1662,7 +1709,7 @@ else
     run "gpu.intermediate"   "A=[1,2,3]; B=[1,1,1]; GPU { c = A + B; c * 2 }" "[4, 6, 8]"
     run "gpu.matrix.add"     "A=[1,2;3,4]; B=[10,20;30,40]; GPU { A + B }"    "⎡ 11  22 ⎤ ⎣ 33  44 ⎦"
     # >16.78M elements forces a 2-D dispatch grid (single dim caps at 65535 groups).
-    run "gpu.large.grid"     "T=ones(4096,4096); X=GPU { T + T }; (X[0,0], X[4095,4095], sum(X))" "[2, 2, 33554432]"
+    run "gpu.large.grid"     "T=ones(4096,4096); X=GPU { T + T }; (X[0,0], X[4095,4095], sum(X))" "(2, 2, 33554432)"
     run_err "gpu.err.shape"  "A=[1,2,3]; B=[1,2]; GPU { A + B }"
     run_err "gpu.err.undef"  "GPU { nope + 1 }"
     run_err "gpu.err.fn"     "f = x -> x; GPU { f + 1 }"
@@ -1766,6 +1813,40 @@ else
     run "gpu.get.hoisted"    "st=cell(([1,2,3],[10,20,30])); r=GPU{iterate((u,v)->(u+v,v),get(st),2)}; r[0]" "[21, 42, 63]"
     run_err "gpu.err.nofft"  "A=[1,2,3,4]; GPU { fft(A) }"
     run_err "gpu.err.nosort" "A=[3,1,2]; GPU { sort(A) }"
+
+    # ── conditionals & extra operators in GPU lambdas (#2) ──
+    run "gpu.if.tensorlambda" "GPU { tensor((i,j) -> if(i==j, 1, 0), 3, 3) }" "⎡ 1  0  0 ⎤ ⎢ 0  1  0 ⎥ ⎣ 0  0  1 ⎦"
+    run "gpu.if.compound"    "GPU { tensor((i,j) -> if((i<1) & (j<1), 9, 0), 2, 2) }" "⎡ 9  0 ⎤ ⎣ 0  0 ⎦"
+    run "gpu.if.scalarcond"  "n=2; A=[1,2]; B=[3,4]; GPU { if(n>0, A, B) }"   "[1, 2]"
+    run "gpu.logical.and"    "A=[1,2,3]; B=[0,2,5]; GPU { (A<B) | (A==B) }"    "[0, 1, 1]"
+    run "gpu.rem"            "A=[7,8,9]; GPU { A % 3 }"                        "[1, 2, 0]"
+    run "gpu.floordiv"       "A=[7,8,9]; GPU { A // 3 }"                       "[2, 2, 3]"
+    run "gpu.if.parity"      "g=GPU{tensor((i,j)->if(i<2&j<2,1,0),3,3)}; c=tensor((i,j)->if(i<2&j<2,1,0),3,3); sum(abs(g-c))" "0"
+
+    # ── bind a lambda/fn in a block and apply it (#4) ──
+    run "gpu.lambda.scalar"  "GPU { f = x -> x^2; f(3) }"                      "9"
+    run "gpu.lambda.tensor"  "GPU { sq = x -> x*x; A=[1,2,3]; sq(A) }"         "[1, 4, 9]"
+    run "gpu.lambda.func"    "GPU { g(x) = x+10; g([1,2,3]) }"                 "[11, 12, 13]"
+    run "gpu.lambda.envfn"   "cube = x -> x*x*x; GPU { cube([1,2,3]) }"        "[1, 8, 27]"
+    run "gpu.lambda.multi"   "GPU { add = (a,b) -> a+b; add([1,2],[10,20]) }"  "[11, 22]"
+    run "gpu.lambda.tupledestr" "GPU { add = (a,b) -> a+b; add((5,6)) }"       "11"
+    run "gpu.lambda.nested"  "GPU { f = x -> x+1; g = x -> f(x)*2; g(10) }"    "22"
+    run_err "gpu.lambda.recursion" "GPU { f = x -> f(x); f(1) }"
+    run_err "gpu.lambda.arity" "GPU { add = (a,b) -> a+b; add(1,2,3) }"
+    run_err "gpu.lambda.retfn" "GPU { f = x -> x; f }"
+
+    # ── tuple/tree broadcasting on the GPU (parity with CPU) ──
+    run "gpu.tree.add"       "A=[1,2]; B=[3,4]; GPU { (A,B) + (A,B) }"         "([2, 4], [6, 8])"
+    run "gpu.tree.scalar"    "A=[1,2]; B=[3,4]; GPU { (A,B) * 2 }"             "([2, 4], [6, 8])"
+    run "gpu.tree.hetero"    "A=[1,2]; GPU { (A, 10.0) + 5 }"                  "([6, 7], 15)"
+    run "gpu.tree.unary"     "A=[0,0]; GPU { cos((A, A)) }"                    "([1, 1], [1, 1])"
+    run "gpu.tree.neg"       "A=[1,2]; GPU { -(A, A) }"                        "([-1, -2], [-1, -2])"
+
+    # ── any/all + finiteness predicates on the GPU (#6 parity) ──
+    run "gpu.any.true"       "A=[0,0,1]; GPU { any(A) }"                       "1"
+    run "gpu.all.false"      "A=[1,0,3]; GPU { all(A) }"                       "0"
+    run "gpu.isfinite"       "A=[1,2,3]; GPU { isfinite(A) }"                  "[1, 1, 1]"
+    run "gpu.anyisinf"       "A=[1,2,3]; B=GPU{A*2}; GPU { any(isinf(B)) }"    "0"
 fi
 
 # ── print summary ─────────────────────────────────────────────────────────────

@@ -330,37 +330,63 @@ complex
 
 ---
 
-## Vectors (1-D tensors)
+## Arrays `[...]` vs. tuple trees `(...)`
 
-Comma-separated numeric values in parentheses produce a **1-D tensor** displayed as `[...]`. Index with `[n]` (zero-based; negative indices count from the end).
+There are two container syntaxes, and they mean different things:
+
+- **`[a, b, c]` is a dense numeric array** (a 1-D tensor; `[1,2;3,4]` is a matrix).
+  This is the home of vector/matrix math — `dot`, `@` (matmul), reductions,
+  slicing, reshaping. Elements must be numbers.
+- **`(a, b, c)` is a tuple**: a *tree* whose leaves may be anything — scalars,
+  arrays, fields, or more tuples. It groups heterogeneous things and is what you
+  destructure into function parameters or carry as `iterate`/solver state.
 
 ```
-> (1, 2, 3)
+> [1, 2, 3]                 # an array (tensor)
 result = [1, 2, 3]
-> (1, 2, 3)[1]
+> (1, 2, 3)                 # a tuple
+result = (1, 2, 3)
+> (1, 2, 3)[1]              # index either with [n] (negative counts from the end)
 result = 2
-> (1, 2, 3)[-1]
-result = 3
 ```
 
-Arithmetic broadcasts element-wise:
+### Tree broadcasting
+
+Arithmetic and unary math **broadcast over a tuple's leaves** (and recurse into
+nested tuples): two tuples combine structurally, and a scalar/array combines into
+every leaf. This is what lets one generic integrator evolve a whole heterogeneous
+state (see `examples/integrators.math`).
 
 ```
-> (1, 2, 3) * 2
-result = [2, 4, 6]
-> (1, 2, 3) + (4, 5, 6)
+> (1, 2, 3) + (4, 5, 6)     # structural
+result = (5, 7, 9)
+> (1, 2, 3) * 2             # scalar into every leaf
+result = (2, 4, 6)
+> ([1,2], 3) + 10           # heterogeneous tree: array leaf + scalar leaf
+result = ([11, 12], 13)
+> -([1,2], 3)               # unary broadcasts too
+result = ([-1, -2], -3)
+```
+
+A dense array uses the same element-wise rules but stays a tensor, and supports
+the tensor-only operators:
+
+```
+> [1, 2, 3] + [4, 5, 6]
 result = [5, 7, 9]
-> (1, 2, 3) @ (1, 2, 3)
-result = 14    # dot product
+> [1, 2, 3] @ [1, 2, 3]     # dot product (matmul); tuples don't do this
+result = 14
 ```
 
-### Slicing
+`(x,)` is a one-element tuple; `(x)` is just `x`; `[x]` is a length-1 array.
+
+### Slicing (works on both; preserves the container)
 
 ```
-> (1,2,3,4,5)[1..3]    # [2, 3, 4]   — bounded range (inclusive)
-> (1,2,3,4,5)[2..]     # [3, 4, 5]   — from index 2 to end
-> (1,2,3,4,5)[..2]     # [1, 2, 3]   — from start to index 2 (inclusive)
-> (1,2,3,4,5)[..]      # [1, 2, 3, 4, 5]  — all elements
+> [1,2,3,4,5][1..3]    # [2, 3, 4]   — array slice → array
+> (1,2,3,4,5)[1..3]    # (2, 3, 4)   — tuple slice → tuple
+> [10,20,30,40][2..]   # [30, 40]    — from index 2 to end
+> [10,20,30,40][..2]   # [10, 20, 30] — from start to index 2 (inclusive)
 > len((1,2,3,4))
 result = 4
 ```
@@ -879,6 +905,8 @@ result = 3  4
 
 **Tensor reduce:** `sum(T)`, `prod(T)`, `sum(T,axis)`, `prod(T,axis)`, `norm(T)`, `trace(T)`, `mean(T)`, `std(T)`
 
+**Predicates / finiteness:** `any(x)`, `all(x)` (reduce a whole value tree to one bool — any/every leaf nonzero); `isnan(x)`, `isinf(x)`, `isfinite(x)` (elementwise `0.0`/`1.0`, broadcasting over the tree). Catch a blowup with `any(isinf(T))` or `all(isfinite(state))`.
+
 **Tensor shift:** `shift(T,n,axis)` (edge-replicating / Neumann), `roll(T,n,axis)` (periodic)
 
 **Linear algebra:** `matmul(A,B)` / `A @ B`, `det(A)`, `inv(A)`, `solve(A,b)`, `row(T,i)`, `col(T,j)`, `eig(A)` → `(eigenvalues, V)`, `eigvals(A)`  (more in the `linalg` namespace)
@@ -1298,14 +1326,17 @@ Currently supported inside a block:
 
 | Category | Operations |
 |----------|-----------|
-| Elementwise arithmetic | `+ - * / ^` (tensor/tensor, tensor/scalar, scalar/scalar) |
-| Comparisons | `< > <= >= == !=` (→ `0.0`/`1.0`) |
-| Unary math | `exp ln log2 log10 sqrt cbrt sin cos tan asin acos atan sinh cosh tanh abs sign floor ceil trunc frac`, negation `-T` |
-| Reductions | `sum mean min max` (whole-tensor → scalar) |
+| Elementwise arithmetic | `+ - * / ^ // %` (tensor/tensor, tensor/scalar, scalar/scalar) |
+| Comparisons & logic | `< > <= >= == !=` and `& |` (→ `0.0`/`1.0`) |
+| Conditionals | `if(cond, a, b)` — `select` per element inside a `tensor` lambda; lazy scalar-cond form at tensor level (same as the CPU) |
+| Unary math | `exp ln log2 log10 sqrt cbrt sin cos tan asin acos atan sinh cosh tanh abs sign floor ceil trunc frac`, `isnan isinf isfinite`, negation `-T` |
+| Reductions | `sum mean min max`, `any all` (whole-tensor → scalar) |
 | Min/max | two-argument elementwise form, e.g. `min(T, 0)` |
 | Stencils | `shift(T,n,axis)`, `roll(T,n,axis)`, `ops.lap(T,dx[,bc])`, `ops.grad(T,dx,axis)` |
 | Construction | `tensor((i,j) -> expr, m, n)` — built on the GPU in one kernel; the body may gather captured tensors (`T[i,j]`) |
 | Loops | `iterate(step, x0, n)`, `scan(step, x0, n)` |
+| Lambdas | bind a lambda/function and apply it: `f = x -> x*x; f(A)` (inlined; no recursion) |
+| Tuple trees | build/index/destructure `(A, B)`; arithmetic & unary math broadcast over tuple leaves, exactly as on the CPU |
 | Bindings | `name = expr;` locals, visible only inside the block |
 
 ### GPU-side tensor construction (`tensor`)

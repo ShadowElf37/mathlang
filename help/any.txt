@@ -1,0 +1,10 @@
+[1;4many[0m
+
+True (1.0) if ANY numeric leaf of the value is nonzero, else 0.0. Reduces a whole
+value tree — scalars, tensors, and nested tuples — to a single boolean.
+
+[1mExamples:[0m
+[0m> any([0, 0, 1])
+result = 1
+> any(isinf(T))        # did anything blow up to infinity?
+[0m

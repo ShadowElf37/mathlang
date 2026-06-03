@@ -41,6 +41,12 @@ enum GpuVal {
     /// A tuple of values (e.g. coupled fields `(U, V)` carried as a single
     /// `iterate`/`scan` state). Each element is itself a `GpuVal`.
     Tuple(Vec<GpuVal>),
+    /// A user lambda bound to a name inside a block (`f = x -> x*x`). Carries its
+    /// parameter names and body; free variables resolve through the shared scope
+    /// at apply time (no captured environment), exactly like an iterate step body.
+    /// Applied by AST inlining (beta reduction) — WGSL has no first-class fns, so
+    /// a `Fn` can be *called* but never returned or used as data.
+    Fn(Rc<(Vec<String>, Expr)>),
 }
 
 /// Ensure a value is GPU-resident, uploading a host-side result if needed. A
@@ -180,16 +186,8 @@ fn eval_gpu(
         Expr::Num(n) => Ok(GpuVal::Scalar(*n)),
 
         Expr::Neg(x) => {
-            let v = materialize(ctx, eval_gpu(x, env, ctx, scope)?);
-            match v {
-                GpuVal::Scalar(s) => Ok(GpuVal::Scalar(-s)),
-                GpuVal::Buffer { buf, shape, len } => {
-                    let out = run_map(ctx, &[&buf], len, "-in0[i]")?;
-                    Ok(GpuVal::Buffer { buf: out, shape, len })
-                }
-                GpuVal::Host { .. } => unreachable!("materialized above"),
-                GpuVal::Tuple(_) => Err("GPU: cannot negate a tuple".into()),
-            }
+            let v = eval_gpu(x, env, ctx, scope)?;
+            neg_gpu(ctx, v)
         }
 
         Expr::Var(name) => {
@@ -231,8 +229,14 @@ fn eval_gpu(
                         let v = eval_gpu(expr, env, ctx, scope)?;
                         scope.insert(name.clone(), v);
                     }
-                    BlockStmt::Def(Def::Func(..)) => {
-                        return Err("GPU: function definitions are not supported in a GPU block".into());
+                    // `f(x) = …` block-local function → a callable `Fn` value,
+                    // applied by inlining (no recursion; WGSL has no call stack).
+                    BlockStmt::Def(Def::Func(name, params, _, body)) => {
+                        let f = GpuVal::Fn(Rc::new((
+                            params.iter().map(|p| p.name.clone()).collect(),
+                            body.clone(),
+                        )));
+                        scope.insert(name.clone(), f);
                     }
                     BlockStmt::Expr(expr) => {
                         last = eval_gpu(expr, env, ctx, scope)?;
@@ -300,6 +304,13 @@ fn eval_gpu(
             Ok(upload_f32(ctx, data, vec![r, c]))
         }
 
+        // A lambda bound to a name (`f = x -> x*x`) becomes a callable value in
+        // the block scope. It is applied by inlining its body (see `eval_apply`).
+        Expr::Lambda(params, _, body) => Ok(GpuVal::Fn(Rc::new((
+            params.iter().map(|p| p.name.clone()).collect(),
+            (**body).clone(),
+        )))),
+
         other => Err(format!("GPU: unsupported expression in GPU block: {other:?}")),
     }
 }
@@ -314,7 +325,7 @@ fn eval_scalar_elems(
 ) -> Result<Vec<f32>, String> {
     elems.iter().map(|e| match eval_gpu(e, env, ctx, scope)? {
         GpuVal::Scalar(s) => Ok(s as f32),
-        GpuVal::Buffer { .. } | GpuVal::Host { .. } | GpuVal::Tuple(_) =>
+        GpuVal::Buffer { .. } | GpuVal::Host { .. } | GpuVal::Tuple(_) | GpuVal::Fn(_) =>
             Err("GPU: tensor literals must contain scalar elements".to_string()),
     }).collect()
 }
@@ -341,9 +352,34 @@ fn eval_apply(
         Expr::Var(n) => n.as_str(),
         _ => return Err("GPU: only named function calls are supported in a GPU block".into()),
     };
+
+    // A lambda/function bound to this name in the block scope wins over builtins
+    // (a block-local `f = …` shadows). Inline-apply it by beta reduction.
+    if let Some(GpuVal::Fn(func)) = scope.get(name) {
+        let func = func.clone();
+        let argvals = args.iter()
+            .map(|a| eval_gpu(a, env, ctx, scope))
+            .collect::<Result<Vec<_>, _>>()?;
+        return apply_gpu_fn(&func.0, &func.1, argvals, env, ctx, scope);
+    }
+
     match name {
         "iterate" => gpu_iterate(args, env, ctx, scope),
         "scan"    => gpu_scan(args, env, ctx, scope),
+
+        // `if(cond, a, b)` — lazy special form, exactly like the CPU: the
+        // condition must reduce to a scalar and only the taken branch is
+        // evaluated. (Per-element masking lives inside `tensor(...)` via `select`;
+        // a tensor condition errors here, matching the CPU's `.num("if")`.)
+        "if" => {
+            if args.len() != 3 { return Err("if(cond, a, b) expects 3 args".into()); }
+            let cond = match eval_gpu(&args[0], env, ctx, scope)? {
+                GpuVal::Scalar(s) => s,
+                _ => return Err("GPU: if: condition must be a scalar".into()),
+            };
+            if cond != 0.0 { eval_gpu(&args[1], env, ctx, scope) }
+            else           { eval_gpu(&args[2], env, ctx, scope) }
+        }
 
         // GPU-side tensor construction from an index lambda (built on the device,
         // never materialized cell-by-cell on the CPU). See `gpu_tensor`.
@@ -356,6 +392,11 @@ fn eval_apply(
         "sum" | "mean" | "min" | "max" if args.len() == 1 => {
             let v = eval_gpu(&args[0], env, ctx, scope)?;
             reduce_val(ctx, name, v)
+        }
+        // `any`/`all` → scalar 0/1 (any/every leaf nonzero). Map to flags, reduce.
+        "any" | "all" if args.len() == 1 => {
+            let v = eval_gpu(&args[0], env, ctx, scope)?;
+            any_all_val(ctx, name, v)
         }
         // Binary min/max (elementwise / broadcast).
         "min" | "max" if args.len() == 2 => {
@@ -378,7 +419,18 @@ fn eval_apply(
         "get" => Err(
             "GPU: `get(cell)` must appear directly in the GPU block, not inside a called function".into()),
 
-        _ => Err(format!("GPU: function `{name}` is not available in a GPU block")),
+        // A user function from the enclosing CPU scope, applied by inlining.
+        _ => {
+            if let Some(Val::Fn(params, body, _, _, _)) = env.vars.get(name) {
+                let params = params.clone();
+                let body = body.clone();
+                let argvals = args.iter()
+                    .map(|a| eval_gpu(a, env, ctx, scope))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return apply_gpu_fn(&params, &body, argvals, env, ctx, scope);
+            }
+            Err(format!("GPU: function `{name}` is not available in a GPU block"))
+        }
     }
 }
 
@@ -398,6 +450,7 @@ fn expect_buffer(gctx: &GpuContext, v: GpuVal, what: &str) -> Result<(Rc<wgpu::B
         GpuVal::Buffer { buf, shape, len } => Ok((buf, shape, len)),
         GpuVal::Scalar(_) => Err(format!("GPU: {what} expects a tensor, got a scalar")),
         GpuVal::Tuple(_) => Err(format!("GPU: {what} expects a tensor, got a tuple")),
+        GpuVal::Fn(_) => Err(format!("GPU: {what} expects a tensor, got a function")),
         GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
@@ -416,12 +469,54 @@ fn op_expr(op: &Op, a: &str, b: &str) -> Result<String, String> {
         Op::GtEq => format!("f32({a} >= {b})"),
         Op::Eq   => format!("f32({a} == {b})"),
         Op::Ne   => format!("f32({a} != {b})"),
-        other => return Err(format!("GPU: operator {other:?} not supported yet")),
+        // `//` floor-divide and `%` remainder. WGSL float `%` is `a - b*trunc(a/b)`
+        // (sign of dividend), matching Rust's `f64 %` used on the CPU.
+        Op::FloorDiv => format!("floor({a} / {b})"),
+        Op::Rem      => format!("({a} % {b})"),
+        // Logical `&`/`|` truncate to int (CPU uses `x as i64`) and test nonzero,
+        // returning 0.0/1.0. WGSL `i32(f)` truncates toward zero, like `as i64`.
+        Op::And  => format!("f32((i32({a}) != 0) && (i32({b}) != 0))"),
+        Op::Or   => format!("f32((i32({a}) != 0) || (i32({b}) != 0))"),
     })
+}
+
+/// Unary negation on the GPU, recursing over tuple trees (like the CPU `neg_val`).
+fn neg_gpu(ctx: &GpuContext, v: GpuVal) -> Result<GpuVal, String> {
+    match materialize(ctx, v) {
+        GpuVal::Scalar(s) => Ok(GpuVal::Scalar(-s)),
+        GpuVal::Buffer { buf, shape, len } => {
+            let out = run_map(ctx, &[&buf], len, "-in0[i]")?;
+            Ok(GpuVal::Buffer { buf: out, shape, len })
+        }
+        GpuVal::Tuple(elems) => Ok(GpuVal::Tuple(
+            elems.into_iter().map(|e| neg_gpu(ctx, e)).collect::<Result<Vec<_>, _>>()?)),
+        GpuVal::Fn(_) => Err("GPU: cannot negate a function".into()),
+        GpuVal::Host { .. } => unreachable!("materialized above"),
+    }
 }
 
 /// Evaluate `lhs op rhs` on the GPU (or CPU for scalar/scalar).
 fn binop(ctx: &GpuContext, op: &Op, lhs: GpuVal, rhs: GpuVal) -> Result<GpuVal, String> {
+    // Tree broadcast: a tuple is a node, scalars/buffers are leaves. Mirrors the
+    // CPU `binop_tuple` — two tuples broadcast structurally, a tuple vs a leaf
+    // broadcasts the leaf into every field. (Matches CPU tree semantics.)
+    match (&lhs, &rhs) {
+        (GpuVal::Tuple(_), _) | (_, GpuVal::Tuple(_)) => return match (lhs, rhs) {
+            (GpuVal::Tuple(ls), GpuVal::Tuple(rs)) => {
+                if ls.len() != rs.len() {
+                    return Err(format!("GPU: tuple op tuple: length mismatch ({} vs {})", ls.len(), rs.len()));
+                }
+                Ok(GpuVal::Tuple(ls.into_iter().zip(rs)
+                    .map(|(l, r)| binop(ctx, op, l, r)).collect::<Result<Vec<_>, _>>()?))
+            }
+            (GpuVal::Tuple(ls), leaf) => Ok(GpuVal::Tuple(ls.into_iter()
+                .map(|l| binop(ctx, op, l, leaf.clone())).collect::<Result<Vec<_>, _>>()?)),
+            (leaf, GpuVal::Tuple(rs)) => Ok(GpuVal::Tuple(rs.into_iter()
+                .map(|r| binop(ctx, op, leaf.clone(), r)).collect::<Result<Vec<_>, _>>()?)),
+            _ => unreachable!(),
+        },
+        _ => {}
+    }
     match (materialize(ctx, lhs), materialize(ctx, rhs)) {
         (GpuVal::Scalar(x), GpuVal::Scalar(y)) => Ok(GpuVal::Scalar(scalar_op(op, x, y)?)),
 
@@ -470,7 +565,10 @@ fn scalar_op(op: &Op, x: f64, y: f64) -> Result<f64, String> {
         Op::GtEq => (x >= y) as i64 as f64,
         Op::Eq   => (x == y) as i64 as f64,
         Op::Ne   => (x != y) as i64 as f64,
-        other => return Err(format!("GPU: operator {other:?} not supported yet")),
+        Op::FloorDiv => (x / y).floor(),
+        Op::Rem      => x % y,
+        Op::And  => ((x as i64 != 0) && (y as i64 != 0)) as i64 as f64,
+        Op::Or   => ((x as i64 != 0) || (y as i64 != 0)) as i64 as f64,
     })
 }
 
@@ -516,6 +614,11 @@ fn unary_wgsl(name: &str, x: &str) -> Option<String> {
         "ceil"  => format!("ceil({x})"),
         "trunc" => format!("trunc({x})"),
         "frac"  => format!("fract({x})"),
+        // Finiteness predicates (WGSL has no isnan/isinf): NaN ≠ itself; |Inf|
+        // exceeds the f32 max. Return 0.0/1.0, matching the CPU builtins.
+        "isnan"    => format!("f32({x} != {x})"),
+        "isinf"    => format!("f32(abs({x}) > f32(3.4028235e38))"),
+        "isfinite" => format!("f32(abs({x}) <= f32(3.4028235e38))"),
         _ => return None,
     })
 }
@@ -532,6 +635,9 @@ fn unary_cpu(name: &str, x: f64) -> f64 {
         "sign" => if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 },
         "floor" => x.floor(), "ceil" => x.ceil(), "trunc" => x.trunc(),
         "frac" => x.fract(),
+        "isnan"    => x.is_nan() as i64 as f64,
+        "isinf"    => x.is_infinite() as i64 as f64,
+        "isfinite" => x.is_finite() as i64 as f64,
         _ => f64::NAN,
     }
 }
@@ -544,7 +650,10 @@ fn unary_val(ctx: &GpuContext, name: &str, v: GpuVal) -> Result<GpuVal, String> 
             let out = run_map(ctx, &[&buf], len, &expr)?;
             Ok(GpuVal::Buffer { buf: out, shape, len })
         }
-        GpuVal::Tuple(_) => Err(format!("GPU: {name} does not apply to a tuple")),
+        // Unary math broadcasts over a tuple's leaves (tree map), like the CPU.
+        GpuVal::Tuple(elems) => Ok(GpuVal::Tuple(
+            elems.into_iter().map(|e| unary_val(ctx, name, e)).collect::<Result<Vec<_>, _>>()?)),
+        GpuVal::Fn(_) => Err(format!("GPU: {name} does not apply to a function")),
         GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
@@ -578,6 +687,23 @@ fn binary_minmax(ctx: &GpuContext, name: &str, a: GpuVal, b: GpuVal) -> Result<G
 
 // ───────────────────────────── reductions ─────────────────────────────
 
+/// `any`/`all` → scalar 0/1. Map each element to a nonzero flag, then reduce by
+/// `max` (any) or `min` (all). Matches the CPU `any`/`all` builtins.
+fn any_all_val(ctx: &GpuContext, name: &str, v: GpuVal) -> Result<GpuVal, String> {
+    match materialize(ctx, v) {
+        GpuVal::Scalar(s) => Ok(GpuVal::Scalar((s != 0.0) as i64 as f64)),
+        GpuVal::Buffer { buf, len, .. } => {
+            if len == 0 { return Ok(GpuVal::Scalar(if name == "all" { 1.0 } else { 0.0 })); }
+            let flags = run_map(ctx, &[&buf], len, "f32(in0[i] != f32(0.0))")?;
+            let kind = if name == "any" { "max" } else { "min" };
+            Ok(GpuVal::Scalar(reduce(ctx, flags, len, kind)?))
+        }
+        GpuVal::Tuple(_) => Err(format!("GPU: {name} over a tuple is not supported (reduce its fields)")),
+        GpuVal::Fn(_) => Err(format!("GPU: {name} does not apply to a function")),
+        GpuVal::Host { .. } => unreachable!("materialized above"),
+    }
+}
+
 /// Reduce a value with `sum`/`mean`/`min`/`max`, returning a scalar.
 fn reduce_val(ctx: &GpuContext, name: &str, v: GpuVal) -> Result<GpuVal, String> {
     match materialize(ctx, v) {
@@ -589,6 +715,7 @@ fn reduce_val(ctx: &GpuContext, name: &str, v: GpuVal) -> Result<GpuVal, String>
             Ok(GpuVal::Scalar(if name == "mean" { total / len as f64 } else { total }))
         }
         GpuVal::Tuple(_) => Err(format!("GPU: {name} does not apply to a tuple")),
+        GpuVal::Fn(_) => Err(format!("GPU: {name} does not apply to a function")),
         GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
@@ -1073,6 +1200,16 @@ fn emit_apply(f: &Expr, args: &[Expr], ctx: &LamCtx) -> Result<String, String> {
         let b = emit_expr(&args[1], ctx)?;
         return Ok(format!("{name}({a}, {b})"));
     }
+    // `if(cond, a, b)` per-thread → WGSL `select`. NOTE: unlike the CPU `if`
+    // (lazy — only the taken branch runs), `select` evaluates BOTH branches and
+    // discards the untaken one. For pure index math that is harmless (a discarded
+    // NaN/inf is fine); avoid relying on a branch *not* being evaluated.
+    if args.len() == 3 && name == "if" {
+        let cond = emit_expr(&args[0], ctx)?;
+        let a = emit_expr(&args[1], ctx)?;
+        let b = emit_expr(&args[2], ctx)?;
+        return Ok(format!("select({b}, {a}, ({cond}) != f32(0.0))"));
+    }
     Err(format!("GPU: function `{name}` not supported in a tensor lambda"))
 }
 
@@ -1298,30 +1435,73 @@ fn apply_step(
     scope: &mut HashMap<String, GpuVal>,
 ) -> Result<GpuVal, String> {
     match step {
-        Step::Body { params, body } => {
-            if params.len() == 1 {
-                scope.insert(params[0].clone(), state);
-            } else {
-                match state {
-                    GpuVal::Tuple(elems) if elems.len() == params.len() => {
-                        for (p, e) in params.iter().zip(elems) {
-                            scope.insert(p.clone(), e);
-                        }
-                    }
-                    GpuVal::Tuple(elems) => return Err(format!(
-                        "GPU: step takes {} arguments but the state is a {}-tuple",
-                        params.len(), elems.len()
-                    )),
-                    _ => return Err(format!(
-                        "GPU: step takes {} arguments, so the state must be a {}-tuple",
-                        params.len(), params.len()
-                    )),
-                }
-            }
-            eval_gpu(body, env, ctx, scope)
-        }
+        Step::Body { params, body } => apply_gpu_fn(params, body, vec![state], env, ctx, scope),
         Step::Builtin(name) => unary_val(ctx, name, state),
     }
+}
+
+thread_local! {
+    /// Depth of nested user-function inlining, to turn runaway recursion (which
+    /// WGSL cannot express) into a clean error instead of a stack overflow.
+    static APPLY_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Inline-apply a user lambda/function: bind `params` to `argvals` in `scope`,
+/// evaluate `body`, then restore any shadowed bindings. Shared by `iterate`/`scan`
+/// steps and direct calls (`f(x)`) so arity/tuple handling is identical.
+///
+/// Binding rules mirror the CPU's `apply_val`:
+///   • `argvals.len() == params.len()` — bind positionally;
+///   • one tuple argument with `params.len()` fields — destructure it (coupled
+///     state, e.g. an `iterate((U,V) -> …, (U0,V0), n)`).
+fn apply_gpu_fn(
+    params: &[String],
+    body: &Expr,
+    argvals: Vec<GpuVal>,
+    env: &Env,
+    ctx: &GpuContext,
+    scope: &mut HashMap<String, GpuVal>,
+) -> Result<GpuVal, String> {
+    const MAX_DEPTH: usize = 256;
+    let depth = APPLY_DEPTH.with(|d| { let n = d.get() + 1; d.set(n); n });
+    struct DepthGuard;
+    impl Drop for DepthGuard {
+        fn drop(&mut self) { APPLY_DEPTH.with(|d| d.set(d.get().saturating_sub(1))); }
+    }
+    let _guard = DepthGuard;
+    if depth > MAX_DEPTH {
+        return Err("GPU: function-call nesting too deep \
+                    (recursion is not supported in a GPU block)".into());
+    }
+
+    let bindings: Vec<(String, GpuVal)> = if argvals.len() == params.len() {
+        params.iter().cloned().zip(argvals).collect()
+    } else if params.len() > 1 && argvals.len() == 1 {
+        match argvals.into_iter().next().unwrap() {
+            GpuVal::Tuple(elems) if elems.len() == params.len() =>
+                params.iter().cloned().zip(elems).collect(),
+            GpuVal::Tuple(elems) => return Err(format!(
+                "GPU: function takes {} arguments but was given a {}-tuple",
+                params.len(), elems.len())),
+            _ => return Err(format!(
+                "GPU: function takes {} arguments, so its single argument must be a {}-tuple",
+                params.len(), params.len())),
+        }
+    } else {
+        return Err(format!(
+            "GPU: function takes {} argument(s) but {} were given",
+            params.len(), argvals.len()));
+    };
+
+    // Save shadowed entries so the call is lexically scoped (params don't leak).
+    let saved: Vec<(String, Option<GpuVal>)> =
+        bindings.iter().map(|(k, _)| (k.clone(), scope.get(k).cloned())).collect();
+    for (k, v) in bindings { scope.insert(k, v); }
+    let result = eval_gpu(body, env, ctx, scope);
+    for (k, old) in saved {
+        match old { Some(v) => { scope.insert(k, v); } None => { scope.remove(&k); } }
+    }
+    result
 }
 
 /// Evaluate a non-negative integer count argument.
@@ -1329,7 +1509,7 @@ fn eval_count(arg: &Expr, env: &Env, ctx: &GpuContext, scope: &mut HashMap<Strin
     match eval_gpu(arg, env, ctx, scope)? {
         GpuVal::Scalar(s) if s >= 0.0 && s.fract() == 0.0 => Ok(s as usize),
         GpuVal::Scalar(s) => Err(format!("GPU: iterate/scan count must be a non-negative integer, got {s}")),
-        GpuVal::Buffer { .. } | GpuVal::Host { .. } | GpuVal::Tuple(_) =>
+        GpuVal::Buffer { .. } | GpuVal::Host { .. } | GpuVal::Tuple(_) | GpuVal::Fn(_) =>
             Err("GPU: iterate/scan count must be a scalar".into()),
     }
 }
@@ -1444,6 +1624,7 @@ fn stack_frames(ctx: &GpuContext, frames: Vec<GpuVal>) -> Result<GpuVal, String>
             Ok(GpuVal::Tuple(fields))
         }
         GpuVal::Host { .. } => Err("GPU: scan produced a host value (internal error)".into()),
+        GpuVal::Fn(_) => Err("GPU: scan step must return a tensor/scalar state, not a function".into()),
     }
 }
 
@@ -1629,6 +1810,7 @@ fn to_val(ctx: &GpuContext, v: &GpuVal) -> Result<Val, String> {
         GpuVal::Tuple(elems) => Ok(Val::Tuple(
             elems.iter().map(|e| to_val(ctx, e)).collect::<Result<Vec<_>, _>>()?,
         )),
+        GpuVal::Fn(_) => Err("GPU: a function cannot be returned from a GPU block".into()),
     }
 }
 

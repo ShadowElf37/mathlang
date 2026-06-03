@@ -1,0 +1,10 @@
+[1;4misnan[0m
+
+Elementwise test for NaN, returning 0.0/1.0 with the same structure as the input
+(broadcasts over tensors and tuple trees). Pair with any/all.
+
+[1mExamples:[0m
+[0m> isnan([1, 0/0, 3])
+result = [0, 1, 0]
+> any(isnan(T))
+[0m

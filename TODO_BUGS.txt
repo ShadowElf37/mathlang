@@ -1,3 +1,8 @@
+1. comparison/boolean operator precedence needs tweaking; make it whatever is most common and sensible
+
+
+
+
 [FIXED v0.31.1] panic: `!animate2D f 0 200` (function form resolving to 0 frames)
   indexed t_vals[0] on an empty list. Now returns a clean error pointing at the
   4-arg range form. Regression test: animate.empty_frames in tests.sh.

@@ -1,0 +1,10 @@
+[1;4misinf[0m
+
+Elementwise test for ±infinity, returning 0.0/1.0 with the same structure as the
+input (broadcasts over tensors and tuple trees).
+
+[1mExamples:[0m
+[0m> isinf([1, 1/0, -1/0])
+result = [0, 1, 1]
+> any(isinf(T))
+[0m

@@ -24,6 +24,7 @@ pub const BUILTIN_FNS: &[&str] = &[
     "sort", "zip", "dot", "append", "concat", "flatten", "argmin", "argmax",
     "cumsum", "cumprod", "diff",
     "mean", "std",
+    "any", "all", "isnan", "isinf", "isfinite",
     "compose", "partial",
     "eps",
     "filter", "reduce",

@@ -5,8 +5,17 @@
 // tensors). RK4 is the cheap high-value scheme; the integrating-factor (IMEX)
 // stepper from the doc is intentionally deferred (it can't be made generic
 // without knowing which part of the RHS is the stiff linear operator).
-use crate::eval::{Val, TData, Env, apply_val, fmt_val, FieldVal};
+use crate::eval::{Val, TData, Env, apply_val, fmt_val, FieldVal, binop_val, state_is_finite};
+use crate::ast::Op;
 use std::sync::Arc;
+
+// Tree-broadcast arithmetic on whole structured states (scalar / tensor / field /
+// nested tuple). These let the steppers combine states directly — `q + dt*v` — with
+// no manual flatten/rebuild: `binop_val` broadcasts over the tree's leaves, so a
+// heterogeneous (particles, field) phase space evolves as one. (`scale` etc.)
+fn scale(s: f64, v: Val) -> Result<Val, String> { binop_val(Val::Num(s), &Op::Mul, v) }
+fn add(a: Val, b: Val) -> Result<Val, String> { binop_val(a, &Op::Add, b) }
+fn sub(a: Val, b: Val) -> Result<Val, String> { binop_val(a, &Op::Sub, b) }
 
 pub const NAMES: &[&str] = &["rk4", "odeint", "verlet", "tao", "cfl"];
 
@@ -166,18 +175,6 @@ fn odeint(vals: Vec<Val>, env: &Env) -> Result<Val, String> {
     Ok(Val::Tensor { data: TData::new(rows), shape: out_shape })
 }
 
-// Apply a 1-arg gradient function to a state vector; return its flat output,
-// length-checked against `len`.
-fn call_grad(f: &Val, x: &[f64], sh: &State, len: usize, env: &Env, what: &str) -> Result<Vec<f64>, String> {
-    let xv = from_state(x.to_vec(), sh);
-    let out = apply_val(f.clone(), vec![xv], env)?;
-    let (d, _) = to_state(&out)?;
-    if d.len() != len {
-        return Err(format!("{what} returned {} values but the state has {}", d.len(), len));
-    }
-    Ok(d)
-}
-
 // verlet(dVdq, dTdp, q0, p0, dt, n) — velocity-Verlet (leapfrog), the workhorse
 // symplectic integrator for a SEPARABLE Hamiltonian H(q,p) = T(p) + V(q). It is
 // symplectic and time-reversible, so energy stays bounded over long runs (unlike
@@ -193,30 +190,27 @@ fn verlet(vals: Vec<Val>, env: &Env) -> Result<Val, String> {
     let mut it = vals.into_iter();
     let dvdq = it.next().unwrap();
     let dtdp = it.next().unwrap();
-    let (mut q, qsh) = to_state(&it.next().unwrap())?;
-    let (mut p, psh) = to_state(&it.next().unwrap())?;
+    let mut q = it.next().unwrap();
+    let mut p = it.next().unwrap();
     let dt = it.next().unwrap().num("solver.verlet dt")?;
     let n  = it.next().unwrap().num("solver.verlet n")? as i64;
     if n <= 0 { return Err("solver.verlet: n must be a positive integer".into()); }
-    if q.len() != p.len() {
-        return Err(format!("solver.verlet: q0 and p0 must have the same length ({} vs {})", q.len(), p.len()));
-    }
-    let len = q.len();
+    // Kick–drift–kick on whole structured states. Tree broadcast handles scalars,
+    // tensors, fields and tuples of them uniformly (shape mismatches surface as
+    // arithmetic errors); fields keep their geometry through `binop_val`.
     for step in 0..n {
-        let fq = call_grad(&dvdq, &q, &qsh, len, env, "solver.verlet: dVdq")?;          // ∂H/∂q at q
-        let ph: Vec<f64> = (0..len).map(|i| p[i] - 0.5 * dt * fq[i]).collect();          // half kick
-        let vp = call_grad(&dtdp, &ph, &psh, len, env, "solver.verlet: dTdp")?;          // ∂H/∂p at p½
-        let qn: Vec<f64> = (0..len).map(|i| q[i] + dt * vp[i]).collect();                // drift
-        let fq2 = call_grad(&dvdq, &qn, &qsh, len, env, "solver.verlet: dVdq")?;         // ∂H/∂q at q'
-        let pn: Vec<f64> = (0..len).map(|i| ph[i] - 0.5 * dt * fq2[i]).collect();        // half kick
-        for (i, v) in qn.iter().chain(pn.iter()).enumerate() {
-            if !v.is_finite() {
-                return Err(format!("solver.verlet: non-finite value at step {step} (component {i})"));
-            }
+        let fq  = apply_val(dvdq.clone(), vec![q.clone()], env)?;     // ∂H/∂q at q
+        let ph  = sub(p.clone(), scale(0.5 * dt, fq)?)?;             // half kick
+        let vp  = apply_val(dtdp.clone(), vec![ph.clone()], env)?;    // ∂H/∂p at p½
+        let qn  = add(q.clone(), scale(dt, vp)?)?;                   // drift
+        let fq2 = apply_val(dvdq.clone(), vec![qn.clone()], env)?;    // ∂H/∂q at q'
+        let pn  = sub(ph, scale(0.5 * dt, fq2)?)?;                   // half kick
+        if !state_is_finite(&qn) || !state_is_finite(&pn) {
+            return Err(format!("solver.verlet: non-finite value at step {step}"));
         }
         q = qn; p = pn;
     }
-    Ok(Val::Tuple(vec![from_state(q, &qsh), from_state(p, &psh)]))
+    Ok(Val::Tuple(vec![q, p]))
 }
 
 // Apply a 2-arg gradient g(a, b) where `a` follows template `ast` and `b` follows

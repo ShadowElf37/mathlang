@@ -303,6 +303,7 @@ impl Env {
             "sort", "zip", "dot", "append", "concat", "flatten", "argmin", "argmax",
             "cumsum", "cumprod", "diff",
             "mean", "std",
+            "any", "all", "isnan", "isinf", "isfinite",
             "compose", "partial",
             "filter", "reduce",
             "rand", "eps",
@@ -530,6 +531,11 @@ pub fn builtin_sig(name: &str) -> Option<&'static str> {
         "mean"   => Some("mean(x: tensor) -> real"),
         "std"    => Some("std(x: tensor) -> real"),
         "var"    => Some("var(x: tensor) -> real"),
+        "any"    => Some("any(x: any) -> real    [1 if any leaf is nonzero]"),
+        "all"    => Some("all(x: any) -> real    [1 if every leaf is nonzero]"),
+        "isnan"    => Some("isnan(x: any) -> any    [elementwise; 1 where NaN]"),
+        "isinf"    => Some("isinf(x: any) -> any    [elementwise; 1 where ±Inf]"),
+        "isfinite" => Some("isfinite(x: any) -> any [elementwise; 1 where finite]"),
         "min"    => Some("min(a: num, b: num) -> num"),
         "max"    => Some("max(a: num, b: num) -> num"),
         "pow"    => Some("pow(base: num, exp: num) -> num"),
@@ -1052,6 +1058,32 @@ fn broadcast1(v: Val, f: impl Fn(Val) -> Result<Val, String>) -> Result<Val, Str
             Ok(maybe_real(re_out, im_out, shape))
         }
         other => f(other),
+    }
+}
+
+/// Collect every numeric leaf of a value tree (scalars, tensor elements, nested
+/// tuple leaves) into `out`. Used by the `any`/`all` reductions.
+fn collect_leaves(v: &Val, who: &str, out: &mut Vec<f64>) -> Result<(), String> {
+    match v {
+        Val::Num(x)              => out.push(*x),
+        Val::Tensor { data, .. } => out.extend(data.iter()),
+        Val::Tuple(items)        => for it in items { collect_leaves(it, who, out)?; },
+        other => return Err(format!("{who}: expected a real scalar/tensor/tuple, got {}", fmt_val(other))),
+    }
+    Ok(())
+}
+
+/// Map a scalar function over every numeric leaf of a value tree, preserving the
+/// tree's structure (scalar → scalar, tensor → tensor, tuple → tuple). Used by the
+/// `isnan`/`isinf`/`isfinite` predicates.
+fn map_leaves_f(v: Val, who: &str, f: &impl Fn(f64) -> f64) -> Result<Val, String> {
+    match v {
+        Val::Num(x) => Ok(Val::Num(f(x))),
+        Val::Tensor { data, shape } =>
+            Ok(Val::Tensor { data: TData::new(data.into_iter().map(|x| f(x)).collect()), shape }),
+        Val::Tuple(items) => Ok(Val::Tuple(
+            items.into_iter().map(|it| map_leaves_f(it, who, f)).collect::<Result<_, _>>()?)),
+        other => Err(format!("{who}: expected a real scalar/tensor/tuple, got {}", fmt_val(&other))),
     }
 }
 
@@ -1912,6 +1944,28 @@ pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, St
             let n = nums.len() as f64;
             Ok(Val::Num(nums.iter().sum::<f64>() / n))
         }
+        // Reduce a whole value tree (scalars, tensors, nested tuples) to one bool.
+        // `any` is true if any leaf is nonzero; `all` is true if every leaf is
+        // (vacuously true for an empty value). Handy with the predicates below,
+        // e.g. `any(isnan(T))` / `all(isfinite(state))`.
+        "any" | "all" => {
+            arity(name, 1, vals.len())?;
+            let mut leaves = Vec::new();
+            collect_leaves(&vals.into_iter().next().unwrap(), name, &mut leaves)?;
+            let r = if name == "any" {
+                leaves.iter().any(|&x| x != 0.0)
+            } else {
+                leaves.iter().all(|&x| x != 0.0)
+            };
+            Ok(Val::Num(r as i64 as f64))
+        }
+        // Elementwise finiteness predicates (0.0/1.0), broadcasting over the tree.
+        "isnan" => { arity(name, 1, vals.len())?;
+            map_leaves_f(vals.into_iter().next().unwrap(), name, &|x| x.is_nan() as i64 as f64) }
+        "isinf" => { arity(name, 1, vals.len())?;
+            map_leaves_f(vals.into_iter().next().unwrap(), name, &|x| x.is_infinite() as i64 as f64) }
+        "isfinite" => { arity(name, 1, vals.len())?;
+            map_leaves_f(vals.into_iter().next().unwrap(), name, &|x| x.is_finite() as i64 as f64) }
         "median" => {
             arity("median", 1, vals.len())?;
             let mut nums: Vec<f64> = match vals.into_iter().next().unwrap() {
@@ -3717,46 +3771,11 @@ fn run_vm(
             Instruction::BinOp(op) => {
                 let rv = stack.pop().unwrap();
                 let lv = stack.pop().unwrap();
-                let result = if matches!((&lv, &rv),
-                    (Val::Tensor { .. }, _) | (_, Val::Tensor { .. }) |
-                    (Val::ComplexTensor { .. }, _) | (_, Val::ComplexTensor { .. }))
-                {
-                    binop_tensor(lv, op, rv)
-                } else if matches!(op, Op::Eq | Op::Ne) {
-                    if let (Val::Tuple(ls), Val::Tuple(rs)) = (&lv, &rv) {
-                        let eq = ls.len() == rs.len()
-                            && ls.iter().zip(rs.iter()).all(|(a, b)|
-                                matches!((a, b), (Val::Num(x), Val::Num(y)) if x == y));
-                        Ok(Val::Num(if matches!(op, Op::Eq) == eq { 1.0 } else { 0.0 }))
-                    } else if matches!((&lv, &rv), (Val::Tuple(_), _) | (_, Val::Tuple(_))) {
-                        binop_tuple(lv, op, rv, env)
-                    } else {
-                        scalar_binop(lv, op, rv)
-                    }
-                } else if matches!((&lv, &rv), (Val::Tuple(_), _) | (_, Val::Tuple(_))) {
-                    binop_tuple(lv, op, rv, env)
-                } else {
-                    scalar_binop(lv, op, rv)
-                }?;
-                stack.push(result);
+                stack.push(binop_val(lv, op, rv)?);
             }
             Instruction::Neg => {
                 let v = stack.pop().unwrap();
-                let result = match v {
-                    Val::Num(n)       => Val::Num(-n),
-                    Val::Complex(a,b) => make_complex(-a, -b),
-                    Val::Tensor { data, shape } => Val::Tensor {
-                        data: TData::new(data.into_iter().map(|x| -x).collect()),
-                        shape,
-                    },
-                    Val::ComplexTensor { re, im, shape } => maybe_real(
-                        re.into_iter().map(|x| -x).collect(),
-                        im.into_iter().map(|x| -x).collect(),
-                        shape,
-                    ),
-                    other => return Err(format!("vm neg: expected number, got {}", fmt_val(&other))),
-                };
-                stack.push(result);
+                stack.push(neg_val(v)?);
             }
             Instruction::CallBuiltin(name, argc) => {
                 let start = stack.len() - argc;
@@ -3770,31 +3789,11 @@ fn run_vm(
                 stack.push(apply_val(callee, call_args, env)?);
             }
             Instruction::MakeTuple(n) => {
+                // `(a, b, c)` is always a tuple (no autopromotion to a tensor);
+                // mirrors the tree-walk `Expr::Tuple` arm. Use `[…]` for arrays.
                 let start = stack.len() - n;
                 let items: Vec<Val> = stack.drain(start..).collect();
-                let all_num = !items.is_empty() && items.iter().all(|v| matches!(v, Val::Num(_)));
-                let all_cx  = !items.is_empty() && items.iter().all(|v| matches!(v, Val::Num(_) | Val::Complex(..)));
-                let result = if all_num {
-                    let data: Vec<f64> = items.into_iter()
-                        .map(|v| match v { Val::Num(x) => x, _ => 0.0 }).collect();
-                    let nn = data.len();
-                    Val::Tensor { data: TData::new(data), shape: vec![nn] }
-                } else if all_cx {
-                    let mut re = Vec::with_capacity(*n);
-                    let mut im = Vec::with_capacity(*n);
-                    for v in items {
-                        match v {
-                            Val::Num(x)       => { re.push(x); im.push(0.0); }
-                            Val::Complex(a,b) => { re.push(a); im.push(b); }
-                            _ => {}
-                        }
-                    }
-                    let nn = re.len();
-                    maybe_real(re, im, vec![nn])
-                } else {
-                    Val::Tuple(items)
-                };
-                stack.push(result);
+                stack.push(Val::Tuple(items));
             }
             Instruction::MakeArray(n) => {
                 let start = stack.len() - n;
@@ -4018,19 +4017,13 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                     let g = args.into_iter().next().unwrap();
                     return Ok(compose_fns(f, g));
                 }
-                // Single n-element arg → destructure into n params.
-                // Accepts: n-Tuple, or 1-D Tensor/ComplexTensor of n elements.
-                let arg0 = &args[0];
-                let destructured: Option<Vec<Val>> = match arg0 {
-                    Val::Tuple(items) if items.len() == n => Some(items.clone()),
-                    Val::Tensor { data, shape } if shape.len() == 1 && data.len() == n && n > 1
-                        => Some(data.iter().map(|&x| Val::Num(x)).collect()),
-                    Val::ComplexTensor { re, im, shape } if shape.len() == 1 && re.len() == n && n > 1
-                        => Some(re.iter().zip(im.iter()).map(|(&r, &i)| make_complex(r, i)).collect()),
-                    _ => None,
-                };
-                if let Some(items) = destructured {
-                    return apply_fn_direct(params, sig, body, captured, cache, items, env);
+                // Single n-Tuple arg → destructure into n params. (A 1-D tensor is
+                // NOT splat into scalar params: that conflated "a vector" with
+                // "several arguments" and had no GPU-block counterpart.)
+                if let Val::Tuple(items) = &args[0] {
+                    if items.len() == n {
+                        return apply_fn_direct(params, sig, body, captured, cache, items.clone(), env);
+                    }
                 }
                 // Single scalar/complex arg with 1-param fn → direct apply
                 if n == 1 {
@@ -4043,18 +4036,16 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
             if k == n {
                 return apply_fn_direct(params, sig, body, captured, cache, args, env);
             }
-            // k args, all n-element sequences → map with destructuring
-            // Sequences can be n-Tuples or 1-D Tensors of size n
+            // k args, all n-Tuples → map with destructuring (apply f to each).
+            // (1-D tensors are not splat into params; see the single-arg note.)
             let all_n_seqs = k > 0 && args.iter().all(|a| match a {
                 Val::Tuple(v) => v.len() == n,
-                Val::Tensor { data, shape } => shape.len() == 1 && data.len() == n,
                 _ => false,
             });
             if all_n_seqs {
                 let results: Result<Vec<Val>, _> = args.into_iter().map(|a| {
                     let items: Vec<Val> = match a {
                         Val::Tuple(v) => v,
-                        Val::Tensor { data, .. } => data.into_iter().map(Val::Num).collect(),
                         _ => unreachable!(),
                     };
                     apply_fn_direct(params, sig, body, captured, cache, items, env)
@@ -4195,31 +4186,91 @@ fn scale_fn(s: f64, g: Val) -> Val {
     Val::make_fn(vec!["__z__".into()], body, Arc::new(captured))
 }
 
-fn binop_tuple(lv: Val, op: &Op, rv: Val, _env: &Env) -> Result<Val, String> {
+/// Tree broadcast of `op` over tuple operands. A tuple is a tree *node*; scalars,
+/// tensors and fields are *leaves*. Two tuples broadcast structurally (same arity,
+/// recursing element-wise); a tuple against a leaf broadcasts the leaf into every
+/// element. Recurses through `binop_val`, so nested tuples and tensor/field leaves
+/// all work — e.g. `([1,2], 3) + 10` → `([11,12], 13)`.
+fn binop_tuple(lv: Val, op: &Op, rv: Val) -> Result<Val, String> {
     match (lv, rv) {
         (Val::Tuple(ls), Val::Tuple(rs)) => {
             if ls.len() != rs.len() {
                 return Err(format!("tuple op tuple: length mismatch ({} vs {})", ls.len(), rs.len()));
             }
             let out: Result<Vec<Val>, _> = ls.into_iter().zip(rs)
-                .map(|(l, r)| scalar_binop(l, op, r))
+                .map(|(l, r)| binop_val(l, op, r))
                 .collect();
             Ok(Val::Tuple(out?))
         }
-        (Val::Tuple(ls), scalar) => {
+        (Val::Tuple(ls), leaf) => {
             let out: Result<Vec<Val>, _> = ls.into_iter()
-                .map(|l| scalar_binop(l, op, scalar.clone()))
+                .map(|l| binop_val(l, op, leaf.clone()))
                 .collect();
             Ok(Val::Tuple(out?))
         }
-        (scalar, Val::Tuple(rs)) => {
+        (leaf, Val::Tuple(rs)) => {
             let out: Result<Vec<Val>, _> = rs.into_iter()
-                .map(|r| scalar_binop(scalar.clone(), op, r))
+                .map(|r| binop_val(leaf.clone(), op, r))
                 .collect();
             Ok(Val::Tuple(out?))
         }
         _ => unreachable!(),
     }
+}
+
+/// True if two tuples are structurally equal as scalar bags (Num elements only;
+/// mismatched/non-scalar elements compare unequal). Used for whole-tuple `==`/`!=`.
+fn tuple_scalar_eq(ls: &[Val], rs: &[Val]) -> bool {
+    ls.len() == rs.len()
+        && ls.iter().zip(rs.iter())
+            .all(|(a, b)| matches!((a, b), (Val::Num(x), Val::Num(y)) if x == y))
+}
+
+/// Unary negation, recursing over tuple trees (so tensor/field leaves negate too).
+pub fn neg_val(v: Val) -> Result<Val, String> {
+    match v {
+        Val::Num(n)        => Ok(Val::Num(-n)),
+        Val::Complex(a, b) => Ok(make_complex(-a, -b)),
+        Val::Tuple(items)  => Ok(Val::Tuple(
+            items.into_iter().map(neg_val).collect::<Result<Vec<_>, _>>()?)),
+        Val::Tensor { data, shape } => Ok(Val::Tensor {
+            data: TData::new(data.into_iter().map(|x| -x).collect()), shape }),
+        Val::ComplexTensor { re, im, shape } => Ok(maybe_real(
+            re.into_iter().map(|x| -x).collect(),
+            im.into_iter().map(|x| -x).collect(), shape)),
+        Val::Field(f) => {
+            let neg = f.data.iter().map(|&x| -x).collect();
+            Ok(Val::Field(Arc::new(FieldVal { data: TData::new(neg), ..(*f).clone() })))
+        }
+        Val::Fn(..) | Val::Builtin(_) | Val::Cell(..) | Val::Namespace(..) =>
+            Err("unary minus: expected a number".into()),
+    }
+}
+
+/// Canonical binary-op dispatcher on values. Tuples are trees and dispatch first
+/// (a tuple is never a leaf): the op broadcasts over the tuple's elements. Then
+/// fields, then tensors/complex-tensors, then scalar/complex leaves.
+pub fn binop_val(lv: Val, op: &Op, rv: Val) -> Result<Val, String> {
+    if matches!((&lv, &rv), (Val::Tuple(_), _) | (_, Val::Tuple(_))) {
+        // Whole-tuple equality returns a single bool, not a per-element tree.
+        if matches!(op, Op::Eq | Op::Ne) {
+            if let (Val::Tuple(ls), Val::Tuple(rs)) = (&lv, &rv) {
+                let eq = tuple_scalar_eq(ls, rs);
+                return Ok(Val::Num(if matches!(op, Op::Eq) == eq { 1.0 } else { 0.0 }));
+            }
+        }
+        return binop_tuple(lv, op, rv);
+    }
+    if matches!((&lv, &rv), (Val::Field(_), _) | (_, Val::Field(_))) {
+        return field_binop(lv, op, rv);
+    }
+    if matches!((&lv, &rv),
+        (Val::Tensor { .. }, _) | (_, Val::Tensor { .. }) |
+        (Val::ComplexTensor { .. }, _) | (_, Val::ComplexTensor { .. }))
+    {
+        return binop_tensor(lv, op, rv);
+    }
+    scalar_binop(lv, op, rv)
 }
 
 fn scalar_binop(lv: Val, op: &Op, rv: Val) -> Result<Val, String> {
@@ -4277,32 +4328,10 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
             Ok(Val::make_fn_with_sig(names, sig, *body.clone(), Arc::clone(&env.vars)))
         }
         Expr::Tuple(exprs) => {
-            let vals: Result<Vec<Val>, _> = exprs.iter().map(|e| eval(e, env)).collect();
-            let vals = vals?;
-            // Auto-promote: all-numeric tuples → 1D Tensor / ComplexTensor.
-            // Empty tuple stays as Tuple (unit value for empty blocks, etc.)
-            if !vals.is_empty() {
-                let all_numeric = vals.iter().all(|v| matches!(v, Val::Num(_) | Val::Complex(_, _)));
-                if all_numeric {
-                    let has_cx = vals.iter().any(|v| matches!(v, Val::Complex(_, _)));
-                    let n = vals.len();
-                    if has_cx {
-                        let mut re = Vec::with_capacity(n);
-                        let mut im = Vec::with_capacity(n);
-                        for v in &vals {
-                            match v {
-                                Val::Num(x)        => { re.push(*x); im.push(0.0); }
-                                Val::Complex(a, b) => { re.push(*a); im.push(*b); }
-                                _ => unreachable!(),
-                            }
-                        }
-                        return Ok(maybe_real(re, im, vec![n]));
-                    } else {
-                        let data: Vec<f64> = vals.into_iter().map(|v| match v { Val::Num(x) => x, _ => unreachable!() }).collect();
-                        return Ok(Val::Tensor { data: TData::new(data), shape: vec![n] });
-                    }
-                }
-            }
+            // `(a, b, c)` is always a tuple (a tree node). No autopromotion to a
+            // tensor: a tuple is a heterogeneous structure that broadcasts ops over
+            // its elements; use `[a, b, c]` for a dense numeric array.
+            let vals = exprs.iter().map(|e| eval(e, env)).collect::<Result<Vec<_>, _>>()?;
             Ok(Val::Tuple(vals))
         }
         Expr::Array(exprs) => {
@@ -4526,12 +4555,15 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
         Expr::Range(start, end) => {
             let a = eval(start, env)?.num("range")? as i64;
             let b = eval(end, env)?.num("range")? as i64;
-            let items: Vec<Val> = if a <= b {
-                (a..=b).map(|n| Val::Num(n as f64)).collect()
+            // A range is a homogeneous numeric sequence → a 1-D tensor (array),
+            // not a tuple. (Previously a Tuple that relied on autopromote.)
+            let data: Vec<f64> = if a <= b {
+                (a..=b).map(|n| n as f64).collect()
             } else {
-                (b..=a).rev().map(|n| Val::Num(n as f64)).collect()
+                (b..=a).rev().map(|n| n as f64).collect()
             };
-            Ok(Val::Tuple(items))
+            let n = data.len();
+            Ok(Val::Tensor { data: TData::new(data), shape: vec![n] })
         }
         Expr::Var(n) => env.vars.get(n).cloned()
             .ok_or_else(|| format!("undefined: {n}")),
@@ -4552,32 +4584,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                 other => Err(format!("'.{field}': expected a namespace, got {}", fmt_val(&other))),
             }
         }
-        Expr::Neg(e) => match eval(e, env)? {
-            Val::Num(n)        => Ok(Val::Num(-n)),
-            Val::Complex(a, b) => Ok(make_complex(-a, -b)),
-            Val::Tuple(items)  => {
-                let neg: Result<Vec<Val>, _> = items.into_iter()
-                    .map(|v| match v {
-                        Val::Num(n) => Ok(Val::Num(-n)),
-                        Val::Complex(a, b) => Ok(make_complex(-a, -b)),
-                        other => Err(format!("unary minus: expected a number, got {}", fmt_val(&other))),
-                    }).collect();
-                Ok(Val::Tuple(neg?))
-            }
-            Val::Tensor { data, shape } => {
-                Ok(Val::Tensor { data: TData::new(data.into_iter().map(|x| -x).collect()), shape })
-            }
-            Val::ComplexTensor { re, im, shape } => {
-                Ok(maybe_real(re.into_iter().map(|x| -x).collect(),
-                              im.into_iter().map(|x| -x).collect(),
-                              shape))
-            }
-            Val::Field(f) => {
-                let neg = f.data.iter().map(|&x| -x).collect();
-                Ok(Val::Field(Arc::new(FieldVal { data: TData::new(neg), ..(*f).clone() })))
-            }
-            Val::Fn(..) | Val::Builtin(_) | Val::Cell(..) | Val::Namespace(..) => Err("unary minus: expected a number".into()),
-        },
+        Expr::Neg(e) => neg_val(eval(e, env)?),
         Expr::Not(e) => {
             #[inline] fn lnot(x: f64) -> f64 { (int(x) == 0) as i64 as f64 }
             match eval(e, env)? {
@@ -4602,67 +4609,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
         Expr::BinOp(l, op, r) => {
             let lv = eval(l, env)?;
             let rv = eval(r, env)?;
-            // Field arithmetic: operate on component data, carrying geometry.
-            if matches!((&lv, &rv), (Val::Field(_), _) | (_, Val::Field(_))) {
-                return field_binop(lv, op, rv);
-            }
-            // Tensor/ComplexTensor dispatch (before tuple, since Tensor is not a Tuple)
-            if matches!((&lv, &rv),
-                (Val::Tensor { .. }, _) | (_, Val::Tensor { .. }) |
-                (Val::ComplexTensor { .. }, _) | (_, Val::ComplexTensor { .. }))
-            {
-                return binop_tensor(lv, op, rv);
-            }
-            // Whole-tuple equality/inequality before element-wise broadcast
-            if matches!(op, Op::Eq | Op::Ne) {
-                if let (Val::Tuple(ls), Val::Tuple(rs)) = (&lv, &rv) {
-                    let equal = ls.len() == rs.len() &&
-                        ls.iter().zip(rs.iter()).all(|(a, b)| {
-                            matches!((a, b), (Val::Num(x), Val::Num(y)) if x == y)
-                        });
-                    return Ok(Val::Num(if matches!(op, Op::Eq) == equal { 1.0 } else { 0.0 }));
-                }
-            }
-            if matches!((&lv, &rv), (Val::Tuple(_), _) | (_, Val::Tuple(_))) {
-                return binop_tuple(lv, op, rv, env);
-            }
-            if let (Val::Num(la), Val::Num(ra)) = (&lv, &rv) {
-                return Ok(Val::Num(match op {
-                    Op::Add      => la + ra,
-                    Op::Sub      => la - ra,
-                    Op::Mul      => la * ra,
-                    Op::Div      => la / ra,
-                    Op::FloorDiv => (*la / *ra).floor(),
-                    Op::Rem      => la % ra,
-                    Op::Pow      => la.powf(*ra),
-                    Op::Lt       => if la < ra  { 1.0 } else { 0.0 },
-                    Op::Gt       => if la > ra  { 1.0 } else { 0.0 },
-                    Op::LtEq     => if la <= ra { 1.0 } else { 0.0 },
-                    Op::GtEq     => if la >= ra { 1.0 } else { 0.0 },
-                    Op::Eq       => if la == ra { 1.0 } else { 0.0 },
-                    Op::Ne       => if la != ra { 1.0 } else { 0.0 },
-                    Op::And      => if int(*la) != 0 && int(*ra) != 0 { 1.0 } else { 0.0 },
-                    Op::Or       => if int(*la) != 0 || int(*ra) != 0 { 1.0 } else { 0.0 },
-                }));
-            }
-            let (la, lb) = to_complex(lv)?;
-            let (ra, rb) = to_complex(rv)?;
-            match op {
-                Op::Add      => Ok(make_complex(la + ra, lb + rb)),
-                Op::Sub      => Ok(make_complex(la - ra, lb - rb)),
-                Op::Mul      => Ok(make_complex(la*ra - lb*rb, la*rb + lb*ra)),
-                Op::Div      => {
-                    let d = ra*ra + rb*rb;
-                    if d == 0.0 { return Err("division by zero".into()); }
-                    Ok(make_complex((la*ra + lb*rb)/d, (lb*ra - la*rb)/d))
-                }
-                Op::Pow      => Ok(complex_pow(la, lb, ra, rb)),
-                Op::FloorDiv | Op::Rem => Err("// and % not defined for complex numbers".into()),
-                Op::Eq       => Ok(Val::Num(if la == ra && lb == rb { 1.0 } else { 0.0 })),
-                Op::Ne       => Ok(Val::Num(if la != ra || lb != rb { 1.0 } else { 0.0 })),
-                Op::Lt | Op::Gt | Op::LtEq | Op::GtEq => Err("comparison not defined for complex numbers".into()),
-                Op::And | Op::Or => Err("& and | not defined for complex numbers".into()),
-            }
+            binop_val(lv, op, rv)
         }
     }
 }

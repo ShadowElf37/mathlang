@@ -1,0 +1,10 @@
+[1;4misfinite[0m
+
+Elementwise test for a finite value (not NaN or ±inf), returning 0.0/1.0 with the
+same structure as the input (broadcasts over tensors and tuple trees).
+
+[1mExamples:[0m
+[0m> isfinite([1, 1/0, 0/0])
+result = [1, 0, 0]
+> all(isfinite(state))
+[0m

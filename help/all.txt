@@ -1,0 +1,10 @@
+[1;4mall[0m
+
+True (1.0) if EVERY numeric leaf of the value is nonzero, else 0.0 (vacuously true
+for an empty value). Reduces a whole value tree to a single boolean.
+
+[1mExamples:[0m
+[0m> all([1, 2, 3])
+result = 1
+> all(isfinite(state))   # is the whole state still finite?
+[0m
