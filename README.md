@@ -1330,9 +1330,11 @@ Currently supported inside a block:
 | Comparisons & logic | `< > <= >= == !=` and `& |` (→ `0.0`/`1.0`) |
 | Conditionals | `if(cond, a, b)` — `select` per element inside a `tensor` lambda; lazy scalar-cond form at tensor level (same as the CPU) |
 | Unary math | `exp ln log2 log10 sqrt cbrt sin cos tan asin acos atan sinh cosh tanh abs sign floor ceil trunc frac`, `isnan isinf isfinite`, negation `-T` |
-| Reductions | `sum mean min max`, `any all` (whole-tensor → scalar) |
+| Reductions | `sum mean min max`, `any all` (whole-tensor → scalar); `sum`/`mean` use Neumaier-compensated accumulation for ~f64 accuracy |
 | Min/max | two-argument elementwise form, e.g. `min(T, 0)` |
-| Stencils | `shift(T,n,axis)`, `roll(T,n,axis)`, `ops.lap(T,dx[,bc])`, `ops.grad(T,dx,axis)` |
+| Interpolation | `lerp(a, b, t)`, `clamp(x, lo, hi)` |
+| Linear algebra | `matmul(A, B)` — 2D×2D, 2D×1D, 1D×2D, 1D×1D (dot); compensated inner accumulate |
+| Stencils | `shift(T,n,axis)`, `roll(T,n,axis)`, `ops.lap(T,dx[,bc])`, `ops.grad(T,dx,axis)`, `ops.div(V,dx)`, `ops.curl(V,dx)` (2-D) |
 | Construction | `tensor((i,j) -> expr, m, n)` — built on the GPU in one kernel; the body may gather captured tensors (`T[i,j]`) |
 | Loops | `iterate(step, x0, n)`, `scan(step, x0, n)` |
 | Lambdas | bind a lambda/function and apply it: `f = x -> x*x; f(A)` (inlined; no recursion) |

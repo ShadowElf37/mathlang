@@ -1847,6 +1847,29 @@ else
     run "gpu.all.false"      "A=[1,0,3]; GPU { all(A) }"                       "0"
     run "gpu.isfinite"       "A=[1,2,3]; GPU { isfinite(A) }"                  "[1, 1, 1]"
     run "gpu.anyisinf"       "A=[1,2,3]; B=GPU{A*2}; GPU { any(isinf(B)) }"    "0"
+
+    # ── matmul on the GPU (parity with CPU; all four shape rules) ──
+    run "gpu.matmul.2d2d"    "A=[1,2;3,4]; B=[5,6;7,8]; GPU { matmul(A,B) }"   "⎡ 19  22 ⎤ ⎣ 43  50 ⎦"
+    run "gpu.matmul.2d1d"    "A=[1,2;3,4]; v=[1,1]; GPU { matmul(A,v) }"       "[3, 7]"
+    run "gpu.matmul.1d2d"    "A=[1,2;3,4]; v=[1,1]; GPU { matmul(v,A) }"       "[4, 6]"
+    run "gpu.matmul.dot"     "a=[1,2,3]; b=[4,5,6]; GPU { matmul(a,b) }"       "32"
+    run "gpu.matmul.parity"  "A=tensor((i,j)->1.0*(i+2*j),8,5); B=tensor((i,j)->1.0*(i-j),5,7); g=GPU{matmul(A,B)}; c=matmul(A,B); round(sum(abs(g-c)),3)" "0"
+    run_err "gpu.matmul.bad" "A=[1,2;3,4]; B=[1,2,3]; GPU { matmul(A,B) }"
+
+    # ── lerp / clamp on the GPU ──
+    run "gpu.lerp.tensor"    "a=[0,0,0]; b=[10,10,10]; GPU { lerp(a,b,0.5) }"  "[5, 5, 5]"
+    run "gpu.lerp.tensorend" "a=[0,2,4]; b=[10,12,14]; GPU { lerp(a,b,1) }"    "[10, 12, 14]"
+    run "gpu.clamp.tensor"   "x=[-1,0.5,2]; GPU { clamp(x,0,1) }"              "[0, 0.5, 1]"
+    run_err "gpu.clamp.badlohi" "x=[1,2]; GPU { clamp(x,1,0) }"
+
+    # ── ops.div / ops.curl on the GPU (parity with CPU) ──
+    run "gpu.div.parity"     "V=tensor((i,j,c)->if(c==0, sin(i*0.5), cos(j*0.5)), 6,6,2); round(GPU{sum(abs(ops.div(V,0.5)))} - sum(abs(ops.div(V,0.5))),3)" "0"
+    run "gpu.curl.parity"    "V=tensor((i,j,c)->if(c==0, sin(j*0.5), cos(i*0.5)), 6,6,2); round(GPU{sum(abs(ops.curl(V,0.5)))} - sum(abs(ops.curl(V,0.5))),3)" "0"
+    run_err "gpu.curl.3d"    "V=tensor((i,j,k,c)->1.0*c, 3,3,3,3); GPU { ops.curl(V,1) }"
+
+    # ── compensated sum: a 20M-element grid-strided reduction stays exact ──
+    # (true sum = 2,000,000; the per-thread Neumaier accumulator recovers f32 round-off)
+    run "gpu.sum.compensated" "T=tensor(i->0.1, 20000000); GPU { sum(T) }"     "2000000"
 fi
 
 # ── print summary ─────────────────────────────────────────────────────────────

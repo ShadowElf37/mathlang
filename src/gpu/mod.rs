@@ -405,6 +405,29 @@ fn eval_apply(
             binary_minmax(ctx, name, a, b)
         }
 
+        // matmul(A, B) — handled by a dedicated kernel.
+        "matmul" if args.len() == 2 => gpu_matmul(args, env, ctx, scope),
+
+        // lerp(a, b, t) = a + (b - a)*t, broadcasting scalars/tensors via binop.
+        "lerp" if args.len() == 3 => {
+            let a = eval_gpu(&args[0], env, ctx, scope)?;
+            let b = eval_gpu(&args[1], env, ctx, scope)?;
+            let t = eval_gpu(&args[2], env, ctx, scope)?;
+            let bma = binop(ctx, &Op::Sub, b, a.clone())?;
+            let tba = binop(ctx, &Op::Mul, t, bma)?;
+            binop(ctx, &Op::Add, a, tba)
+        }
+
+        // clamp(x, lo, hi) — elementwise, with scalar lo/hi (matches CPU).
+        "clamp" if args.len() == 3 => {
+            let x  = eval_gpu(&args[0], env, ctx, scope)?;
+            let lo = cpu_scalar(&args[1], env)?;
+            let hi = cpu_scalar(&args[2], env)?;
+            if lo > hi { return Err(format!("clamp: lo ({lo}) > hi ({hi})")); }
+            let lower = binary_minmax(ctx, "max", x, GpuVal::Scalar(lo))?;
+            binary_minmax(ctx, "min", lower, GpuVal::Scalar(hi))
+        }
+
         // Unary math.
         _ if args.len() == 1 && unary_wgsl(name, "x").is_some() => {
             let v = eval_gpu(&args[0], env, ctx, scope)?;
@@ -729,6 +752,37 @@ fn reduce(ctx: &GpuContext, src: Rc<wgpu::Buffer>, len: usize, kind: &str) -> Re
         "max" => ("-3.4028235e38", "max(a, b)"),
         _ => return Err(format!("GPU: unknown reduction {kind}")),
     };
+    // For `sum`, the per-thread grid-stride loop is where the overwhelming
+    // majority of additions happen, so it carries a Neumaier compensation term
+    // (`comp`) to recover the low-order bits that plain f32 addition drops. This
+    // gives ~f64-quality sums while keeping f32 storage. The (≤256-wide) workgroup
+    // tree and the few cross-pass reductions stay plain — their error is negligible
+    // by comparison. min/max have no rounding error, so they use the plain loop.
+    let per_thread = if kind == "sum" {
+        "    var acc: f32 = 0.0;\n\
+    var comp: f32 = 0.0;\n\
+    var idx: u32 = gid.x;\n\
+    loop {\n\
+        if (idx >= params.len) { break; }\n\
+        let b = inp[idx];\n\
+        let t = acc + b;\n\
+        if (abs(acc) >= abs(b)) { comp = comp + ((acc - t) + b); }\n\
+        else { comp = comp + ((b - t) + acc); }\n\
+        acc = t;\n\
+        idx = idx + params.total;\n\
+    }\n\
+    acc = acc + comp;\n".to_string()
+    } else {
+        format!(
+            "    var acc: f32 = {ident};\n\
+    var idx: u32 = gid.x;\n\
+    loop {{\n\
+        if (idx >= params.len) {{ break; }}\n\
+        let a = acc; let b = inp[idx]; acc = {comb};\n\
+        idx = idx + params.total;\n\
+    }}\n"
+        )
+    };
     let src_wgsl = format!(
         "@group(0) @binding(0) var<storage, read> inp: array<f32>;\n\
 @group(0) @binding(1) var<storage, read_write> outp: array<f32>;\n\
@@ -739,13 +793,7 @@ var<workgroup> sdata: array<f32, 256>;\n\
 fn main(@builtin(global_invocation_id) gid: vec3<u32>,\n\
         @builtin(local_invocation_id) lid: vec3<u32>,\n\
         @builtin(workgroup_id) wid: vec3<u32>) {{\n\
-    var acc: f32 = {ident};\n\
-    var idx: u32 = gid.x;\n\
-    loop {{\n\
-        if (idx >= params.len) {{ break; }}\n\
-        let a = acc; let b = inp[idx]; acc = {comb};\n\
-        idx = idx + params.total;\n\
-    }}\n\
+{per_thread}\
     sdata[lid.x] = acc;\n\
     workgroupBarrier();\n\
     var s: u32 = 128u;\n\
@@ -950,6 +998,73 @@ fn run_stencil(
     Ok(Rc::new(out))
 }
 
+/// Gather component `comp` (of `ncomp`) out of an interleaved vector field whose
+/// trailing axis indexes the component (component-fastest layout: cell `i`,
+/// component `c` lives at `i*ncomp + c`), returning a `base_total`-long buffer.
+fn extract_component(
+    ctx: &GpuContext,
+    src: &wgpu::Buffer,
+    base_total: usize,
+    ncomp: usize,
+    comp: usize,
+) -> Result<Rc<wgpu::Buffer>, String> {
+    let src_wgsl =
+        "@group(0) @binding(0) var<storage, read> inp: array<f32>;\n\
+@group(0) @binding(1) var<storage, read_write> outp: array<f32>;\n\
+struct Params { len: u32, row: u32, ncomp: u32, comp: u32 };\n\
+@group(0) @binding(2) var<uniform> params: Params;\n\
+@compute @workgroup_size(256)\n\
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
+    let i = gid.y * params.row + gid.x;\n\
+    if (i >= params.len) { return; }\n\
+    outp[i] = inp[i * params.ncomp + params.comp];\n\
+}\n";
+    let pipeline = get_pipeline(ctx, src_wgsl);
+
+    let out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gpu-extract-out"),
+        size: (base_total.max(1) * 4) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    const WG: u32 = 256;
+    const MAX_DIM: u32 = 65535;
+    let needed = (base_total as u32).div_ceil(WG).max(1);
+    let groups_x = needed.min(MAX_DIM);
+    let groups_y = needed.div_ceil(groups_x).max(1);
+    let row = groups_x * WG;
+
+    let params = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu-extract-params"),
+        contents: bytemuck::cast_slice(&[base_total as u32, row, ncomp as u32, comp as u32]),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("gpu-extract-bg"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: src.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: out.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: params.as_entire_binding() },
+        ],
+    });
+    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("gpu-extract-encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("gpu-extract-pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(groups_x, groups_y, 1);
+    }
+    ctx.queue.submit(Some(encoder.finish()));
+    Ok(Rc::new(out))
+}
+
 /// `ops.<name>(...)` inside a GPU block.
 fn ops_op(name: &str, args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut HashMap<String, GpuVal>) -> Result<GpuVal, String> {
     match name {
@@ -984,6 +1099,56 @@ fn ops_op(name: &str, args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut Ha
             let bcs = vec![false; shape.len()]; // grad is periodic (matches CPU `central`)
             let out = run_stencil(ctx, &buf, &shape, len, &taps, &bcs)?;
             Ok(GpuVal::Buffer { buf: out, shape, len })
+        }
+        // ops.div(V, dx) — divergence of a vector field. V shape = base ++ [ncomp]
+        // (trailing axis = component, component-fastest), ncomp must equal the base
+        // rank: div = Σ_a ∂(V[..,a])/∂x_a, periodic central differences (matches CPU).
+        "div" => {
+            if args.len() != 2 { return Err("ops.div(V, dx) expects 2 args".into()); }
+            let t = eval_gpu(&args[0], env, ctx, scope)?;
+            let dx = cpu_scalar(&args[1], env)?;
+            let (buf, shape, _len) = expect_buffer(ctx, t, "ops.div")?;
+            if shape.len() < 2 {
+                return Err("ops.div: need a vector field of rank >= 2 (grid..., ncomp)".into());
+            }
+            let comps = *shape.last().unwrap();
+            let base: Vec<usize> = shape[..shape.len() - 1].to_vec();
+            if comps != base.len() {
+                return Err(format!(
+                    "ops.div: vector field has {comps} components but base is {}-D", base.len()));
+            }
+            let base_total: usize = base.iter().product();
+            let bcs = vec![false; base.len()];
+            let mut acc: Option<Rc<wgpu::Buffer>> = None;
+            for a in 0..comps {
+                let comp = extract_component(ctx, &buf, base_total, comps, a)?;
+                let taps = grad_taps(base.len(), dx, a);
+                let d = run_stencil(ctx, &comp, &base, base_total, &taps, &bcs)?;
+                acc = Some(match acc {
+                    None => d,
+                    Some(prev) => run_map(ctx, &[&prev, &d], base_total, "in0[i] + in1[i]")?,
+                });
+            }
+            Ok(GpuVal::Buffer { buf: acc.unwrap(), shape: base, len: base_total })
+        }
+        // ops.curl(V, dx) — 2-D scalar curl ∂V_y/∂x − ∂V_x/∂y, V shape [r, c, 2].
+        "curl" => {
+            if args.len() != 2 { return Err("ops.curl(V, dx) expects 2 args".into()); }
+            let t = eval_gpu(&args[0], env, ctx, scope)?;
+            let dx = cpu_scalar(&args[1], env)?;
+            let (buf, shape, _len) = expect_buffer(ctx, t, "ops.curl")?;
+            if shape.len() != 3 || shape[2] != 2 {
+                return Err("ops.curl: only the 2-D scalar curl is supported (V shape [r, c, 2])".into());
+            }
+            let base = vec![shape[0], shape[1]];
+            let base_total = base[0] * base[1];
+            let bcs = [false, false];
+            let vx = extract_component(ctx, &buf, base_total, 2, 0)?;
+            let vy = extract_component(ctx, &buf, base_total, 2, 1)?;
+            let dvy = run_stencil(ctx, &vy, &base, base_total, &grad_taps(2, dx, 0), &bcs)?;
+            let dvx = run_stencil(ctx, &vx, &base, base_total, &grad_taps(2, dx, 1), &bcs)?;
+            let out = run_map(ctx, &[&dvy, &dvx], base_total, "in0[i] - in1[i]")?;
+            Ok(GpuVal::Buffer { buf: out, shape: base, len: base_total })
         }
         _ => Err(format!(
             "GPU: ops.{name} not supported in a GPU block (spectral operators need an FFT — not yet on GPU)"
@@ -1631,6 +1796,118 @@ fn stack_frames(ctx: &GpuContext, frames: Vec<GpuVal>) -> Result<GpuVal, String>
 // ───────────────────────────── plumbing ─────────────────────────────
 
 /// Upload an f32 vector as a GPU buffer with the given shape.
+/// Matrix multiply C[m,n] = A[m,k] @ B[k,n], one thread per output element. The
+/// inner k-loop carries a Neumaier compensation term (§ compensated reductions)
+/// so the dot products keep ~f64 accuracy despite f32 storage.
+fn run_matmul(
+    ctx: &GpuContext,
+    a: &wgpu::Buffer,
+    b: &wgpu::Buffer,
+    m: usize,
+    k: usize,
+    n: usize,
+) -> Result<Rc<wgpu::Buffer>, String> {
+    let src_wgsl =
+        "@group(0) @binding(0) var<storage, read> A: array<f32>;\n\
+@group(0) @binding(1) var<storage, read> B: array<f32>;\n\
+@group(0) @binding(2) var<storage, read_write> C: array<f32>;\n\
+struct Params { m: u32, k: u32, n: u32, pad: u32 };\n\
+@group(0) @binding(3) var<uniform> params: Params;\n\
+@compute @workgroup_size(16, 16)\n\
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
+    let i = gid.y;\n\
+    let j = gid.x;\n\
+    if (i >= params.m || j >= params.n) { return; }\n\
+    var acc: f32 = 0.0;\n\
+    var comp: f32 = 0.0;\n\
+    for (var kk: u32 = 0u; kk < params.k; kk = kk + 1u) {\n\
+        let prod = A[i * params.k + kk] * B[kk * params.n + j];\n\
+        let t = acc + prod;\n\
+        if (abs(acc) >= abs(prod)) { comp = comp + ((acc - t) + prod); }\n\
+        else { comp = comp + ((prod - t) + acc); }\n\
+        acc = t;\n\
+    }\n\
+    C[i * params.n + j] = acc + comp;\n\
+}\n";
+    let pipeline = get_pipeline(ctx, src_wgsl);
+
+    let out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gpu-matmul-out"),
+        size: ((m * n).max(1) * 4) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let params = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu-matmul-params"),
+        contents: bytemuck::cast_slice(&[m as u32, k as u32, n as u32, 0u32]),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("gpu-matmul-bg"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: a.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: b.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: out.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: params.as_entire_binding() },
+        ],
+    });
+    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("gpu-matmul-encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("gpu-matmul-pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        let gx = (n as u32).div_ceil(16).max(1);
+        let gy = (m as u32).div_ceil(16).max(1);
+        pass.dispatch_workgroups(gx, gy, 1);
+    }
+    ctx.queue.submit(Some(encoder.finish()));
+    Ok(Rc::new(out))
+}
+
+/// `matmul(A, B)` inside a GPU block: 2D×2D, 2D×1D, 1D×2D, and 1D×1D (dot),
+/// mirroring the CPU builtin's shape rules.
+fn gpu_matmul(args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut HashMap<String, GpuVal>) -> Result<GpuVal, String> {
+    if args.len() != 2 { return Err("matmul(A, B) expects 2 args".into()); }
+    let av = eval_gpu(&args[0], env, ctx, scope)?;
+    let bv = eval_gpu(&args[1], env, ctx, scope)?;
+    let (ab, ash, _) = expect_buffer(ctx, av, "matmul")?;
+    let (bb, bsh, _) = expect_buffer(ctx, bv, "matmul")?;
+    // Resolve (m, k, n) and the output shape from the operand ranks.
+    let (m, k, n, out_shape): (usize, usize, usize, Vec<usize>) = match (ash.as_slice(), bsh.as_slice()) {
+        ([ar, ac], [br, bc]) => {
+            if ac != br { return Err(format!("matmul: shape mismatch ({ar}×{ac}) @ ({br}×{bc})")); }
+            (*ar, *ac, *bc, vec![*ar, *bc])
+        }
+        ([ar, ac], [bl]) => {
+            if ac != bl { return Err(format!("matmul: shape mismatch ({ar}×{ac}) @ ({bl},)")); }
+            (*ar, *ac, 1, vec![*ar])
+        }
+        ([al], [br, bc]) => {
+            if al != br { return Err(format!("matmul: shape mismatch ({al},) @ ({br}×{bc})")); }
+            (1, *al, *bc, vec![*bc])
+        }
+        ([al], [bl]) => {
+            if al != bl { return Err(format!("matmul: length mismatch ({al} vs {bl})")); }
+            (1, *al, 1, vec![])
+        }
+        _ => return Err("matmul: arguments must be 1D or 2D tensors".into()),
+    };
+    let out = run_matmul(ctx, &ab, &bb, m, k, n)?;
+    let len = m * n;
+    // 1D×1D collapses to a scalar, matching the CPU dot product.
+    if out_shape.is_empty() {
+        let v = download(ctx, &out, 1)?;
+        return Ok(GpuVal::Scalar(v[0] as f64));
+    }
+    Ok(GpuVal::Buffer { buf: out, shape: out_shape, len })
+}
+
 fn upload_f32(ctx: &GpuContext, data: Vec<f32>, shape: Vec<usize>) -> GpuVal {
     let len = data.len();
     let buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

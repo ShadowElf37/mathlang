@@ -16,9 +16,13 @@ Supported inside a block:
                   sinh cosh tanh abs sign floor ceil trunc frac
                   isnan isinf isfinite
   - reductions:   sum mean min max  any all   (whole-tensor -> scalar)
+                  sum/mean use Neumaier-compensated accumulation (~f64 accuracy)
   - min/max:      two-arg elementwise form, e.g. min(T, 0)
+  - interp:       lerp(a, b, t)   clamp(x, lo, hi)
+  - linalg:       matmul(A, B)    2D*2D, 2D*1D, 1D*2D, 1D*1D (dot)
   - stencils:     shift(T,n,axis)  roll(T,n,axis)
                   ops.lap(T,dx[,bc])   ops.grad(T,dx,axis)   (bc: ops.neumann)
+                  ops.div(V,dx)   ops.curl(V,dx)   (V: [grid..., ncomp]; curl 2-D)
   - construct:    tensor((i,j) -> expr, m, n)   — built on the GPU in one kernel;
                   the body may gather from captured tensors, e.g. T[i,j]
   - loops:        iterate(step, x0, n)   scan(step, x0, n)
