@@ -287,6 +287,10 @@ fn type_of(v: &Val) -> String {
             let dims = t.shape.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("×");
             format!("complex tensor [{dims}] ({})", t.prec.name())
         }
+        Val::Field(f) => {
+            let dims = f.grid.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("×");
+            format!("{}-form/field [{dims}]", f.degree)
+        }
         Val::Tuple(_) => "tuple".into(),
         Val::Cell(_) => "cell".into(),
         Val::Namespace(_) => "namespace".into(),
@@ -341,7 +345,10 @@ Commands:
 Linalg: det/inv/solve/trace/diag/eig/eigvals. Stencils: shift/roll, ops.lap/grad
 (ops.periodic/ops.neumann). Calculus: integral/deriv (scalar; multidim integrals
 and gradients too). Spectral: fft/ifft, ops.specgrad/poisson/invlap.
+Fields & forms: field(...), forms.d/hodge/wedge/raise/lower/codiff/laplace/
+contract; tensor(field) extracts.
 
-Not yet present (later phases): fields/forms, pic, file I/O, animation."
+Not yet present (later phases): pic, file I/O, animation; field-polymorphic
+ops.*(field)."
     );
 }

@@ -23,6 +23,7 @@ mod parser;
 
 mod builtins;
 mod compute;
+mod field;
 mod interp;
 mod repl;
 mod spike;

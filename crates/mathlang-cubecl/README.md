@@ -137,6 +137,31 @@ original describes them but the binary errors on them; here they work, which is 
 Newton/optimization and quadrature need (e.g. `iterate(x -> x - (x^2-2)/deriv(t ->
 t^2-2, x), 1.0, 5)` → √2).
 
+## Fields & forms (exterior calculus)
+
+A **field** packages grid samples with geometry (box, per-axis boundary conditions,
+spacing, diagonal metric). Build one with `field(data, lo, hi, bc[, metric])` or the
+function form `field(f, lo, hi, counts, bc[, metric])`; `forms.form`/`forms.vector`
+build higher-degree forms / vector fields. The **`forms`** namespace is exterior
+calculus on them:
+
+```
+forms.d(f)              # exterior derivative: k-form → (k+1)-form (grad/curl/div)
+forms.hodge(f)          # Hodge star ★ (metric-aware)
+forms.wedge(a, b)       # exterior product ∧
+forms.raise/lower(f)    # musical ♯ / ♭
+forms.codiff(f)         # codifferential δ = ±★d★
+forms.laplace(f)        # Laplace–de Rham Δ = dδ + δd  (−∇² on a 0-form)
+forms.contract(X, w)    # interior product ι_X
+```
+
+`dx` enters only `d`; the metric enters only hodge/raise/lower/codiff/laplace — so
+the same code does Euclidean and Minkowski (`metric (-1,1,1,1)` ⇒ `forms.laplace` is
+the d'Alembertian □). Field arithmetic (`+ − * /` by scalars/matching fields) stays
+in the field algebra; any other builtin decays a field to its tensor; `tensor(f)`
+extracts the grid data. Host-side (matching the original's CPU semantics); fields are
+a host geometric object that bridge to device tensors via `field(…)`/`tensor(…)`.
+
 ## Tests
 
 `bash crates/mathlang-cubecl/tests.sh` — scalar/complex/tuple core, tensor

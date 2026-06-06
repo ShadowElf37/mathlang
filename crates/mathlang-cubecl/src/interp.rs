@@ -49,6 +49,14 @@ impl Env {
         ops.insert("periodic".to_string(), Val::Num(0.0));
         ops.insert("neumann".to_string(), Val::Num(1.0));
         vars.insert("ops".into(), Val::Namespace(Arc::new(ops)));
+        // The `forms` namespace: exterior calculus on fields + BC markers.
+        let mut forms = HashMap::new();
+        for m in ["d", "hodge", "wedge", "raise", "lower", "codiff", "laplace", "form", "vector", "contract"] {
+            forms.insert(m.to_string(), Val::Builtin(format!("forms.{m}")));
+        }
+        forms.insert("periodic".to_string(), Val::Num(0.0));
+        forms.insert("neumann".to_string(), Val::Num(1.0));
+        vars.insert("forms".into(), Val::Namespace(Arc::new(forms)));
         Self { vars: Arc::new(vars), target: Target::default_target() }
     }
 }
@@ -85,10 +93,12 @@ pub const BUILTINS: &[&str] = &[
     "matmul", "norm", "mean", "std", "det", "inv", "solve", "eig", "eigvals", "trace",
     // stencils
     "shift", "roll",
+    // fields & forms
+    "field",
 ];
 
 pub fn is_protected(name: &str) -> bool {
-    matches!(name, "pi" | "e" | "phi" | "inf" | "i" | "ops") || BUILTINS.contains(&name)
+    matches!(name, "pi" | "e" | "phi" | "inf" | "i" | "ops" | "forms") || BUILTINS.contains(&name)
 }
 
 // ── Evaluator ───────────────────────────────────────────────────────────────────
@@ -355,6 +365,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
             Err("tuple apply: expected a single index".into())
         }
         Val::Tensor(..) | Val::ComplexTensor(..) => Err("tensors are not callable".into()),
+        Val::Field(..) => Err("fields are not callable".into()),
         Val::Cell(..) => Err("cells are not callable (use get/set)".into()),
         Val::Namespace(..) => Err("namespaces are not callable (use ns.member)".into()),
     }
@@ -374,6 +385,7 @@ fn apply_num(s: f64, args: Vec<Val>) -> Result<Val, String> {
                 }).collect(),
             )),
             Val::Tensor(..) | Val::ComplexTensor(..) => Err("scale a tensor with `*` (e.g. 2 * T), not juxtaposition".into()),
+            Val::Field(..) => Err("scale a field with `*` (e.g. 2 * f), not juxtaposition".into()),
             Val::Builtin(_) => Err("cannot scale a builtin function".into()),
             Val::Cell(..) => Err("cannot scale a cell (use get/set)".into()),
             Val::Namespace(..) => Err("cannot scale a namespace".into()),
@@ -431,6 +443,9 @@ pub fn binop_val(lv: Val, op: &Op, rv: Val, target: Target) -> Result<Val, Strin
             }
         }
         return binop_tuple(lv, op, rv, target);
+    }
+    if matches!((&lv, &rv), (Val::Field(_), _) | (_, Val::Field(_))) {
+        return crate::field::field_binop(lv, op, rv);
     }
     if is_complex_combo(&lv, &rv) {
         return complex_binop(lv, op, rv, target);

@@ -12,6 +12,7 @@
 
 use crate::ast::{Expr, TypeHint};
 use crate::compute::{self, CTensor, TensorVal};
+use crate::field::FieldVal;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,6 +43,8 @@ pub enum Val {
     Tensor(TensorVal),
     /// A device-resident complex tensor (interleaved re/im).
     ComplexTensor(CTensor),
+    /// A differential-form / vector field on a regular grid (host data).
+    Field(Arc<FieldVal>),
     /// A tuple tree — heterogeneous leaves; ops broadcast over it.
     Tuple(Vec<Val>),
     /// Shared mutable container (identity semantics on clone).
@@ -69,6 +72,7 @@ impl Val {
             Val::Builtin(n) => Err(format!("{ctx}: expected a number, got builtin '{n}'")),
             Val::Tensor(..) => Err(format!("{ctx}: expected a number, got a tensor")),
             Val::ComplexTensor(..) => Err(format!("{ctx}: expected a number, got a complex tensor")),
+            Val::Field(..) => Err(format!("{ctx}: expected a number, got a field")),
             Val::Tuple(..) => Err(format!("{ctx}: expected a number, got a tuple")),
             Val::Cell(..) => Err(format!("{ctx}: expected a number, got a cell (use get())")),
             Val::Namespace(..) => Err(format!("{ctx}: expected a number, got a namespace")),
@@ -153,7 +157,14 @@ pub fn fmt_val(v: &Val) -> String {
         }
         Val::Tensor(t) => fmt_tensor(t),
         Val::ComplexTensor(t) => fmt_complex_tensor(t),
+        Val::Field(f) => crate::field::format_field(f),
     }
+}
+
+/// Format host (data, shape) like a tensor (used for field data, which lives on
+/// the host). Same layout as `fmt_tensor` but without a device download.
+pub fn fmt_host_tensor(data: &[f64], shape: &[usize]) -> String {
+    fmt_nd(data, shape)
 }
 
 /// Format one complex element (real if im == 0), matching the original.

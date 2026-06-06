@@ -11,6 +11,29 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub fn eval_builtin(name: &str, args: Vec<Val>, env: &Env) -> Result<Val, String> {
+    // forms.* operate on fields directly; `field` builds one.
+    if let Some(member) = name.strip_prefix("forms.") {
+        return crate::field::dispatch(member, args);
+    }
+    if name == "field" {
+        return crate::field::field_ctor(args, env);
+    }
+    // Any other builtin "decays" a field to its data tensor (uploaded to device),
+    // matching the original — so abs/sum/etc. work on a field's samples.
+    if args.iter().any(|a| matches!(a, Val::Field(_))) {
+        let decayed: Vec<Val> = args
+            .into_iter()
+            .map(|a| match a {
+                Val::Field(f) => {
+                    let (d, s) = crate::field::field_tensor_shape(&f);
+                    compute::upload(env.target, &d, s).map(Val::Tensor)
+                }
+                other => Ok(other),
+            })
+            .collect::<Result<_, _>>()?;
+        return eval_builtin(name, decayed, env);
+    }
+
     // Tensor fast-paths: a unary math builtin applied to a tensor runs on the
     // compute path. Constructors build tensors on the active target.
     if args.len() == 1 {
@@ -965,6 +988,14 @@ fn host_solve(mut a: Vec<f64>, mut b: Vec<f64>, n: usize) -> Result<Vec<f64>, St
 /// `tensor(f, n1, ...)` / `matrix(f, r, c)` — build a tensor by calling `f` at each
 /// integer multi-index (host-side; promotes to complex if `f` returns complex).
 fn build_by_fn(args: Vec<Val>, name: &str, env: &Env) -> Result<Val, String> {
+    // tensor(T) extracts/passes a tensor through — this is how `tensor(field)`
+    // works (the field has already decayed to its data tensor on entry).
+    if args.len() == 1 {
+        return match args.into_iter().next().unwrap() {
+            t @ (Val::Tensor(_) | Val::ComplexTensor(_)) => Ok(t),
+            other => Err(format!("{name}: expected a function + dims, or a single tensor, got {}", fmt_val(&other))),
+        };
+    }
     if args.len() < 2 {
         return Err(format!("{name}(f, n1, ...) expects a function and dims"));
     }

@@ -80,6 +80,17 @@ check 'exp([0+0i, 0+3.141592653589793i])' '[1, -1]'           # display collapse
 check 'sum([1+2i, 3+4i, 5+6i])' '9 + 12i'
 check_repl $'!type [1+2i, 3]'   'complex tensor'
 
+# ── fields & forms (exterior calculus) ──────────────────────────────────────────
+check 'tensor(field([1,2,3,4], 0, 4, forms.periodic))' '[1, 2, 3, 4]'
+check 'tensor(field((x) -> x*x, 0, 1, 5, forms.neumann))' "$($MC '[0, 0.0625, 0.25, 0.5625, 1]')"
+check 'tensor(2*field([1,2,3,4],0,4,forms.periodic) + field([10,20,30,40],0,4,forms.periodic))' '[12, 24, 36, 48]'
+check 'tensor(forms.hodge(field([1,2,3],0,3,forms.periodic)))' '[1, 2, 3]'
+check_repl $'!type field([1,2,3], 0, 3, forms.periodic)' 'form'
+# forms.laplace of a 0-form is −∇²; for sin on a periodic box that ≈ +sin (loose FD tol)
+check_repl $'f = field((x)->sin(x), 0, 2*pi, 32, forms.periodic)\nnorm(tensor(forms.laplace(f)) - tensor(f)) < 0.1' '1'
+# d∘d = 0 (a defining identity of the exterior derivative)
+check_repl $'f = field((x,y)->x*y, 0, 1, (8,8), forms.periodic)\nnorm(tensor(forms.d(forms.d(f)))) < 1e-9' '1'
+
 # ── spectral: fft/ifft + ops.poisson/specgrad ──────────────────────────────────
 check 'fft([1,1,0,0])'                   '[2, 1 - i, 0, 1 + i]'
 check 'fft([1,2,3,4])'                   '[10, -2 + 2i, -2, -2 - 2i]'
