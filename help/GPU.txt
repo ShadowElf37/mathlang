@@ -33,6 +33,15 @@ Supported inside a block:
                   mixed real/complex promote. min/max/comparisons are undefined on
                   complex. Results download as complex tensors (collapsing to real
                   when every imaginary part is exactly zero, like the CPU).
+  - fields:       capture a field (from field/forms.form/forms.vector on the CPU),
+                  operate, return it. Field-polymorphic ops.lap/grad/div/curl and
+                  the spectral ops.poisson/invlap/specgrad take dx/bc from the
+                  field (one arg). Field ⊕ field / field ⊕ scalar arithmetic and
+                  componentwise unary math preserve geometry.
+  - forms:        exterior calculus on captured fields — forms.d (exterior
+                  derivative), hodge, wedge, raise, lower, codiff, laplace,
+                  contract. (Construct fields on the CPU, then capture them; the
+                  field constructors are not available inside a block.)
   - construct:    tensor((i,j) -> expr, m, n)   — built on the GPU in one kernel;
                   the body may gather from captured tensors, e.g. T[i,j]
   - loops:        iterate(step, x0, n)   scan(step, x0, n)

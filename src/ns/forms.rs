@@ -71,7 +71,7 @@ fn as_axis_vec(v: &Val, n: usize, what: &str) -> Result<Vec<f64>, String> {
 
 /// Sorted k-subsets of {0,..,n-1} in lexicographic order (the canonical basis
 /// order for k-form components). subsets(n,0) == [[]].
-fn subsets(n: usize, k: usize) -> Vec<Vec<usize>> {
+pub(crate) fn subsets(n: usize, k: usize) -> Vec<Vec<usize>> {
     let mut res = Vec::new();
     if k > n { return res; }
     let mut idx: Vec<usize> = (0..k).collect();
@@ -93,12 +93,12 @@ fn subsets(n: usize, k: usize) -> Vec<Vec<usize>> {
 }
 
 /// Position of a sorted subset within subsets(n, set.len()).
-fn subset_index(table: &[Vec<usize>], set: &[usize]) -> usize {
+pub(crate) fn subset_index(table: &[Vec<usize>], set: &[usize]) -> usize {
     table.iter().position(|s| s == set).expect("subset present in table")
 }
 
 /// Sign of the permutation that sorts `seq` into ascending order: (-1)^inversions.
-fn perm_sign(seq: &[usize]) -> i32 {
+pub(crate) fn perm_sign(seq: &[usize]) -> i32 {
     let mut inv = 0usize;
     for i in 0..seq.len() {
         for j in i + 1..seq.len() {
@@ -109,7 +109,7 @@ fn perm_sign(seq: &[usize]) -> i32 {
 }
 
 /// Sorted complement of `set` within {0,..,n-1}.
-fn complement(set: &[usize], n: usize) -> Vec<usize> {
+pub(crate) fn complement(set: &[usize], n: usize) -> Vec<usize> {
     (0..n).filter(|i| !set.contains(i)).collect()
 }
 

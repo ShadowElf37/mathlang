@@ -13,7 +13,8 @@
 mod context;
 
 use crate::ast::{BlockStmt, Def, Expr, Op};
-use crate::eval::{Env, TData, Val, fmt_val};
+use crate::eval::{BC, Env, FieldVal, TData, Val, Variance, fmt_val};
+use std::sync::Arc;
 use context::context;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -49,6 +50,21 @@ enum GpuVal {
     /// A complex scalar (e.g. the imaginary unit `i`, or `2 + 3*i`). Carried on the
     /// host like `Scalar` and baked into kernels as a `vec2<f32>` constant.
     CScalar(f64, f64),
+    /// A gridded field (0-/k-form or vector field) — its component data lives in a
+    /// GPU buffer (component-fastest: `data[p*ncomp + c]`) and its geometry/degree
+    /// live host-side, exactly as in the CPU `FieldVal`. This is what makes
+    /// `forms.*` and the field-polymorphic `ops.*` run inside a GPU block.
+    Field {
+        buf:      Rc<wgpu::Buffer>,
+        grid:     Vec<usize>,
+        spacing:  Vec<f64>,
+        lo:       Vec<f64>,
+        bc:       Vec<BC>,
+        metric:   Vec<f64>,
+        degree:   usize,
+        variance: Variance,
+        len:      usize,        // gt * ncomp
+    },
     /// A tuple of values (e.g. coupled fields `(U, V)` carried as a single
     /// `iterate`/`scan` state). Each element is itself a `GpuVal`.
     Tuple(Vec<GpuVal>),
@@ -89,6 +105,7 @@ fn lift_val(ctx: &GpuContext, v: &Val) -> Result<GpuVal, String> {
         Val::Complex(r, i) => Ok(GpuVal::CScalar(*r, *i)),
         Val::Tensor { data, shape } => Ok(upload(ctx, data, shape)),
         Val::ComplexTensor { re, im, shape } => Ok(upload_complex(ctx, re, im, shape)),
+        Val::Field(f) => Ok(upload_field(ctx, f)),
         Val::Tuple(items) => {
             let elems = items.iter().map(|it| lift_val(ctx, it)).collect::<Result<Vec<_>, _>>()?;
             Ok(GpuVal::Tuple(elems))
@@ -223,6 +240,11 @@ fn eval_gpu(
                     scope.insert(name.clone(), gv.clone());
                     Ok(gv)
                 }
+                Some(Val::Field(f)) => {
+                    let gv = upload_field(ctx, f);
+                    scope.insert(name.clone(), gv.clone());
+                    Ok(gv)
+                }
                 // A tuple of tensors/scalars (e.g. coupled fields) — upload each.
                 Some(v @ Val::Tuple(_)) => {
                     let gv = lift_val(ctx, v)?;
@@ -345,7 +367,7 @@ fn eval_scalar_elems(
     elems.iter().map(|e| match eval_gpu(e, env, ctx, scope)? {
         GpuVal::Scalar(s) => Ok(s as f32),
         GpuVal::Buffer { .. } | GpuVal::Host { .. } | GpuVal::Tuple(_) | GpuVal::Fn(_)
-        | GpuVal::Complex { .. } | GpuVal::CScalar(..) =>
+        | GpuVal::Complex { .. } | GpuVal::CScalar(..) | GpuVal::Field { .. } =>
             Err("GPU: tensor literals must contain scalar elements".to_string()),
     }).collect()
 }
@@ -358,11 +380,14 @@ fn eval_apply(
     ctx: &GpuContext,
     scope: &mut HashMap<String, GpuVal>,
 ) -> Result<GpuVal, String> {
-    // Namespaced calls, e.g. `ops.lap(T, dx)`.
+    // Namespaced calls, e.g. `ops.lap(T, dx)` or `forms.d(f)`.
     if let Expr::Member(base, member) = f {
         if let Expr::Var(ns) = &**base {
             if ns == "ops" {
                 return ops_op(member, args, env, ctx, scope);
+            }
+            if ns == "forms" {
+                return forms_op(member, args, env, ctx, scope);
             }
         }
         return Err(format!("GPU: `{}.{member}` not supported in a GPU block", fmt_member_base(base)));
@@ -501,6 +526,7 @@ fn expect_buffer(gctx: &GpuContext, v: GpuVal, what: &str) -> Result<(Rc<wgpu::B
         GpuVal::Fn(_) => Err(format!("GPU: {what} expects a tensor, got a function")),
         GpuVal::Complex { .. } => Err(format!("GPU: {what} expects a real tensor, got a complex tensor")),
         GpuVal::CScalar(..) => Err(format!("GPU: {what} expects a tensor, got a complex scalar")),
+        GpuVal::Field { .. } => Err(format!("GPU: {what} expects a plain tensor, got a field")),
         GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
@@ -547,6 +573,7 @@ fn neg_gpu(ctx: &GpuContext, v: GpuVal) -> Result<GpuVal, String> {
             let out = run_cmap(ctx, &[(buf.as_ref(), true)], len, "-(in0[i])")?;
             Ok(GpuVal::Complex { buf: out, shape, len })
         }
+        f @ GpuVal::Field { .. } => field_binop(ctx, &Op::Mul, GpuVal::Scalar(-1.0), f),
         GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
@@ -572,6 +599,10 @@ fn binop(ctx: &GpuContext, op: &Op, lhs: GpuVal, rhs: GpuVal) -> Result<GpuVal, 
             _ => unreachable!(),
         },
         _ => {}
+    }
+    // A field operand routes to the field elementwise path (geometry-preserving).
+    if matches!(lhs, GpuVal::Field { .. }) || matches!(rhs, GpuVal::Field { .. }) {
+        return field_binop(ctx, op, lhs, rhs);
     }
     // Any complex operand routes to the complex elementwise path.
     if is_complex_val(&lhs) || is_complex_val(&rhs) {
@@ -734,6 +765,18 @@ fn unary_val(ctx: &GpuContext, name: &str, v: GpuVal) -> Result<GpuVal, String> 
         GpuVal::Fn(_) => Err(format!("GPU: {name} does not apply to a function")),
         GpuVal::Complex { buf, shape, len } => complex_unary(ctx, name, buf, shape, len),
         GpuVal::CScalar(r, i) => complex_scalar_unary(name, r, i),
+        // Unary math on a field is componentwise (real-valued), preserving geometry.
+        GpuVal::Field { buf, grid, spacing, lo, bc, metric, degree, variance, len } => {
+            let expr = match name {
+                "re" | "conj" => "in0[i]".to_string(),
+                "im"          => "f32(0.0)".to_string(),
+                "arg"         => format!("select({}, 0.0, in0[i] >= 0.0)", wgsl_f32(PI)),
+                _ => unary_wgsl(name, "in0[i]")
+                    .ok_or_else(|| format!("GPU: {name} is not available in a GPU block"))?,
+            };
+            let out = run_map(ctx, &[&buf], len, &expr)?;
+            Ok(rebuild_gfield(&grid, &spacing, &lo, &bc, &metric, out, degree, variance, len))
+        }
         GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
@@ -763,6 +806,8 @@ fn binary_minmax(ctx: &GpuContext, name: &str, a: GpuVal, b: GpuVal) -> Result<G
             Err(format!("GPU: {f} does not apply to a tuple")),
         (GpuVal::Complex { .. } | GpuVal::CScalar(..), _) | (_, GpuVal::Complex { .. } | GpuVal::CScalar(..)) =>
             Err(format!("GPU: {f} is not defined on complex values (no ordering)")),
+        (GpuVal::Field { .. }, _) | (_, GpuVal::Field { .. }) =>
+            Err(format!("GPU: {f} is not defined on fields")),
         _ => unreachable!("Host values are materialized above"),
     }
 }
@@ -784,6 +829,12 @@ fn any_all_val(ctx: &GpuContext, name: &str, v: GpuVal) -> Result<GpuVal, String
         GpuVal::Fn(_) => Err(format!("GPU: {name} does not apply to a function")),
         GpuVal::Complex { .. } | GpuVal::CScalar(..) =>
             Err(format!("GPU: {name} is not defined on complex values")),
+        GpuVal::Field { buf, len, .. } => {
+            if len == 0 { return Ok(GpuVal::Scalar(if name == "all" { 1.0 } else { 0.0 })); }
+            let flags = run_map(ctx, &[&buf], len, "f32(in0[i] != f32(0.0))")?;
+            let kind = if name == "any" { "max" } else { "min" };
+            Ok(GpuVal::Scalar(reduce(ctx, flags, len, kind)?))
+        }
         GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
@@ -819,6 +870,13 @@ fn reduce_val(ctx: &GpuContext, name: &str, v: GpuVal) -> Result<GpuVal, String>
             "sum" | "mean" => Ok(make_cscalar(r, i)),
             _ => Err(format!("GPU: {name} is not defined on complex values")),
         },
+        // Reductions over a field act on its raw component data (flat).
+        GpuVal::Field { buf, len, .. } => {
+            if len == 0 { return Err(format!("GPU: {name} of an empty field")); }
+            let kind = match name { "sum" | "mean" => "sum", other => other };
+            let total = reduce(ctx, buf, len, kind)?;
+            Ok(GpuVal::Scalar(if name == "mean" { total / len as f64 } else { total }))
+        }
         GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
@@ -1147,6 +1205,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
 
 /// `ops.<name>(...)` inside a GPU block.
 fn ops_op(name: &str, args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut HashMap<String, GpuVal>) -> Result<GpuVal, String> {
+    // Field-polymorphic form: `ops.lap(f)` etc. take exactly one field argument
+    // (dx/bc come from the field). A single argument that evaluates to a field
+    // routes here; tensor forms always carry an explicit dx (≥ 2 args).
+    if args.len() == 1 {
+        let v = materialize(ctx, eval_gpu(&args[0], env, ctx, scope)?);
+        if let GpuVal::Field { .. } = v {
+            return gpu_field_op(name, v, ctx);
+        }
+        return Err(format!(
+            "GPU: ops.{name} needs an explicit dx (e.g. ops.{name}(T, dx)) unless called on a field"));
+    }
     match name {
         // ops.lap(T, dx [, bc])  — Laplacian; bc 0=periodic (default), 1=neumann.
         "lap" => {
@@ -1756,7 +1825,7 @@ fn eval_count(arg: &Expr, env: &Env, ctx: &GpuContext, scope: &mut HashMap<Strin
         GpuVal::Scalar(s) if s >= 0.0 && s.fract() == 0.0 => Ok(s as usize),
         GpuVal::Scalar(s) => Err(format!("GPU: iterate/scan count must be a non-negative integer, got {s}")),
         GpuVal::Buffer { .. } | GpuVal::Host { .. } | GpuVal::Tuple(_) | GpuVal::Fn(_)
-        | GpuVal::Complex { .. } | GpuVal::CScalar(..) =>
+        | GpuVal::Complex { .. } | GpuVal::CScalar(..) | GpuVal::Field { .. } =>
             Err("GPU: iterate/scan count must be a scalar".into()),
     }
 }
@@ -1872,8 +1941,8 @@ fn stack_frames(ctx: &GpuContext, frames: Vec<GpuVal>) -> Result<GpuVal, String>
         }
         GpuVal::Host { .. } => Err("GPU: scan produced a host value (internal error)".into()),
         GpuVal::Fn(_) => Err("GPU: scan step must return a tensor/scalar state, not a function".into()),
-        GpuVal::Complex { .. } | GpuVal::CScalar(..) =>
-            Err("GPU: scan/iterate over complex state is not supported".into()),
+        GpuVal::Complex { .. } | GpuVal::CScalar(..) | GpuVal::Field { .. } =>
+            Err("GPU: scan/iterate over complex or field state is not supported".into()),
     }
 }
 
@@ -2032,13 +2101,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
 }\n";
 
 /// Spectral Poisson solve, in place on the complex spectrum: û ← -r̂/k²
-/// (k=0 mode → 0, the zero-mean solution). `meta` carries [shape…, strides…].
+/// (k=0 mode → 0, the zero-mean solution). `dims` carries [shape…, strides…];
+/// `spc` is the per-axis grid spacing (so anisotropic fields work too).
 const POISSON_WGSL: &str = "\
 const TWO_PI: f32 = 6.28318530717958647692;\n\
 @group(0) @binding(0) var<storage, read_write> data: array<vec2<f32>>;\n\
 @group(0) @binding(1) var<storage, read> dims: array<u32>;\n\
-struct SP { len: u32, row: u32, ndim: u32, ax: u32, dx: f32, p0: f32, p1: f32, p2: f32 };\n\
+struct SP { len: u32, row: u32, ndim: u32, ax: u32 };\n\
 @group(0) @binding(2) var<uniform> sp: SP;\n\
+@group(0) @binding(3) var<storage, read> spc: array<f32>;\n\
 fn kfreq(m: u32, n: u32) -> f32 { if (2u * m < n) { return f32(m); } return f32(m) - f32(n); }\n\
 @compute @workgroup_size(256)\n\
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
@@ -2049,7 +2120,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
         let na = dims[a];\n\
         let sa = dims[sp.ndim + a];\n\
         let idx = (i / sa) % na;\n\
-        let kk = kfreq(idx, na) * TWO_PI / (f32(na) * sp.dx);\n\
+        let kk = kfreq(idx, na) * TWO_PI / (f32(na) * spc[a]);\n\
         k2 = k2 + kk * kk;\n\
     }\n\
     if (k2 == 0.0) { data[i] = vec2<f32>(0.0, 0.0); }\n\
@@ -2061,8 +2132,9 @@ const SPECGRAD_WGSL: &str = "\
 const TWO_PI: f32 = 6.28318530717958647692;\n\
 @group(0) @binding(0) var<storage, read_write> data: array<vec2<f32>>;\n\
 @group(0) @binding(1) var<storage, read> dims: array<u32>;\n\
-struct SP { len: u32, row: u32, ndim: u32, ax: u32, dx: f32, p0: f32, p1: f32, p2: f32 };\n\
+struct SP { len: u32, row: u32, ndim: u32, ax: u32 };\n\
 @group(0) @binding(2) var<uniform> sp: SP;\n\
+@group(0) @binding(3) var<storage, read> spc: array<f32>;\n\
 fn kfreq(m: u32, n: u32) -> f32 { if (2u * m < n) { return f32(m); } return f32(m) - f32(n); }\n\
 @compute @workgroup_size(256)\n\
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
@@ -2071,7 +2143,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
     let na = dims[sp.ax];\n\
     let sa = dims[sp.ndim + sp.ax];\n\
     let idx = (i / sa) % na;\n\
-    let k = kfreq(idx, na) * TWO_PI / (f32(na) * sp.dx);\n\
+    let k = kfreq(idx, na) * TWO_PI / (f32(na) * spc[sp.ax]);\n\
     let c = data[i];\n\
     data[i] = vec2<f32>(-k * c.y, k * c.x);\n\
 }\n";
@@ -2244,7 +2316,7 @@ fn fft_axes(
 /// spectrum, computing wavenumbers from the flat index via `meta` (shape+strides).
 fn spectral_apply(
     ctx: &GpuContext, cbuf: &wgpu::Buffer, shape: &[usize], total: usize,
-    dx: f64, kind: &str, axis: usize,
+    spacing: &[f64], kind: &str, axis: usize,
 ) {
     let src_wgsl = if kind == "poisson" { POISSON_WGSL } else { SPECGRAD_WGSL };
     let pipeline = get_pipeline(ctx, src_wgsl);
@@ -2260,9 +2332,15 @@ fn spectral_apply(
         contents: bytemuck::cast_slice(&meta),
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
     });
+    let spc: Vec<f32> = spacing.iter().map(|&s| s as f32).collect();
+    let spc_buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu-spectral-spacing"),
+        contents: bytemuck::cast_slice(&spc),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    });
     let (gx, gy, row) = grid(total);
-    // SP: len,row,ndim,ax (u32) + dx (f32) + 3 f32 pad.
-    let u: [u32; 8] = [total as u32, row, ndim as u32, axis as u32, (dx as f32).to_bits(), 0, 0, 0];
+    // SP: len, row, ndim, ax (u32).
+    let u: [u32; 4] = [total as u32, row, ndim as u32, axis as u32];
     let params = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("gpu-spectral-params"),
         contents: bytemuck::cast_slice(&u),
@@ -2275,6 +2353,7 @@ fn spectral_apply(
             wgpu::BindGroupEntry { binding: 0, resource: cbuf.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 1, resource: meta_buf.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 2, resource: params.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: spc_buf.as_entire_binding() },
         ],
     });
     let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -2345,9 +2424,10 @@ fn gpu_spectral_op(name: &str, args: &[Expr], env: &Env, ctx: &GpuContext, scope
     }
     let total: usize = shape.iter().product();
     let axes: Vec<usize> = (0..shape.len()).collect();
+    let spacing = vec![dx; shape.len()];
     let cbuf = real_to_complex(ctx, &buf, total);
     let spec = fft_axes(ctx, cbuf, &shape, total, &axes, true)?;
-    spectral_apply(ctx, &spec, &shape, total, dx, kind, axis);
+    spectral_apply(ctx, &spec, &shape, total, &spacing, kind, axis);
     let back = fft_axes(ctx, spec, &shape, total, &axes, false)?;
     let real = complex_real_part(ctx, &back, total);
     Ok(GpuVal::Buffer { buf: real, shape, len: total })
@@ -2623,6 +2703,439 @@ fn complex_scalar_unary(name: &str, r: f64, i: f64) -> Result<GpuVal, String> {
     })
 }
 
+// ───────────────────────────── fields & forms ─────────────────────────────
+//
+// A field is a GPU buffer of component-fastest data (data[p*ncomp + c]) plus
+// host-side geometry (grid, spacing, bc, metric, degree, variance) — the
+// GpuVal::Field mirror of the CPU FieldVal. Every forms/field operator is a
+// host-computed per-component recipe (which subset, sign, coefficient, derivative
+// axis) dispatched through the existing stencil/map primitives, so the component
+// ordering is guaranteed identical to the CPU (we reuse forms::subsets et al.).
+
+use crate::ns::forms::{complement, perm_sign, subset_index, subsets};
+
+fn bc_bools(bc: &[BC]) -> Vec<bool> { bc.iter().map(|&b| b == BC::Neumann).collect() }
+fn grid_total(grid: &[usize]) -> usize { grid.iter().product::<usize>().max(1) }
+
+/// Anisotropic Laplacian taps: Σ_a (f[+1] + f[-1] - 2 f[0]) / dx_a².
+fn lap_taps_aniso(spacing: &[f64]) -> Vec<Tap> {
+    let n = spacing.len();
+    let center: f64 = spacing.iter().map(|&d| -2.0 / (d * d)).sum();
+    let mut taps: Vec<Tap> = vec![(vec![0i64; n], center)];
+    for a in 0..n {
+        let inv = 1.0 / (spacing[a] * spacing[a]);
+        let mut up = vec![0i64; n]; up[a] = 1; taps.push((up, inv));
+        let mut dn = vec![0i64; n]; dn[a] = -1; taps.push((dn, inv));
+    }
+    taps
+}
+
+/// Allocate a real grid buffer (storage + copy-src).
+fn make_real_buffer(ctx: &GpuContext, len: usize) -> Rc<wgpu::Buffer> {
+    Rc::new(ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gpu-field-buf"),
+        size: (len.max(1) * 4) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    }))
+}
+
+/// Write a grid buffer into component `c` of an interleaved field buffer:
+/// out[p*ncomp + c] = comp[p]. (Inverse of `extract_component`.)
+fn scatter_component(ctx: &GpuContext, out: &wgpu::Buffer, comp: &wgpu::Buffer, gt: usize, ncomp: usize, c: usize) {
+    let src_wgsl =
+        "@group(0) @binding(0) var<storage, read> inp: array<f32>;\n\
+@group(0) @binding(1) var<storage, read_write> outp: array<f32>;\n\
+struct P { len: u32, row: u32, ncomp: u32, comp: u32 };\n\
+@group(0) @binding(2) var<uniform> p: P;\n\
+@compute @workgroup_size(256)\n\
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
+    let i = gid.y * p.row + gid.x;\n\
+    if (i >= p.len) { return; }\n\
+    outp[i * p.ncomp + p.comp] = inp[i];\n\
+}\n";
+    let pipeline = get_pipeline(ctx, src_wgsl);
+    let (gx, gy, row) = grid(gt);
+    let params = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu-scatter-params"),
+        contents: bytemuck::cast_slice(&[gt as u32, row, ncomp as u32, c as u32]),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("gpu-scatter-bg"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: comp.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: out.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: params.as_entire_binding() },
+        ],
+    });
+    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gpu-scatter-encoder") });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("gpu-scatter-pass"), timestamp_writes: None });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(gx, gy, 1);
+    }
+    ctx.queue.submit(Some(encoder.finish()));
+}
+
+/// Split a field buffer into its `ncomp` grid-component buffers.
+fn field_components(ctx: &GpuContext, buf: &Rc<wgpu::Buffer>, gt: usize, ncomp: usize) -> Result<Vec<Rc<wgpu::Buffer>>, String> {
+    if ncomp == 1 { return Ok(vec![buf.clone()]); }
+    (0..ncomp).map(|c| extract_component(ctx, buf, gt, ncomp, c)).collect()
+}
+
+/// Pack grid-component buffers back into an interleaved field buffer.
+fn assemble_field_buf(ctx: &GpuContext, comps: &[Rc<wgpu::Buffer>], gt: usize, nc_out: usize) -> Rc<wgpu::Buffer> {
+    if nc_out == 1 { return comps[0].clone(); }
+    let out = make_real_buffer(ctx, gt * nc_out);
+    for (c, comp) in comps.iter().enumerate() {
+        scatter_component(ctx, &out, comp, gt, nc_out, c);
+    }
+    out
+}
+
+/// acc ← (acc + coeff·term), or coeff·term if acc is empty.
+fn accum(ctx: &GpuContext, acc: Option<Rc<wgpu::Buffer>>, term: &wgpu::Buffer, coeff: f64, gt: usize) -> Result<Rc<wgpu::Buffer>, String> {
+    match acc {
+        None => run_map(ctx, &[term], gt, &format!("{}*in0[i]", wgsl_f32(coeff))),
+        Some(a) => run_map(ctx, &[&a, term], gt, &format!("in0[i] + {}*in1[i]", wgsl_f32(coeff))),
+    }
+}
+
+/// Helper to rebuild a `GpuVal::Field` from geometry refs + new component data.
+#[allow(clippy::too_many_arguments)]
+fn rebuild_gfield(grid: &[usize], spacing: &[f64], lo: &[f64], bc: &[BC], metric: &[f64],
+                  buf: Rc<wgpu::Buffer>, degree: usize, variance: Variance, len: usize) -> GpuVal {
+    GpuVal::Field {
+        buf, grid: grid.to_vec(), spacing: spacing.to_vec(), lo: lo.to_vec(),
+        bc: bc.to_vec(), metric: metric.to_vec(), degree, variance, len,
+    }
+}
+
+/// Scale a whole field by a constant (used by codiff's ★d★ sign).
+fn field_scale(ctx: &GpuContext, f: GpuVal, s: f64) -> Result<GpuVal, String> {
+    if let GpuVal::Field { buf, grid, spacing, lo, bc, metric, degree, variance, len } = f {
+        let out = run_map(ctx, &[&buf], len, &format!("{}*in0[i]", wgsl_f32(s)))?;
+        Ok(rebuild_gfield(&grid, &spacing, &lo, &bc, &metric, out, degree, variance, len))
+    } else { Err("field_scale: not a field".into()) }
+}
+
+/// Add two fields of identical geometry/degree.
+fn field_add(ctx: &GpuContext, a: GpuVal, b: GpuVal) -> Result<GpuVal, String> {
+    match (a, b) {
+        (GpuVal::Field { buf: ba, grid, spacing, lo, bc, metric, degree, variance, len },
+         GpuVal::Field { buf: bb, len: lb, .. }) => {
+            if len != lb { return Err("forms: field add length mismatch".into()); }
+            let out = run_map(ctx, &[&ba, &bb], len, "in0[i] + in1[i]")?;
+            Ok(rebuild_gfield(&grid, &spacing, &lo, &bc, &metric, out, degree, variance, len))
+        }
+        _ => Err("field_add: not fields".into()),
+    }
+}
+
+/// Field ⊕ field / field ⊕ scalar elementwise arithmetic (preserves geometry).
+fn field_binop(ctx: &GpuContext, op: &Op, lhs: GpuVal, rhs: GpuVal) -> Result<GpuVal, String> {
+    match (lhs, rhs) {
+        (GpuVal::Field { buf: ba, grid, spacing, lo, bc, metric, degree, variance, len },
+         GpuVal::Field { buf: bb, grid: g2, degree: d2, len: lb, .. }) => {
+            if grid != g2 || degree != d2 || len != lb {
+                return Err("GPU: field op field requires matching grid and degree".into());
+            }
+            let expr = op_expr(op, "in0[i]", "in1[i]")?;
+            let out = run_map(ctx, &[&ba, &bb], len, &expr)?;
+            Ok(rebuild_gfield(&grid, &spacing, &lo, &bc, &metric, out, degree, variance, len))
+        }
+        (GpuVal::Field { buf, grid, spacing, lo, bc, metric, degree, variance, len }, GpuVal::Scalar(s)) => {
+            let expr = op_expr(op, "in0[i]", &wgsl_f32(s))?;
+            let out = run_map(ctx, &[&buf], len, &expr)?;
+            Ok(rebuild_gfield(&grid, &spacing, &lo, &bc, &metric, out, degree, variance, len))
+        }
+        (GpuVal::Scalar(s), GpuVal::Field { buf, grid, spacing, lo, bc, metric, degree, variance, len }) => {
+            let expr = op_expr(op, &wgsl_f32(s), "in0[i]")?;
+            let out = run_map(ctx, &[&buf], len, &expr)?;
+            Ok(rebuild_gfield(&grid, &spacing, &lo, &bc, &metric, out, degree, variance, len))
+        }
+        _ => Err("GPU: field arithmetic supports field⊕field (same geometry) and field⊕scalar".into()),
+    }
+}
+
+/// The field-polymorphic `ops.*` (one field arg; dx/bc come from the field).
+fn gpu_field_op(name: &str, field: GpuVal, ctx: &GpuContext) -> Result<GpuVal, String> {
+    let GpuVal::Field { buf, grid, spacing, lo, bc, metric, degree, variance, len } = field
+        else { return Err(format!("ops.{name}: expected a field")); };
+    let n = grid.len();
+    let gt = grid_total(&grid);
+    let ncomp = len / gt;
+    let bcs = bc_bools(&bc);
+    let geom = |b: Rc<wgpu::Buffer>, deg: usize, l: usize| rebuild_gfield(&grid, &spacing, &lo, &bc, &metric, b, deg, variance, l);
+    match name {
+        // Componentwise anisotropic 3-point Laplacian (same degree).
+        "lap" => {
+            let comps = field_components(ctx, &buf, gt, ncomp)?;
+            let taps = lap_taps_aniso(&spacing);
+            let out: Vec<Rc<wgpu::Buffer>> = comps.iter()
+                .map(|c| run_stencil(ctx, c, &grid, gt, &taps, &bcs))
+                .collect::<Result<_, _>>()?;
+            Ok(geom(assemble_field_buf(ctx, &out, gt, ncomp), degree, len))
+        }
+        // grad of a 0-form → 1-form (n components, central difference per axis).
+        "grad" => {
+            if ncomp != 1 { return Err("ops.grad: gradient is defined on a scalar (0-form) field".into()); }
+            let out: Vec<Rc<wgpu::Buffer>> = (0..n)
+                .map(|a| run_stencil(ctx, &buf, &grid, gt, &grad_taps(n, spacing[a], a), &bcs))
+                .collect::<Result<_, _>>()?;
+            Ok(geom(assemble_field_buf(ctx, &out, gt, n), 1, gt * n))
+        }
+        // div of an n-component field → 0-form (Σ_a ∂_a V_a).
+        "div" => {
+            if ncomp != n { return Err(format!("ops.div: field has {ncomp} components but the grid is {n}-D")); }
+            let comps = field_components(ctx, &buf, gt, ncomp)?;
+            let mut acc: Option<Rc<wgpu::Buffer>> = None;
+            for a in 0..n {
+                let d = run_stencil(ctx, &comps[a], &grid, gt, &grad_taps(n, spacing[a], a), &bcs)?;
+                acc = Some(accum(ctx, acc, &d, 1.0, gt)?);
+            }
+            Ok(geom(acc.unwrap(), 0, gt))
+        }
+        // 2-D scalar curl ∂_0 V_1 − ∂_1 V_0 → 0-form.
+        "curl" => {
+            if n != 2 || ncomp != 2 { return Err("ops.curl: only the 2-D scalar curl is supported (2-component field on a 2-D grid)".into()); }
+            let comps = field_components(ctx, &buf, gt, 2)?;
+            let dv1 = run_stencil(ctx, &comps[1], &grid, gt, &grad_taps(2, spacing[0], 0), &bcs)?;
+            let dv0 = run_stencil(ctx, &comps[0], &grid, gt, &grad_taps(2, spacing[1], 1), &bcs)?;
+            let out = run_map(ctx, &[&dv1, &dv0], gt, "in0[i] - in1[i]")?;
+            Ok(geom(out, 0, gt))
+        }
+        // Spectral solvers (periodic only, scalar field).
+        "poisson" | "invlap" | "specgrad" => {
+            if bc.iter().any(|&b| b != BC::Periodic) {
+                return Err(format!("ops.{name}: spectral operators require a periodic field"));
+            }
+            if ncomp != 1 { return Err(format!("ops.{name}: expected a scalar (0-form) field")); }
+            if grid.iter().any(|&d| d > 1 && !is_pow2(d)) {
+                return Err(format!("ops.{name}: GPU spectral operators require power-of-two grid axes"));
+            }
+            let axes: Vec<usize> = (0..n).collect();
+            if name == "specgrad" {
+                // 1-form: spectral derivative along each axis.
+                let mut out = Vec::with_capacity(n);
+                for a in 0..n {
+                    let cbuf = real_to_complex(ctx, &buf, gt);
+                    let spec = fft_axes(ctx, cbuf, &grid, gt, &axes, true)?;
+                    spectral_apply(ctx, &spec, &grid, gt, &spacing, "specgrad", a);
+                    let back = fft_axes(ctx, spec, &grid, gt, &axes, false)?;
+                    out.push(complex_real_part(ctx, &back, gt));
+                }
+                Ok(geom(assemble_field_buf(ctx, &out, gt, n), 1, gt * n))
+            } else {
+                let cbuf = real_to_complex(ctx, &buf, gt);
+                let spec = fft_axes(ctx, cbuf, &grid, gt, &axes, true)?;
+                spectral_apply(ctx, &spec, &grid, gt, &spacing, "poisson", 0);
+                let back = fft_axes(ctx, spec, &grid, gt, &axes, false)?;
+                Ok(geom(complex_real_part(ctx, &back, gt), 0, gt))
+            }
+        }
+        _ => Err(format!("GPU: ops.{name} is not a field-polymorphic operator")),
+    }
+}
+
+/// `forms.<name>(…)` inside a GPU block (exterior calculus on captured fields).
+fn forms_op(name: &str, args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut HashMap<String, GpuVal>) -> Result<GpuVal, String> {
+    let eval_field = |i: usize, scope: &mut HashMap<String, GpuVal>| -> Result<GpuVal, String> {
+        match materialize(ctx, eval_gpu(&args[i], env, ctx, scope)?) {
+            f @ GpuVal::Field { .. } => Ok(f),
+            _ => Err(format!("forms.{name}: expected a field argument")),
+        }
+    };
+    match name {
+        "d"      => { let f = eval_field(0, scope)?; forms_d(ctx, f) }
+        "hodge"  => { let f = eval_field(0, scope)?; forms_hodge(ctx, f) }
+        "raise"  => { let f = eval_field(0, scope)?; forms_musical(ctx, f, true) }
+        "lower"  => { let f = eval_field(0, scope)?; forms_musical(ctx, f, false) }
+        "codiff" => { let f = eval_field(0, scope)?; forms_codiff(ctx, f) }
+        "laplace"=> { let f = eval_field(0, scope)?; forms_laplace(ctx, f) }
+        "wedge"  => {
+            if args.len() != 2 { return Err("forms.wedge(a, b) expects 2 args".into()); }
+            let a = eval_field(0, scope)?; let b = eval_field(1, scope)?; forms_wedge(ctx, a, b)
+        }
+        "contract" => {
+            if args.len() != 2 { return Err("forms.contract(X, w) expects 2 args".into()); }
+            let x = eval_field(0, scope)?; let w = eval_field(1, scope)?; forms_contract(ctx, x, w)
+        }
+        "form" | "vector" | "field" =>
+            Err(format!("GPU: forms.{name} (field construction) must run on the CPU — build the field, then capture it in the block")),
+        _ => Err(format!("GPU: forms.{name} is not supported in a GPU block")),
+    }
+}
+
+// d(f): (dω)_J = Σ_p (-1)^p ∂_{J[p]} ω_{J∖{J[p]}}.
+fn forms_d(ctx: &GpuContext, f: GpuVal) -> Result<GpuVal, String> {
+    let GpuVal::Field { buf, grid, spacing, lo, bc, metric, degree: k, variance, .. } = f
+        else { return Err("forms.d: expected a field".into()); };
+    let n = grid.len();
+    if k + 1 > n { return Err(format!("forms.d: cannot differentiate a {k}-form on a {n}-D grid")); }
+    let in_sub = subsets(n, k);
+    let out_sub = subsets(n, k + 1);
+    let (nc_in, nc_out) = (in_sub.len(), out_sub.len());
+    let gt = grid_total(&grid);
+    let in_comps = field_components(ctx, &buf, gt, nc_in)?;
+    let bcs = bc_bools(&bc);
+    let mut out: Vec<Option<Rc<wgpu::Buffer>>> = vec![None; nc_out];
+    for (out_c, jset) in out_sub.iter().enumerate() {
+        for (p, &j) in jset.iter().enumerate() {
+            let mut iset = jset.clone(); iset.remove(p);
+            let in_c = subset_index(&in_sub, &iset);
+            let d = run_stencil(ctx, &in_comps[in_c], &grid, gt, &grad_taps(n, spacing[j], j), &bcs)?;
+            let sign = if p % 2 == 0 { 1.0 } else { -1.0 };
+            out[out_c] = Some(accum(ctx, out[out_c].take(), &d, sign, gt)?);
+        }
+    }
+    let comps: Vec<Rc<wgpu::Buffer>> = out.into_iter().map(|o| o.unwrap()).collect();
+    let buf = assemble_field_buf(ctx, &comps, gt, nc_out);
+    Ok(rebuild_gfield(&grid, &spacing, &lo, &bc, &metric, buf, k + 1, variance, gt * nc_out))
+}
+
+// hodge(f): ★(dx^I) = sqrt|det g|·(Π g^{ii})·ε(I,Iᶜ)·dx^{Iᶜ}.
+fn forms_hodge(ctx: &GpuContext, f: GpuVal) -> Result<GpuVal, String> {
+    let GpuVal::Field { buf, grid, spacing, lo, bc, metric, degree: k, variance, .. } = f
+        else { return Err("forms.hodge: expected a field".into()); };
+    let n = grid.len();
+    let in_sub = subsets(n, k);
+    let out_sub = subsets(n, n - k);
+    let (nc_in, nc_out) = (in_sub.len(), out_sub.len());
+    let gt = grid_total(&grid);
+    let sqrt_det: f64 = metric.iter().map(|g| g.abs().sqrt()).product();
+    let in_comps = field_components(ctx, &buf, gt, nc_in)?;
+    let mut out: Vec<Option<Rc<wgpu::Buffer>>> = vec![None; nc_out];
+    for (in_c, iset) in in_sub.iter().enumerate() {
+        let ic = complement(iset, n);
+        let out_c = subset_index(&out_sub, &ic);
+        let inv_g: f64 = iset.iter().map(|&i| 1.0 / metric[i]).product();
+        let mut concat = iset.clone(); concat.extend_from_slice(&ic);
+        let coeff = sqrt_det * inv_g * perm_sign(&concat) as f64;
+        out[out_c] = Some(run_map(ctx, &[&in_comps[in_c]], gt, &format!("{}*in0[i]", wgsl_f32(coeff)))?);
+    }
+    let comps: Vec<Rc<wgpu::Buffer>> = out.into_iter().map(|o| o.unwrap()).collect();
+    let buf = assemble_field_buf(ctx, &comps, gt, nc_out);
+    Ok(rebuild_gfield(&grid, &spacing, &lo, &bc, &metric, buf, n - k, variance, gt * nc_out))
+}
+
+// musical raise (♯, up) / lower (♭): scale component I by Π g^{ii} or Π g_ii.
+fn forms_musical(ctx: &GpuContext, f: GpuVal, up: bool) -> Result<GpuVal, String> {
+    let GpuVal::Field { buf, grid, spacing, lo, bc, metric, degree, .. } = f
+        else { return Err("forms.raise/lower: expected a field".into()); };
+    let n = grid.len();
+    let sub = subsets(n, degree);
+    let nc = sub.len();
+    let gt = grid_total(&grid);
+    let comps = field_components(ctx, &buf, gt, nc)?;
+    let mut out = Vec::with_capacity(nc);
+    for (c, iset) in sub.iter().enumerate() {
+        let scale: f64 = iset.iter().map(|&i| if up { 1.0 / metric[i] } else { metric[i] }).product();
+        out.push(run_map(ctx, &[&comps[c]], gt, &format!("{}*in0[i]", wgsl_f32(scale)))?);
+    }
+    let variance = if up { Variance::Vector } else { Variance::Form };
+    let buf = assemble_field_buf(ctx, &out, gt, nc);
+    Ok(rebuild_gfield(&grid, &spacing, &lo, &bc, &metric, buf, degree, variance, gt * nc))
+}
+
+// wedge(a, b): (α∧β)_K = Σ_{I⊔J=K} ε(I,J) α_I β_J (pointwise).
+fn forms_wedge(ctx: &GpuContext, a: GpuVal, b: GpuVal) -> Result<GpuVal, String> {
+    let GpuVal::Field { buf: ba, grid, spacing, lo, bc, metric, degree: ka, variance, .. } = a
+        else { return Err("forms.wedge: expected a field".into()); };
+    let GpuVal::Field { buf: bb, grid: gb, spacing: sb, bc: bcb, metric: mb, degree: kb, .. } = b
+        else { return Err("forms.wedge: expected a field".into()); };
+    if grid != gb || spacing != sb || bc != bcb || metric != mb {
+        return Err("forms.wedge: operands must share the same grid geometry".into());
+    }
+    let n = grid.len();
+    if ka + kb > n { return Err(format!("forms.wedge: degree {ka}+{kb} exceeds grid dimension {n}")); }
+    let a_sub = subsets(n, ka);
+    let b_sub = subsets(n, kb);
+    let out_sub = subsets(n, ka + kb);
+    let gt = grid_total(&grid);
+    let a_comps = field_components(ctx, &ba, gt, a_sub.len())?;
+    let b_comps = field_components(ctx, &bb, gt, b_sub.len())?;
+    let mut out: Vec<Option<Rc<wgpu::Buffer>>> = vec![None; out_sub.len()];
+    for (ia, iset) in a_sub.iter().enumerate() {
+        for (ib, jset) in b_sub.iter().enumerate() {
+            if iset.iter().any(|x| jset.contains(x)) { continue; }
+            let mut concat = iset.clone(); concat.extend_from_slice(jset);
+            let eps = perm_sign(&concat) as f64;
+            let mut kset = concat.clone(); kset.sort_unstable();
+            let out_c = subset_index(&out_sub, &kset);
+            let prod = run_map(ctx, &[&a_comps[ia], &b_comps[ib]], gt, "in0[i] * in1[i]")?;
+            out[out_c] = Some(accum(ctx, out[out_c].take(), &prod, eps, gt)?);
+        }
+    }
+    let comps: Vec<Rc<wgpu::Buffer>> = out.into_iter().map(|o| o.unwrap()).collect();
+    let buf = assemble_field_buf(ctx, &comps, gt, out_sub.len());
+    Ok(rebuild_gfield(&grid, &spacing, &lo, &bc, &metric, buf, ka + kb, variance, gt * out_sub.len()))
+}
+
+// contract(X, w): (ι_X ω)_J = Σ_{i∉J} sign(i,J) X^i ω_{sorted({i}∪J)}.
+fn forms_contract(ctx: &GpuContext, x: GpuVal, w: GpuVal) -> Result<GpuVal, String> {
+    let GpuVal::Field { buf: bx, grid, degree: dx, variance: vx, .. } = &x
+        else { return Err("forms.contract: expected a field".into()); };
+    let GpuVal::Field { buf: bw, grid: gw, spacing, lo, bc, metric, degree: k, variance: vw, .. } = &w
+        else { return Err("forms.contract: expected a field".into()); };
+    if *dx != 1 || *vx != Variance::Vector {
+        return Err("forms.contract: the first argument must be a vector field (degree-1, contravariant)".into());
+    }
+    if *vw != Variance::Form { return Err("forms.contract: the second argument must be a form (covariant)".into()); }
+    if grid != gw { return Err("forms.contract: operands must share the same grid geometry".into()); }
+    let n = grid.len();
+    let k = *k;
+    if k == 0 { return Err("forms.contract: cannot contract a vector into a 0-form".into()); }
+    let in_sub = subsets(n, k);
+    let out_sub = subsets(n, k - 1);
+    let gt = grid_total(grid);
+    let xcomps = field_components(ctx, bx, gt, n)?;
+    let wcomps = field_components(ctx, bw, gt, in_sub.len())?;
+    let mut out: Vec<Option<Rc<wgpu::Buffer>>> = vec![None; out_sub.len()];
+    for (out_c, jset) in out_sub.iter().enumerate() {
+        for i in 0..n {
+            if jset.contains(&i) { continue; }
+            let mut iset = jset.clone(); iset.push(i); iset.sort_unstable();
+            let p = iset.iter().position(|&v| v == i).unwrap();
+            let in_c = subset_index(&in_sub, &iset);
+            let sign = if p % 2 == 0 { 1.0 } else { -1.0 };
+            let prod = run_map(ctx, &[&xcomps[i], &wcomps[in_c]], gt, "in0[i] * in1[i]")?;
+            out[out_c] = Some(accum(ctx, out[out_c].take(), &prod, sign, gt)?);
+        }
+    }
+    let comps: Vec<Rc<wgpu::Buffer>> = out.into_iter().map(|o| o.unwrap()).collect();
+    let buf = assemble_field_buf(ctx, &comps, gt, out_sub.len());
+    Ok(rebuild_gfield(grid, spacing, lo, bc, metric, buf, k - 1, Variance::Form, gt * out_sub.len()))
+}
+
+// codiff δ = (-1)^{n(k+1)+1} ★d★ (k-form → (k-1)-form).
+fn forms_codiff(ctx: &GpuContext, f: GpuVal) -> Result<GpuVal, String> {
+    let (n, k) = match &f {
+        GpuVal::Field { grid, degree, .. } => (grid.len(), *degree),
+        _ => return Err("forms.codiff: expected a field".into()),
+    };
+    if k == 0 { return Err("forms.codiff: the codifferential of a 0-form is 0 (degree -1)".into()); }
+    let s1 = forms_hodge(ctx, f)?;
+    let s2 = forms_d(ctx, s1)?;
+    let s3 = forms_hodge(ctx, s2)?;
+    let sign = if (n * (k + 1) + 1) % 2 == 0 { 1.0 } else { -1.0 };
+    field_scale(ctx, s3, sign)
+}
+
+// laplace Δ = dδ + δd (Laplace–de Rham; 0-form → ordinary ∇²).
+fn forms_laplace(ctx: &GpuContext, f: GpuVal) -> Result<GpuVal, String> {
+    let k = match &f { GpuVal::Field { degree, .. } => *degree, _ => return Err("forms.laplace: expected a field".into()) };
+    let dd = forms_d(ctx, f.clone())?;
+    let term_dd = forms_codiff(ctx, dd)?;
+    if k == 0 { return Ok(term_dd); }
+    let cd = forms_codiff(ctx, f)?;
+    let term_cd = forms_d(ctx, cd)?;
+    field_add(ctx, term_dd, term_cd)
+}
+
 fn upload_f32(ctx: &GpuContext, data: Vec<f32>, shape: Vec<usize>) -> GpuVal {
     let len = data.len();
     let buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2664,6 +3177,23 @@ fn upload_complex(ctx: &GpuContext, re: &TData, im: &TData, shape: &[usize]) -> 
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
     });
     GpuVal::Complex { buf: Rc::new(buf), shape: shape.to_vec(), len }
+}
+
+/// Upload a CPU field, copying its component data to the GPU and its geometry to
+/// host-side metadata (the `GpuVal::Field` mirror of `FieldVal`).
+fn upload_field(ctx: &GpuContext, f: &FieldVal) -> GpuVal {
+    let f32_data: Vec<f32> = f.data.iter().map(|&x| x as f32).collect();
+    let len = f32_data.len();
+    let buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu-upload-field"),
+        contents: bytemuck::cast_slice(if f32_data.is_empty() { &[0.0f32][..] } else { &f32_data[..] }),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+    });
+    GpuVal::Field {
+        buf: Rc::new(buf),
+        grid: f.grid.clone(), spacing: f.spacing.clone(), lo: f.lo.clone(),
+        bc: f.bc.clone(), metric: f.metric.clone(), degree: f.degree, variance: f.variance, len,
+    }
 }
 
 /// Get a compute pipeline for a WGSL source, compiling and caching on first use.
@@ -2847,6 +3377,14 @@ fn to_val(ctx: &GpuContext, v: &GpuVal) -> Result<Val, String> {
         // A complex scalar collapses to a real `Num` when the imaginary part is
         // exactly zero (matches the CPU `make_complex`).
         GpuVal::CScalar(r, i) => Ok(if *i == 0.0 { Val::Num(*r) } else { Val::Complex(*r, *i) }),
+        GpuVal::Field { buf, grid, spacing, lo, bc, metric, degree, variance, len } => {
+            let data = download(ctx, buf, *len)?;
+            Ok(Val::Field(Arc::new(FieldVal {
+                data: TData::new(data.into_iter().map(|x| x as f64).collect()),
+                grid: grid.clone(), spacing: spacing.clone(), lo: lo.clone(),
+                bc: bc.clone(), metric: metric.clone(), degree: *degree, variance: *variance,
+            })))
+        }
         GpuVal::Tuple(elems) => Ok(Val::Tuple(
             elems.iter().map(|e| to_val(ctx, e)).collect::<Result<Vec<_>, _>>()?,
         )),

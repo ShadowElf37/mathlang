@@ -1906,6 +1906,27 @@ else
     run "gpu.cplx.powerspec" "A=[1,2,3,4,5,6,7,8]; round(sum(abs(GPU{abs(fft(A))^2}-abs(fft(A))^2)),3)" "0"
     run "gpu.cplx.ifftident" "A=[1,2,3,4]; round(sum(abs(GPU{conj(fft(conj(fft(A))))*0.25}-A)),4)" "0"
     run_err "gpu.cplx.nomin" "A=[1+1i,2+0i]; GPU { min(A, 0) }"
+
+    # ── fields & forms on the GPU (capture, field-poly ops, exterior calculus) ──
+    # All parities are CPU-vs-GPU on an 8×8 periodic field (rounded to 3 dp).
+    run "gpu.field.roundtrip" "T=tensor((i,j)->1.0*(i+j),4,4); f=field(T,(0,0),(1,1),forms.periodic); g=GPU{f}; sum(abs(g-f))" "0"
+    run "gpu.field.lap"      "T=tensor((i,j)->sin(i*0.6)*cos(j*0.4),8,8); f=field(T,(0,0),(2,2),forms.periodic); round(sum(abs(GPU{ops.lap(f)}-ops.lap(f))),3)" "0"
+    run "gpu.field.grad"     "T=tensor((i,j)->sin(i*0.6)*cos(j*0.4),8,8); f=field(T,(0,0),(2,2),forms.periodic); round(sum(abs(GPU{ops.grad(f)}-ops.grad(f))),3)" "0"
+    run "gpu.field.lap.aniso" "T=tensor((i,j)->sin(i*0.6)*cos(j*0.4),8,8); f=field(T,(0,0),(3,1),forms.neumann); round(sum(abs(GPU{ops.lap(f)}-ops.lap(f))),3)" "0"
+    run "gpu.field.poisson"  "T=tensor((i,j)->sin(2*pi*i/8)*cos(2*pi*j/8),8,8); f=field(T,(0,0),(2,2),forms.periodic); round(sum(abs(GPU{ops.poisson(f)}-ops.poisson(f))),3)" "0"
+    run "gpu.vec.curl"       "V=tensor((i,j,c)->if(c==0,sin(i*0.5),cos(j*0.5)),8,8,2); X=forms.vector(V,(0,0),(2,2),forms.periodic); round(sum(abs(GPU{ops.curl(X)}-ops.curl(X))),3)" "0"
+    run "gpu.vec.div"        "V=tensor((i,j,c)->if(c==0,sin(i*0.5),cos(j*0.5)),8,8,2); X=forms.vector(V,(0,0),(2,2),forms.periodic); round(sum(abs(GPU{ops.div(X)}-ops.div(X))),3)" "0"
+    run "gpu.forms.d"        "T=tensor((i,j)->sin(i*0.6)*cos(j*0.4),8,8); f=field(T,(0,0),(2,2),forms.periodic); round(sum(abs(GPU{forms.d(f)}-forms.d(f))),3)" "0"
+    run "gpu.forms.dd0"      "T=tensor((i,j)->sin(i*0.6)*cos(j*0.4),8,8); f=field(T,(0,0),(2,2),forms.periodic); round(sum(abs(GPU{forms.d(forms.d(f))})),3)" "0"
+    run "gpu.forms.hodge"    "T=tensor((i,j)->sin(i*0.6)*cos(j*0.4),8,8); f=field(T,(0,0),(2,2),forms.periodic); round(sum(abs(GPU{forms.hodge(f)}-forms.hodge(f))),3)" "0"
+    run "gpu.forms.laplace"  "T=tensor((i,j)->sin(i*0.6)*cos(j*0.4),8,8); f=field(T,(0,0),(2,2),forms.periodic); round(sum(abs(GPU{forms.laplace(f)}-forms.laplace(f))),3)" "0"
+    run "gpu.forms.codiff"   "T=tensor((i,j)->sin(i*0.6)*cos(j*0.4),8,8); f=field(T,(0,0),(2,2),forms.periodic); round(sum(abs(GPU{forms.codiff(forms.d(f))}-forms.codiff(forms.d(f)))),3)" "0"
+    run "gpu.forms.raise"    "T=tensor((i,j)->sin(i*0.6)*cos(j*0.4),8,8); f=field(T,(0,0),(2,2),forms.periodic); round(sum(abs(GPU{forms.raise(forms.d(f))}-forms.raise(forms.d(f)))),3)" "0"
+    run "gpu.forms.wedge"    "T=tensor((i,j)->sin(i*0.6)*cos(j*0.4),8,8); f=field(T,(0,0),(2,2),forms.periodic); round(sum(abs(GPU{forms.wedge(forms.d(f),forms.d(f))}-forms.wedge(forms.d(f),forms.d(f)))),3)" "0"
+    run "gpu.forms.contract" "V=tensor((i,j,c)->if(c==0,sin(i*0.5),cos(j*0.5)),8,8,2); X=forms.vector(V,(0,0),(2,2),forms.periodic); w=forms.d(field(tensor((i,j)->1.0*i*j,8,8),(0,0),(2,2),forms.periodic)); round(sum(abs(GPU{forms.contract(X,w)}-forms.contract(X,w))),3)" "0"
+    run "gpu.forms.minkowski" "T=tensor((i,j)->sin(i*0.6)*cos(j*0.4),8,8); f=field(T,(0,0),(2,2),forms.periodic,(-1,1)); round(sum(abs(GPU{forms.laplace(f)}-forms.laplace(f))),3)" "0"
+    run "gpu.field.arith"    "T=tensor((i,j)->1.0*(i+j),6,6); f=field(T,(0,0),(1,1),forms.periodic); round(sum(abs(GPU{f+f*2}-(f+f*2))),3)" "0"
+    run_err "gpu.field.noconstruct" "GPU { forms.vector([1,2;3,4], (0,0), (1,1), forms.periodic) }"
 fi
 
 # ── print summary ─────────────────────────────────────────────────────────────
