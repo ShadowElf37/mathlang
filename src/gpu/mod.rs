@@ -214,6 +214,8 @@ fn eval_gpu(
 ) -> Result<GpuVal, String> {
     match e {
         Expr::Num(n) => Ok(GpuVal::Scalar(*n)),
+        // Imaginary literal `2i` → complex scalar 0 + 2i (matches `2*i`).
+        Expr::ImagLit(v) => Ok(GpuVal::CScalar(0.0, *v)),
 
         Expr::Neg(x) => {
             let v = eval_gpu(x, env, ctx, scope)?;
@@ -829,12 +831,8 @@ fn any_all_val(ctx: &GpuContext, name: &str, v: GpuVal) -> Result<GpuVal, String
         GpuVal::Fn(_) => Err(format!("GPU: {name} does not apply to a function")),
         GpuVal::Complex { .. } | GpuVal::CScalar(..) =>
             Err(format!("GPU: {name} is not defined on complex values")),
-        GpuVal::Field { buf, len, .. } => {
-            if len == 0 { return Ok(GpuVal::Scalar(if name == "all" { 1.0 } else { 0.0 })); }
-            let flags = run_map(ctx, &[&buf], len, "f32(in0[i] != f32(0.0))")?;
-            let kind = if name == "any" { "max" } else { "min" };
-            Ok(GpuVal::Scalar(reduce(ctx, flags, len, kind)?))
-        }
+        // The CPU rejects any/all over a field (it is not a tuple/tensor) — match it.
+        GpuVal::Field { .. } => Err(format!("GPU: {name} does not apply to a field (reduce its data, not the field)")),
         GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
@@ -870,13 +868,9 @@ fn reduce_val(ctx: &GpuContext, name: &str, v: GpuVal) -> Result<GpuVal, String>
             "sum" | "mean" => Ok(make_cscalar(r, i)),
             _ => Err(format!("GPU: {name} is not defined on complex values")),
         },
-        // Reductions over a field act on its raw component data (flat).
-        GpuVal::Field { buf, len, .. } => {
-            if len == 0 { return Err(format!("GPU: {name} of an empty field")); }
-            let kind = match name { "sum" | "mean" => "sum", other => other };
-            let total = reduce(ctx, buf, len, kind)?;
-            Ok(GpuVal::Scalar(if name == "mean" { total / len as f64 } else { total }))
-        }
+        // The CPU's `sum`/`mean`/… reject a bare field (it is not a tuple/tensor) —
+        // match it so a GPU block and the CPU agree.
+        GpuVal::Field { .. } => Err(format!("GPU: {name} does not apply to a field (reduce its data, not the field)")),
         GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
@@ -2646,7 +2640,9 @@ fn cbinop(ctx: &GpuContext, op: &Op, lhs: GpuVal, rhs: GpuVal) -> Result<GpuVal,
             (sa, la)
         }
         (Some(sl), None) | (None, Some(sl)) => sl,
-        (None, None) => unreachable!("scalar/scalar handled above"),
+        // Neither operand is a buffer or a host scalar (e.g. a function value);
+        // clean error rather than a panic.
+        (None, None) => return Err("GPU: complex arithmetic operand must be a scalar or tensor".into()),
     };
     let mut bufs: Vec<(Rc<wgpu::Buffer>, bool)> = Vec::new();
     let a = operand_fetch(&lhs, &mut bufs);
@@ -3085,7 +3081,10 @@ fn forms_contract(ctx: &GpuContext, x: GpuVal, w: GpuVal) -> Result<GpuVal, Stri
         return Err("forms.contract: the first argument must be a vector field (degree-1, contravariant)".into());
     }
     if *vw != Variance::Form { return Err("forms.contract: the second argument must be a form (covariant)".into()); }
-    if grid != gw { return Err("forms.contract: operands must share the same grid geometry".into()); }
+    let (xsp, xbc, xmet) = match &x { GpuVal::Field { spacing, bc, metric, .. } => (spacing, bc, metric), _ => unreachable!() };
+    if grid != gw || xsp != spacing || xbc != bc || xmet != metric {
+        return Err("forms.contract: operands must share the same grid geometry".into());
+    }
     let n = grid.len();
     let k = *k;
     if k == 0 { return Err("forms.contract: cannot contract a vector into a 0-form".into()); }

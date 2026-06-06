@@ -1905,6 +1905,7 @@ else
     # FFT output composes with complex ops (power spectrum, conjugate-FFT identity).
     run "gpu.cplx.powerspec" "A=[1,2,3,4,5,6,7,8]; round(sum(abs(GPU{abs(fft(A))^2}-abs(fft(A))^2)),3)" "0"
     run "gpu.cplx.ifftident" "A=[1,2,3,4]; round(sum(abs(GPU{conj(fft(conj(fft(A))))*0.25}-A)),4)" "0"
+    run "gpu.cplx.imaglit"   "A=[1,2,3]; GPU { A + 2i }"                     "[1 + 2i, 2 + 2i, 3 + 2i]"
     run_err "gpu.cplx.nomin" "A=[1+1i,2+0i]; GPU { min(A, 0) }"
 
     # ── fields & forms on the GPU (capture, field-poly ops, exterior calculus) ──
@@ -1927,6 +1928,7 @@ else
     run "gpu.forms.minkowski" "T=tensor((i,j)->sin(i*0.6)*cos(j*0.4),8,8); f=field(T,(0,0),(2,2),forms.periodic,(-1,1)); round(sum(abs(GPU{forms.laplace(f)}-forms.laplace(f))),3)" "0"
     run "gpu.field.arith"    "T=tensor((i,j)->1.0*(i+j),6,6); f=field(T,(0,0),(1,1),forms.periodic); round(sum(abs(GPU{f+f*2}-(f+f*2))),3)" "0"
     run_err "gpu.field.noconstruct" "GPU { forms.vector([1,2;3,4], (0,0), (1,1), forms.periodic) }"
+    run_err "gpu.field.noreduce" "f=field([1,2,3,4],(0),(1),forms.periodic); GPU { sum(f) }"
 fi
 
 # ── print summary ─────────────────────────────────────────────────────────────
