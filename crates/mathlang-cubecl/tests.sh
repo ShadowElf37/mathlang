@@ -54,12 +54,18 @@ check 'sum([1,2,3,4])'          '10'
 check 'len(linspace(0,1,10))'   '10'
 check '-[1,2,3]'                '[-1, -2, -3]'
 
-# ── precision: native f64 on cpu; wgpu downgrades to f32; df64 storage round-trip
+# ── precision: f64 on cpu; wgpu downgrades to f32; df64 arithmetic on cpu ───────
 check '[1.0] + [1e-10]'         '[1.0000000001]'                  # cpu f64
-if printf 'a\n' | "$MC" --spike >/dev/null 2>&1 || true; then :; fi
 check_repl $'!backend wgpu\n[1.0] + [1e-10]' '[1]'                # wgpu f32 loses 1e-10
 check_repl $'!backend wgpu\n!prec f64'       'no native f64'      # f64 rejected on wgpu
 check_repl $'!backend wgpu\n!prec df64\n[0.5, 0.25]' '[0.5, 0.25]' # df64 storage round-trip
+
+# df64 arithmetic (double-single) is correct on the IEEE cpu backend
+check_repl $'!prec df64\n[1.0] + [1e-10]' '1.0000000001'         # add keeps the lo term
+check_repl $'!prec df64\n[1.0] / [3.0]'   '0.33333333333333'     # ~16 digits, not f32's 0.3333333
+check_repl $'!prec df64\n[0.1] * [0.1]'   '0.0100000000000000'   # df64 product
+# df64 arithmetic is gated off wgpu/Metal (driver fast-math), not silently wrong
+check_repl $'!backend wgpu\n!prec df64\n[1.0] + [1.0]' 'unreliable on wgpu'
 
 echo "-----"
 echo "passed: $pass   failed: $fail"

@@ -180,7 +180,7 @@ pub fn binop(target: Target, op: u32, a: &TensorVal, b: &TensorVal) -> Result<Te
     let handle = match target.prec {
         Prec::F32 => dispatch_binop::<f32>(target.backend, op, &a.handle, &b.handle, a.len, b.len, out_len)?,
         Prec::F64 => dispatch_binop::<f64>(target.backend, op, &a.handle, &b.handle, a.len, b.len, out_len)?,
-        Prec::Df64 => return Err(df64_staged("elementwise arithmetic")),
+        Prec::Df64 => dispatch_df64_binop(target.backend, op, &a.handle, &b.handle, a.len, b.len, out_len)?,
     };
     Ok(TensorVal { backend: target.backend, prec: target.prec, shape, len: out_len, handle: Rc::new(handle) })
 }
@@ -190,16 +190,9 @@ pub fn unary(target: Target, op: u32, a: &TensorVal) -> Result<TensorVal, String
     let handle = match target.prec {
         Prec::F32 => dispatch_unary::<f32>(target.backend, op, &a.handle, a.len)?,
         Prec::F64 => dispatch_unary::<f64>(target.backend, op, &a.handle, a.len)?,
-        Prec::Df64 => return Err(df64_staged("unary math")),
+        Prec::Df64 => dispatch_df64_unary(target.backend, op, &a.handle, a.len)?,
     };
     Ok(TensorVal { backend: target.backend, prec: target.prec, shape: a.shape.clone(), len: a.len, handle: Rc::new(handle) })
-}
-
-fn df64_staged(what: &str) -> String {
-    format!(
-        "df64 {what} is staged: storage/round-trip works on every backend, but the \
-         TwoSum/TwoProd kernels are not implemented yet. Use !prec f32 or f64 for now."
-    )
 }
 
 fn dispatch_binop<E: Float + CubeElement>(
@@ -282,6 +275,116 @@ fn run_unary<R: Runtime, E: Float + CubeElement>(
         CubeDim::new_1d(256),
         unsafe { ArrayArg::from_raw_parts((**a).clone(), len) },
         unsafe { ArrayArg::from_raw_parts(out.clone(), len) },
+        op,
+    );
+    out
+}
+
+// ── df64 (double-single) dispatch ────────────────────────────────────────────────
+// df64 buffers hold 2 f32 per logical element, so the kernel array length is `2*len`.
+
+/// Ops the df64 binop kernel implements. Pow needs df64 exp/ln (staged).
+fn df64_binop_supported(op: u32) -> bool {
+    matches!(
+        op,
+        OP_ADD | OP_SUB | OP_MUL | OP_DIV | OP_LT | OP_GT | OP_LE | OP_GE | OP_EQ | OP_NE
+    )
+}
+
+/// df64's error-free transforms require IEEE-strict, non-reassociating float
+/// evaluation. The LLVM-based backends (cpu/cuda/hip) provide that. The wgpu path
+/// enables fp-fast-math and Metal reassociates regardless, which silently collapses
+/// the low-order term to ~f32 — so we refuse rather than return a wrong answer.
+pub fn df64_reliable(backend: Backend) -> bool {
+    !matches!(backend, Backend::Wgpu)
+}
+
+const DF64_WGPU_MSG: &str = "df64 arithmetic is unreliable on wgpu/Metal: the driver's \
+fast-math reassociates and collapses the error term to ~f32. Use a cpu/cuda/hip backend \
+for df64, or !prec f32 here. (df64 storage/round-trip still works on wgpu.)";
+
+fn dispatch_df64_binop(
+    backend: Backend,
+    op: u32,
+    a: &Rc<Handle>,
+    b: &Rc<Handle>,
+    al: usize,
+    bl: usize,
+    out_len: usize,
+) -> Result<Handle, String> {
+    if !df64_reliable(backend) {
+        return Err(DF64_WGPU_MSG.into());
+    }
+    if !df64_binop_supported(op) {
+        return Err("df64 pow is staged (needs df64 exp/ln); use !prec f64/f32, or `x*x`".into());
+    }
+    match backend {
+        #[cfg(feature = "cpu")]
+        Backend::Cpu => Ok(run_df64_binop::<cubecl::cpu::CpuRuntime>(cpu_client(), op, a, b, al, bl, out_len)),
+        #[cfg(feature = "wgpu")]
+        Backend::Wgpu => Ok(run_df64_binop::<cubecl::wgpu::WgpuRuntime>(wgpu_client(), op, a, b, al, bl, out_len)),
+        #[cfg(feature = "cuda")]
+        Backend::Cuda => Ok(run_df64_binop::<cubecl::cuda::CudaRuntime>(cuda_client(), op, a, b, al, bl, out_len)),
+        #[cfg(feature = "hip")]
+        Backend::Hip => Ok(run_df64_binop::<cubecl::hip::HipRuntime>(hip_client(), op, a, b, al, bl, out_len)),
+        #[allow(unreachable_patterns)]
+        _ => Err(format!("backend {} is not compiled in", backend.name())),
+    }
+}
+
+fn run_df64_binop<R: Runtime>(
+    client: ComputeClient<R>,
+    op: u32,
+    a: &Rc<Handle>,
+    b: &Rc<Handle>,
+    al: usize,
+    bl: usize,
+    out_len: usize,
+) -> Handle {
+    let out = client.empty(out_len * 2 * core::mem::size_of::<f32>());
+    let grid = out_len.div_ceil(256).max(1) as u32;
+    kernels::df64_binop::launch::<R>(
+        &client,
+        CubeCount::Static(grid, 1, 1),
+        CubeDim::new_1d(256),
+        unsafe { ArrayArg::from_raw_parts((**a).clone(), al * 2) },
+        unsafe { ArrayArg::from_raw_parts((**b).clone(), bl * 2) },
+        unsafe { ArrayArg::from_raw_parts(out.clone(), out_len * 2) },
+        op,
+    );
+    out
+}
+
+fn dispatch_df64_unary(backend: Backend, op: u32, a: &Rc<Handle>, len: usize) -> Result<Handle, String> {
+    if !df64_reliable(backend) {
+        return Err(DF64_WGPU_MSG.into());
+    }
+    if !matches!(op, UN_NEG | UN_ABS) {
+        return Err("df64 transcendentals (exp/ln/sin/…) are staged; use !prec f64/f32".into());
+    }
+    match backend {
+        #[cfg(feature = "cpu")]
+        Backend::Cpu => Ok(run_df64_unary::<cubecl::cpu::CpuRuntime>(cpu_client(), op, a, len)),
+        #[cfg(feature = "wgpu")]
+        Backend::Wgpu => Ok(run_df64_unary::<cubecl::wgpu::WgpuRuntime>(wgpu_client(), op, a, len)),
+        #[cfg(feature = "cuda")]
+        Backend::Cuda => Ok(run_df64_unary::<cubecl::cuda::CudaRuntime>(cuda_client(), op, a, len)),
+        #[cfg(feature = "hip")]
+        Backend::Hip => Ok(run_df64_unary::<cubecl::hip::HipRuntime>(hip_client(), op, a, len)),
+        #[allow(unreachable_patterns)]
+        _ => Err(format!("backend {} is not compiled in", backend.name())),
+    }
+}
+
+fn run_df64_unary<R: Runtime>(client: ComputeClient<R>, op: u32, a: &Rc<Handle>, len: usize) -> Handle {
+    let out = client.empty(len * 2 * core::mem::size_of::<f32>());
+    let grid = len.div_ceil(256).max(1) as u32;
+    kernels::df64_unary::launch::<R>(
+        &client,
+        CubeCount::Static(grid, 1, 1),
+        CubeDim::new_1d(256),
+        unsafe { ArrayArg::from_raw_parts((**a).clone(), len * 2) },
+        unsafe { ArrayArg::from_raw_parts(out.clone(), len * 2) },
         op,
     );
     out

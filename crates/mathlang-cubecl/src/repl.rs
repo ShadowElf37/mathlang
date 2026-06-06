@@ -155,6 +155,9 @@ impl Repl {
             Some(p) if self.env.target.backend.supports(p) => {
                 self.env.target.prec = p;
                 println!("{}", self.target_line());
+                if p == Prec::Df64 && !crate::compute::df64_reliable(self.env.target.backend) {
+                    println!("note: df64 arithmetic is unsupported on this backend (driver fast-math); storage/round-trip only — use cpu/cuda/hip to compute in df64");
+                }
             }
             Some(p) => eprintln!(
                 "{} has no native {} (try f32 or df64)",
@@ -308,8 +311,9 @@ Scalars, complex, tuples, lambdas, closures, blocks, if, comparisons.
 Tensors run on the compute path: [a,b,c], matrices (1,2; 3,4), a..b,
 zeros/ones/eye/linspace/range; elementwise + - * / ^ and comparisons,
 broadcasting a scalar against a tensor; unary math (sin/exp/sqrt/...);
-shape/rows/cols/len; sum/prod (host reduce for now). Precision is f32,
-df64 (double-single, storage staged), or f64 — per backend.
+shape/rows/cols/len; sum/prod (host reduce for now). Precision: f32, f64
+(cpu/cuda/hip), or df64 double-single (+ - * / & compares on cpu/cuda/hip;
+gated on wgpu; pow/transcendentals staged).
 Other builtins: min/max/pow/hypot/gcd/lcm/ncr, lt/leq/gt/geq/eq/neq,
 map/filter/reduce/compose/partial, iterate, cell/get/set.
 

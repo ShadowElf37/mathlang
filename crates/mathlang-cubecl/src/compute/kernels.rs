@@ -134,3 +134,157 @@ pub fn ew_unary<F: Float>(x: &Array<F>, out: &mut Array<F>, #[comptime] op: u32)
         out[i] = apply_un::<F>(x[i], op);
     }
 }
+
+// ── df64 (double-single) kernels ────────────────────────────────────────────────
+//
+// Each logical element is two f32 `(hi, lo)` stored interleaved: `data[2i]=hi`,
+// `data[2i+1]=lo`, with `value ≈ hi + lo` and `|lo| ≤ ½ ulp(hi)` after
+// normalization. Arithmetic uses error-free transforms (Knuth TwoSum, Dekker
+// TwoProd via a 12-bit split) — no FMA dependency, so it runs on every backend
+// including wgpu/Metal. References: Dekker 1971; Hida/Li/Bailey double-double.
+//
+// Implemented: + − × ÷, comparisons, neg, abs. Pow and transcendentals (exp, ln,
+// sin, …) are not yet df64 — they need range-reduced double-single series and are
+// staged in the dispatcher.
+
+#[cube]
+fn two_sum(a: f32, b: f32) -> (f32, f32) {
+    let s = a + b;
+    let bb = s - a;
+    let err = (a - (s - bb)) + (b - bb);
+    (s, err)
+}
+
+#[cube]
+fn quick_two_sum(a: f32, b: f32) -> (f32, f32) {
+    // assumes |a| ≥ |b|
+    let s = a + b;
+    let err = b - (s - a);
+    (s, err)
+}
+
+#[cube]
+fn two_prod(a: f32, b: f32) -> (f32, f32) {
+    // Dekker split at 12 bits (f32 significand is 24 bits): factor 2^12 + 1.
+    let split = f32::new(4097.0);
+    let ca = split * a;
+    let ahi = ca - (ca - a);
+    let alo = a - ahi;
+    let cb = split * b;
+    let bhi = cb - (cb - b);
+    let blo = b - bhi;
+    let p = a * b;
+    let err = ((ahi * bhi - p) + ahi * blo + alo * bhi) + alo * blo;
+    (p, err)
+}
+
+#[cube]
+fn df_add(ah: f32, al: f32, bh: f32, bl: f32) -> (f32, f32) {
+    let (sh, sl) = two_sum(ah, bh);
+    let (th, tl) = two_sum(al, bl);
+    let (vh, vl) = quick_two_sum(sh, sl + th);
+    quick_two_sum(vh, vl + tl)
+}
+
+#[cube]
+fn df_mul(ah: f32, al: f32, bh: f32, bl: f32) -> (f32, f32) {
+    let (ph, pl) = two_prod(ah, bh);
+    quick_two_sum(ph, pl + (ah * bl + al * bh))
+}
+
+#[cube]
+fn df_mul_scalar(ah: f32, al: f32, s: f32) -> (f32, f32) {
+    let (ph, pl) = two_prod(ah, s);
+    quick_two_sum(ph, pl + al * s)
+}
+
+#[cube]
+fn df_div(ah: f32, al: f32, bh: f32, bl: f32) -> (f32, f32) {
+    let q1 = ah / bh;
+    let (m1h, m1l) = df_mul_scalar(bh, bl, q1);
+    let (r1h, r1l) = df_add(ah, al, -m1h, -m1l); // a - q1*b
+    let q2 = r1h / bh;
+    let (m2h, m2l) = df_mul_scalar(bh, bl, q2);
+    let (r2h, _r2l) = df_add(r1h, r1l, -m2h, -m2l); // r - q2*b (only hi needed for q3)
+    let q3 = r2h / bh;
+    let (sh, sl) = quick_two_sum(q1, q2);
+    df_add(sh, sl, q3, f32::new(0.0))
+}
+
+#[cube(launch)]
+pub fn df64_binop(lhs: &Array<f32>, rhs: &Array<f32>, out: &mut Array<f32>, #[comptime] op: u32) {
+    let i = ABSOLUTE_POS;
+    let n = out.len() / 2;
+    if i < n {
+        let llen = lhs.len() / 2;
+        let rlen = rhs.len() / 2;
+        let li = (i % llen) * 2;
+        let ri = (i % rlen) * 2;
+        let ah = lhs[li];
+        let al = lhs[li + 1];
+        let bh = rhs[ri];
+        let bl = rhs[ri + 1];
+
+        let mut rh = f32::new(0.0);
+        let mut rl = f32::new(0.0);
+        if comptime![op == OP_ADD] {
+            let (h, l) = df_add(ah, al, bh, bl);
+            rh = h;
+            rl = l;
+        } else if comptime![op == OP_SUB] {
+            let (h, l) = df_add(ah, al, -bh, -bl);
+            rh = h;
+            rl = l;
+        } else if comptime![op == OP_MUL] {
+            let (h, l) = df_mul(ah, al, bh, bl);
+            rh = h;
+            rl = l;
+        } else if comptime![op == OP_DIV] {
+            let (h, l) = df_div(ah, al, bh, bl);
+            rh = h;
+            rl = l;
+        } else {
+            // comparisons: sign of the normalized difference a − b (hi decides)
+            let (dh, _dl) = df_add(ah, al, -bh, -bl);
+            let zero = f32::new(0.0);
+            if comptime![op == OP_LT] {
+                rh = f32::cast_from(dh < zero);
+            } else if comptime![op == OP_GT] {
+                rh = f32::cast_from(dh > zero);
+            } else if comptime![op == OP_LE] {
+                rh = f32::cast_from(dh <= zero);
+            } else if comptime![op == OP_GE] {
+                rh = f32::cast_from(dh >= zero);
+            } else if comptime![op == OP_EQ] {
+                rh = f32::cast_from(dh == zero);
+            } else if comptime![op == OP_NE] {
+                rh = f32::cast_from(dh != zero);
+            }
+        }
+        out[i * 2] = rh;
+        out[i * 2 + 1] = rl;
+    }
+}
+
+#[cube(launch)]
+pub fn df64_unary(x: &Array<f32>, out: &mut Array<f32>, #[comptime] op: u32) {
+    let i = ABSOLUTE_POS;
+    let n = out.len() / 2;
+    if i < n {
+        let h = x[i * 2];
+        let l = x[i * 2 + 1];
+        let mut rh = h;
+        let mut rl = l;
+        if comptime![op == UN_NEG] {
+            rh = -h;
+            rl = -l;
+        } else if comptime![op == UN_ABS] {
+            if h < f32::new(0.0) {
+                rh = -h;
+                rl = -l;
+            }
+        }
+        out[i * 2] = rh;
+        out[i * 2 + 1] = rl;
+    }
+}

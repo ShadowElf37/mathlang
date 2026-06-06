@@ -32,9 +32,18 @@ the original, which was f32-only and block-scoped).
 **Precision (`!prec f32|df64|f64`, `!backend cpu|wgpu|cuda|hip`):**
 * `f64` — native on cpu/cuda/hip. `[1.0]+[1e-10]` → `[1.0000000001]`.
 * `f32` — universal. On wgpu the same op → `[1]` (1e-10 below the ULP).
-* `df64` — double-single (~16 digits) stored as `[hi,lo]` f32 pairs; **storage/
-  round-trip works on every backend including wgpu/Metal** (which has no f64).
-  Arithmetic kernels (TwoSum/TwoProd) are staged — see `compute/kernels.rs`.
+* `df64` — double-single (~16 digits), each value an unevaluated `(hi, lo)` f32
+  pair. Arithmetic uses error-free transforms (TwoSum, Dekker TwoProd) in
+  `compute/kernels.rs`. `[1.0]+[1e-10]` → `[1.0000000001]`, `[1.0]/[3.0]` →
+  `[0.33333333333333304]` — full df64 on the **IEEE backends (cpu/cuda/hip)**.
+  This is the win on **consumer CUDA/AMD**, where native f64 is throttled (1/32
+  rate) but f32-based df64 runs near f32 speed.
+  * **wgpu/Metal caveat:** df64 *storage/round-trip* works, but df64 *arithmetic*
+    is **gated off** there — the Metal/Vulkan driver's fast-math reassociates
+    `b-(s-a)` and collapses the error term to ~f32. Rather than return a wrong
+    answer, df64 ops error on wgpu (`!prec f32` for honest f32, or use cpu/cuda/hip).
+  * Still staged everywhere: df64 `pow` and transcendentals (exp/ln/sin/…) — they
+    need range-reduced double-single series.
 
 Switching to wgpu auto-downgrades f64→f32; `!prec f64` on wgpu is rejected.
 
