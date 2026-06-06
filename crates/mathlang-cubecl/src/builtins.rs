@@ -3,15 +3,27 @@
 //! builtins are deferred to later phases.
 
 use crate::ast::Op;
+use crate::compute;
 use crate::interp::{binop_val, Env};
 use crate::value::{fmt_val, make_complex, to_complex, Val};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-// `_env` is unused this phase (higher-order forms live in the interpreter), but the
-// signature is fixed so later phases can dispatch tensor/compute builtins through it.
-pub fn eval_builtin(name: &str, args: Vec<Val>, _env: &Env) -> Result<Val, String> {
+pub fn eval_builtin(name: &str, args: Vec<Val>, env: &Env) -> Result<Val, String> {
+    // Tensor fast-paths: a unary math builtin applied to a tensor runs on the
+    // compute path. Constructors build tensors on the active target.
+    if args.len() == 1 {
+        if let Val::Tensor(t) = &args[0] {
+            if let Some(code) = unary_tensor_code(name) {
+                return compute::unary(env.target, code, t).map(Val::Tensor);
+            }
+        }
+    }
+    if let Some(r) = tensor_constructor(name, &args, env) {
+        return r;
+    }
+
     match name {
         // ── complex-capable unary ──────────────────────────────────────────────
         "abs" => unary(args, name, |v| {
@@ -87,7 +99,7 @@ pub fn eval_builtin(name: &str, args: Vec<Val>, _env: &Env) -> Result<Val, Strin
         }
 
         // ── binary numeric ─────────────────────────────────────────────────────
-        "pow" => { let (a, b) = two(args, name)?; binop_val(a, &Op::Pow, b) }
+        "pow" => { let (a, b) = two(args, name)?; binop_val(a, &Op::Pow, b, env.target) }
         "atan2" => { let (y, x) = two_nums(args, name)?; Ok(Val::Num(y.atan2(x))) }
         "hypot" => { let (a, b) = two_nums(args, name)?; Ok(Val::Num(a.hypot(b))) }
         "gcd" => { let (a, b) = two_nums(args, name)?; Ok(Val::Num(gcd(a.abs() as u64, b.abs() as u64) as f64)) }
@@ -104,12 +116,12 @@ pub fn eval_builtin(name: &str, args: Vec<Val>, _env: &Env) -> Result<Val, Strin
         "max" => Ok(Val::Num(num_leaves(args, name)?.into_iter().fold(f64::NEG_INFINITY, f64::max))),
 
         // ── comparison functions (reuse the operator semantics) ────────────────
-        "lt" => cmp(args, name, Op::Lt),
-        "leq" => cmp(args, name, Op::LtEq),
-        "gt" => cmp(args, name, Op::Gt),
-        "geq" => cmp(args, name, Op::GtEq),
-        "eq" => cmp(args, name, Op::Eq),
-        "neq" => cmp(args, name, Op::Ne),
+        "lt" => cmp(args, name, Op::Lt, env),
+        "leq" => cmp(args, name, Op::LtEq, env),
+        "gt" => cmp(args, name, Op::Gt, env),
+        "geq" => cmp(args, name, Op::GtEq, env),
+        "eq" => cmp(args, name, Op::Eq, env),
+        "neq" => cmp(args, name, Op::Ne, env),
 
         // ── higher-order combinators ───────────────────────────────────────────
         "compose" => {
@@ -143,7 +155,8 @@ pub fn eval_builtin(name: &str, args: Vec<Val>, _env: &Env) -> Result<Val, Strin
             let v = one(args, name)?;
             match v {
                 Val::Tuple(items) => Ok(Val::Num(items.len() as f64)),
-                other => Err(format!("{name}: expected a tuple (tensors in Phase 2), got {}", fmt_val(&other))),
+                Val::Tensor(t) => Ok(Val::Num(*t.shape.first().unwrap_or(&0) as f64)),
+                other => Err(format!("{name}: expected a tuple or tensor, got {}", fmt_val(&other))),
             }
         }
         "cell" => Ok(Val::Cell(Arc::new(RefCell::new(one(args, name)?)))),
@@ -211,9 +224,118 @@ fn real_unary(args: Vec<Val>, name: &str, f: impl Fn(f64) -> f64) -> Result<Val,
     })
 }
 
-fn cmp(args: Vec<Val>, name: &str, op: Op) -> Result<Val, String> {
+fn cmp(args: Vec<Val>, name: &str, op: Op, env: &Env) -> Result<Val, String> {
     let (a, b) = two(args, name)?;
-    binop_val(a, &op, b)
+    binop_val(a, &op, b, env.target)
+}
+
+/// Map a unary-math builtin name to a compute unary op code (tensor fast-path).
+fn unary_tensor_code(name: &str) -> Option<u32> {
+    Some(match name {
+        "abs" => compute::UN_ABS,
+        "exp" => compute::UN_EXP,
+        "ln" => compute::UN_LN,
+        "sqrt" => compute::UN_SQRT,
+        "sin" => compute::UN_SIN,
+        "cos" => compute::UN_COS,
+        "tan" => compute::UN_TAN,
+        "asin" => compute::UN_ASIN,
+        "acos" => compute::UN_ACOS,
+        "atan" => compute::UN_ATAN,
+        "sinh" => compute::UN_SINH,
+        "cosh" => compute::UN_COSH,
+        "tanh" => compute::UN_TANH,
+        "trunc" => compute::UN_TRUNC,
+        "deg" => compute::UN_DEG,
+        "rad" => compute::UN_RAD,
+        _ => return None,
+    })
+}
+
+/// Tensor constructors and shape queries. Returns `None` if `name` isn't one,
+/// so the main match handles it.
+fn tensor_constructor(name: &str, args: &[Val], env: &Env) -> Option<Result<Val, String>> {
+    let dims = |args: &[Val]| -> Result<Vec<usize>, String> {
+        args.iter().map(|v| Ok(v.clone().num(name)? as usize)).collect()
+    };
+    let upload = |data: Vec<f64>, shape: Vec<usize>| compute::upload(env.target, &data, shape).map(Val::Tensor);
+    Some(match name {
+        "zeros" => match dims(args) {
+            Ok(shape) => upload(vec![0.0; shape.iter().product()], shape),
+            Err(e) => Err(e),
+        },
+        "ones" => match dims(args) {
+            Ok(shape) => upload(vec![1.0; shape.iter().product()], shape),
+            Err(e) => Err(e),
+        },
+        "eye" => {
+            if args.len() != 1 {
+                return Some(Err("eye(n) expects 1 arg".into()));
+            }
+            match args[0].clone().num(name) {
+                Ok(nf) => {
+                    let n = nf as usize;
+                    let mut d = vec![0.0; n * n];
+                    for i in 0..n {
+                        d[i * n + i] = 1.0;
+                    }
+                    upload(d, vec![n, n])
+                }
+                Err(e) => Err(e),
+            }
+        }
+        "linspace" => {
+            if args.len() != 3 {
+                return Some(Err("linspace(a, b, n) expects 3 args".into()));
+            }
+            let a = match args[0].clone().num(name) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let b = match args[1].clone().num(name) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let n = match args[2].clone().num(name) { Ok(v) => v as usize, Err(e) => return Some(Err(e)) };
+            let data: Vec<f64> = if n <= 1 {
+                vec![a; n]
+            } else {
+                (0..n).map(|i| a + (b - a) * i as f64 / (n - 1) as f64).collect()
+            };
+            upload(data, vec![n])
+        }
+        "range" => {
+            // exclusive end, matching the original `range(a, b)` builtin
+            if args.len() != 2 {
+                return Some(Err("range(a, b) expects 2 args".into()));
+            }
+            let a = match args[0].clone().num(name) { Ok(v) => v as i64, Err(e) => return Some(Err(e)) };
+            let b = match args[1].clone().num(name) { Ok(v) => v as i64, Err(e) => return Some(Err(e)) };
+            let data: Vec<f64> = (a..b).map(|n| n as f64).collect();
+            let n = data.len();
+            upload(data, vec![n])
+        }
+        "shape" => match one_ref(args, name) {
+            Ok(Val::Tensor(t)) => {
+                let s: Vec<f64> = t.shape.iter().map(|&d| d as f64).collect();
+                let n = s.len();
+                upload(s, vec![n])
+            }
+            Ok(other) => Err(format!("shape: expected a tensor, got {}", fmt_val(other))),
+            Err(e) => Err(e),
+        },
+        "rows" => shape_axis(args, name, 0),
+        "cols" => shape_axis(args, name, 1),
+        _ => return None,
+    })
+}
+
+fn one_ref<'a>(args: &'a [Val], name: &str) -> Result<&'a Val, String> {
+    if args.len() != 1 {
+        return Err(format!("{name} expects 1 arg, got {}", args.len()));
+    }
+    Ok(&args[0])
+}
+
+fn shape_axis(args: &[Val], name: &str, axis: usize) -> Result<Val, String> {
+    match one_ref(args, name)? {
+        Val::Tensor(t) => Ok(Val::Num(*t.shape.get(axis).unwrap_or(&1) as f64)),
+        other => Err(format!("{name}: expected a tensor, got {}", fmt_val(other))),
+    }
 }
 
 /// Flatten all numeric leaves of the args (so min/max accept scalars and tuples).

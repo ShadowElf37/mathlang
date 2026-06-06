@@ -22,6 +22,7 @@ mod lexer;
 mod parser;
 
 mod builtins;
+mod compute;
 mod interp;
 mod repl;
 mod spike;

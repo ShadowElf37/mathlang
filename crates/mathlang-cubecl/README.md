@@ -5,27 +5,48 @@ A clean-port prototype of [mathlang](../../README.md) on top of
 execution paths (tree-walk eval, bytecode VM loops, WGSL `GPU {}` block) into **one
 backend-generic compute path** with **native f64** where the hardware allows it.
 
-Status: **Phase 1b complete** — host interpreter + REPL over the scalar/complex/
-tuple/lambda core; Phase 0 spike proven. Tensors (the CubeCL compute path) are
-Phase 2.
-
-## What works now
+Status: **Phase 2 complete** — tensors run on the CubeCL compute path with a
+three-mode precision model (f32 / df64 / f64) threaded through from the start.
 
 ```sh
 mc                 # REPL
 mc 'pi * 2^2'      # one-liner
+mc '[1,2,3] + [4,5,6]'
 mc --spike         # f64-vs-f32 backend precision demo
 ```
 
-Scalars, complex (`i^2`, `exp(i*pi)`, `sqrt(-1)`, `ln(-1)`, `abs/conj/...`), tuple
-trees with broadcasting, functions/lambdas/closures/recursion, `if`, comparisons,
-`sum`/`prod`/`map`/`filter`/`reduce`/`iterate`, `compose`/`partial`, `cell`/`get`/
-`set`, and the scalar math builtins — all evaluated **host-side in f64** (instant,
-no kernel: the low-latency invariant). REPL commands: `!help !backend !type !defs
-!clear !print !spike !version !q`.
+## What works now
 
-Tensor-producing syntax (`[...]`, matrix literals, `range`) and tensor/linalg/fft/
-field/pic/calculus builtins error with a clear "later phase" message until Phase 2.
+**Host core (instant, no kernel — the low-latency invariant):** scalars, complex
+(`i^2`, `exp(i*pi)`, `sqrt(-1)`, `abs/conj/...`), tuple trees with broadcasting,
+functions/lambdas/closures/recursion, `if`, comparisons, `sum`/`prod`/`map`/
+`filter`/`reduce`/`iterate`, `compose`/`partial`, `cell`/`get`/`set`, scalar math.
+
+**Tensors (the compute path):** `[a,b,c]`, matrices `(1,2; 3,4)`, `a..b`,
+`zeros`/`ones`/`eye`/`linspace`/`range`; elementwise `+ - * / ^` and comparisons
+with scalar↔tensor broadcasting; unary math (`sin`/`exp`/`sqrt`/...); `shape`/
+`rows`/`cols`/`len`; `sum`/`prod` (host reduce for now). Every tensor op runs on
+the selected backend/precision — **no `GPU {}` block needed** (an improvement over
+the original, which was f32-only and block-scoped).
+
+**Precision (`!prec f32|df64|f64`, `!backend cpu|wgpu|cuda|hip`):**
+* `f64` — native on cpu/cuda/hip. `[1.0]+[1e-10]` → `[1.0000000001]`.
+* `f32` — universal. On wgpu the same op → `[1]` (1e-10 below the ULP).
+* `df64` — double-single (~16 digits) stored as `[hi,lo]` f32 pairs; **storage/
+  round-trip works on every backend including wgpu/Metal** (which has no f64).
+  Arithmetic kernels (TwoSum/TwoProd) are staged — see `compute/kernels.rs`.
+
+Switching to wgpu auto-downgrades f64→f32; `!prec f64` on wgpu is rejected.
+
+REPL commands: `!help !backend !prec !type !defs !clear !print !spike !version !q`.
+
+Deferred to later phases: tensor indexing/slicing, matmul/linalg, on-device
+reductions, fft, fields/forms, pic, calculus, file I/O, animation.
+
+## Tests
+
+`bash crates/mathlang-cubecl/tests.sh` — scalar/complex/tuple core, tensor
+elementwise/unary/constructors, and the cross-backend precision behaviour.
 
 ## Why
 

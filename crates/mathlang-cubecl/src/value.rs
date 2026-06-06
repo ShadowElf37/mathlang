@@ -11,6 +11,7 @@
 //! `fmt_f`/`fmt_val`, etc.
 
 use crate::ast::{Expr, TypeHint};
+use crate::compute::{self, TensorVal};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -37,6 +38,9 @@ pub enum Val {
         sig: Arc<FnSig>,
     },
     Builtin(String),
+    /// A device-resident real tensor (the CubeCL compute path). Complex tensors
+    /// arrive in Phase 5.
+    Tensor(TensorVal),
     /// A tuple tree — heterogeneous leaves; ops broadcast over it.
     Tuple(Vec<Val>),
     /// Shared mutable container (identity semantics on clone).
@@ -62,6 +66,7 @@ impl Val {
             Val::Complex(..) => Err(format!("{ctx}: expected a real number, got complex")),
             Val::Fn { .. } => Err(format!("{ctx}: expected a number, got a function")),
             Val::Builtin(n) => Err(format!("{ctx}: expected a number, got builtin '{n}'")),
+            Val::Tensor(..) => Err(format!("{ctx}: expected a number, got a tensor")),
             Val::Tuple(..) => Err(format!("{ctx}: expected a number, got a tuple")),
             Val::Cell(..) => Err(format!("{ctx}: expected a number, got a cell (use get())")),
             Val::Namespace(..) => Err(format!("{ctx}: expected a number, got a namespace")),
@@ -144,5 +149,55 @@ pub fn fmt_val(v: &Val) -> String {
         Val::Tuple(items) => {
             format!("({})", items.iter().map(fmt_val).collect::<Vec<_>>().join(", "))
         }
+        Val::Tensor(t) => fmt_tensor(t),
     }
+}
+
+/// Format a device tensor by pulling it to the host. 1-D → `[…]`, 2-D → a boxed
+/// matrix, higher rank → a shape header plus the flat data.
+fn fmt_tensor(t: &TensorVal) -> String {
+    let data = match compute::download(t) {
+        Ok(d) => d,
+        Err(e) => return format!("<tensor read error: {e}>"),
+    };
+    match t.shape.as_slice() {
+        [] | [_] => format!("[{}]", data.iter().map(|x| fmt_f(*x)).collect::<Vec<_>>().join(", ")),
+        [r, c] => fmt_mat(&data, *r, *c),
+        shape => {
+            let dims = shape.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("×");
+            let body = data.iter().map(|x| fmt_f(*x)).collect::<Vec<_>>().join(", ");
+            format!("tensor[{dims}] [{body}]")
+        }
+    }
+}
+
+/// Boxed 2-D matrix display (⎡⎢⎣ … ⎤⎥⎦), right-aligned columns.
+fn fmt_mat(data: &[f64], r: usize, c: usize) -> String {
+    let cells: Vec<Vec<String>> =
+        (0..r).map(|i| (0..c).map(|j| fmt_f(data[i * c + j])).collect()).collect();
+    let widths: Vec<usize> =
+        (0..c).map(|j| cells.iter().map(|row| row[j].chars().count()).max().unwrap_or(0)).collect();
+    cells
+        .into_iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let content = row
+                .into_iter()
+                .zip(&widths)
+                .map(|(s, &w)| format!("{}{}", " ".repeat(w - s.chars().count()), s))
+                .collect::<Vec<_>>()
+                .join("  ");
+            let (l, rr) = if r == 1 {
+                ('\u{23A1}', '\u{23A4}') // single row uses top brackets
+            } else if i == 0 {
+                ('\u{23A1}', '\u{23A4}')
+            } else if i == r - 1 {
+                ('\u{23A3}', '\u{23A6}')
+            } else {
+                ('\u{23A2}', '\u{23A5}')
+            };
+            format!("{l} {content} {rr}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }

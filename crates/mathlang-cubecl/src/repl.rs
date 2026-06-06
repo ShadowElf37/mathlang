@@ -3,6 +3,7 @@
 //! plain stdin for now — rustyline (history/highlighting) can be added later.
 
 use crate::ast::BlockStmt;
+use crate::compute::{Backend, Prec};
 use crate::interp::{define_into, eval, is_protected, Env};
 use crate::value::{fmt_val, Val};
 use crate::{lexer::Lexer, parser::Parser};
@@ -12,79 +13,28 @@ use std::io::{self, BufRead, Write};
 const REPL_TUPLE_LIMIT: usize = 24;
 const REPL_TUPLE_PREVIEW: usize = 8;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Backend {
-    Cpu,
-    Wgpu,
-    Cuda,
-    Hip,
-}
-
-impl Backend {
-    pub fn name(self) -> &'static str {
-        match self {
-            Backend::Cpu => "cpu",
-            Backend::Wgpu => "wgpu",
-            Backend::Cuda => "cuda",
-            Backend::Hip => "hip",
-        }
-    }
-
-    fn parse(s: &str) -> Option<Backend> {
-        match s {
-            "cpu" => Some(Backend::Cpu),
-            "wgpu" => Some(Backend::Wgpu),
-            "cuda" => Some(Backend::Cuda),
-            "hip" => Some(Backend::Hip),
-            _ => None,
-        }
-    }
-
-    fn compiled_in(self) -> bool {
-        match self {
-            Backend::Cpu => cfg!(feature = "cpu"),
-            Backend::Wgpu => cfg!(feature = "wgpu"),
-            Backend::Cuda => cfg!(feature = "cuda"),
-            Backend::Hip => cfg!(feature = "hip"),
-        }
-    }
-
-    pub fn available() -> Vec<Backend> {
-        [Backend::Cpu, Backend::Wgpu, Backend::Cuda, Backend::Hip]
-            .into_iter()
-            .filter(|b| b.compiled_in())
-            .collect()
-    }
-
-    /// Default backend: $MATHLANG_BACKEND if valid+compiled, else the first
-    /// available (cpu preferred for native f64).
-    pub fn default_choice() -> Backend {
-        if let Ok(s) = std::env::var("MATHLANG_BACKEND") {
-            if let Some(b) = Backend::parse(&s) {
-                if b.compiled_in() {
-                    return b;
-                }
-            }
-        }
-        Backend::available().into_iter().next().unwrap_or(Backend::Cpu)
-    }
-}
-
 pub struct Repl {
     pub env: Env,
-    pub backend: Backend,
 }
 
 impl Repl {
     pub fn new() -> Self {
-        Repl { env: Env::new(), backend: Backend::default_choice() }
+        Repl { env: Env::new() }
+    }
+
+    fn target_line(&self) -> String {
+        format!(
+            "backend: {} · prec: {}   (backends: {})",
+            self.env.target.backend.name(),
+            self.env.target.prec.name(),
+            Backend::available().iter().map(|b| b.name()).collect::<Vec<_>>().join(", "),
+        )
     }
 
     /// Run the interactive loop.
     pub fn run(&mut self) {
-        println!("mc — mathlang-cubecl prototype (Phase 1b: host interpreter)");
-        println!("backend: {}   (available: {})", self.backend.name(),
-            Backend::available().iter().map(|b| b.name()).collect::<Vec<_>>().join(", "));
+        println!("mc — mathlang-cubecl prototype (Phase 2: tensors on the compute path)");
+        println!("{}", self.target_line());
         println!("type !help for commands, !q to quit\n");
 
         let stdin = io::stdin();
@@ -165,6 +115,7 @@ impl Repl {
                 println!("cleared user definitions");
             }
             "!backend" => self.cmd_backend(rest),
+            "!prec" => self.cmd_prec(rest),
             "!type" => self.cmd_type(rest),
             "!print" => self.cmd_print(rest),
             "!spike" => crate::spike::run(),
@@ -175,17 +126,42 @@ impl Repl {
 
     fn cmd_backend(&mut self, rest: &str) {
         if rest.is_empty() {
-            println!("backend: {}   (available: {})", self.backend.name(),
-                Backend::available().iter().map(|b| b.name()).collect::<Vec<_>>().join(", "));
+            println!("{}", self.target_line());
             return;
         }
         match Backend::parse(rest) {
             Some(b) if b.compiled_in() => {
-                self.backend = b;
-                println!("backend set to {}", b.name());
+                self.env.target.backend = b;
+                // If the current precision isn't supported here, drop to the
+                // backend's default (e.g. switching to wgpu downgrades f64 → f32).
+                if !b.supports(self.env.target.prec) {
+                    let p = b.default_prec();
+                    println!("note: {} has no {}; switching prec to {}", b.name(), self.env.target.prec.name(), p.name());
+                    self.env.target.prec = p;
+                }
+                println!("{}", self.target_line());
             }
             Some(b) => eprintln!("backend '{}' is not compiled in (rebuild with --features {})", b.name(), b.name()),
             None => eprintln!("unknown backend '{rest}' (cpu|wgpu|cuda|hip)"),
+        }
+    }
+
+    fn cmd_prec(&mut self, rest: &str) {
+        if rest.is_empty() {
+            println!("{}", self.target_line());
+            return;
+        }
+        match Prec::parse(rest) {
+            Some(p) if self.env.target.backend.supports(p) => {
+                self.env.target.prec = p;
+                println!("{}", self.target_line());
+            }
+            Some(p) => eprintln!(
+                "{} has no native {} (try f32 or df64)",
+                self.env.target.backend.name(),
+                p.name()
+            ),
+            None => eprintln!("unknown precision '{rest}' (f32|df64|f64)"),
         }
     }
 
@@ -300,6 +276,10 @@ fn type_of(v: &Val) -> String {
     match v {
         Val::Num(_) => "real".into(),
         Val::Complex(..) => "complex".into(),
+        Val::Tensor(t) => {
+            let dims = t.shape.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("×");
+            format!("real tensor [{dims}] ({})", t.prec.name())
+        }
         Val::Tuple(_) => "tuple".into(),
         Val::Cell(_) => "cell".into(),
         Val::Namespace(_) => "namespace".into(),
@@ -322,16 +302,21 @@ fn type_of(v: &Val) -> String {
 fn print_help() {
     println!(
         "\
-mc — mathlang-cubecl prototype (Phase 1b)
+mc — mathlang-cubecl prototype (Phase 2)
 
 Scalars, complex, tuples, lambdas, closures, blocks, if, comparisons.
-Builtins: trig/algebra/complex math, min/max/pow/hypot/gcd/lcm/ncr,
-          lt/leq/gt/geq/eq/neq, map/filter/reduce/compose/partial,
-          sum/prod (tuple or f,lo,hi), iterate, len, cell/get/set.
+Tensors run on the compute path: [a,b,c], matrices (1,2; 3,4), a..b,
+zeros/ones/eye/linspace/range; elementwise + - * / ^ and comparisons,
+broadcasting a scalar against a tensor; unary math (sin/exp/sqrt/...);
+shape/rows/cols/len; sum/prod (host reduce for now). Precision is f32,
+df64 (double-single, storage staged), or f64 — per backend.
+Other builtins: min/max/pow/hypot/gcd/lcm/ncr, lt/leq/gt/geq/eq/neq,
+map/filter/reduce/compose/partial, iterate, cell/get/set.
 
 Commands:
   !help              this text
-  !backend [name]    show or set the compute backend (cpu|wgpu|cuda|hip)
+  !backend [name]    show or set the backend (cpu|wgpu|cuda|hip)
+  !prec [name]       show or set precision (f32|df64|f64)
   !type <expr>       show the type of an expression
   !defs              list user definitions
   !clear             clear user definitions
@@ -340,7 +325,7 @@ Commands:
   !version           version
   !q / !quit         quit
 
-Not yet present (later phases): tensors/[...]/matrices, linalg, fft,
-fields/forms, pic, calculus, file I/O, animation."
+Not yet present (later phases): tensor indexing/slicing, matmul/linalg,
+reductions on device, fft, fields/forms, pic, calculus, file I/O, animation."
     );
 }

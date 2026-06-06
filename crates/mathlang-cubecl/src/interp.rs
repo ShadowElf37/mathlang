@@ -10,6 +10,7 @@
 
 use crate::ast::{BlockStmt, Def, Expr, Op};
 use crate::builtins::eval_builtin;
+use crate::compute::{self, Target, TensorVal};
 use crate::value::{fmt_val, int, make_complex, to_complex, FnSig, Val};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,6 +18,9 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct Env {
     pub vars: Arc<HashMap<String, Val>>,
+    /// The active compute target (backend × precision). Carried in the env so
+    /// builtins/operators reach it without a global; updated by the REPL.
+    pub target: Target,
 }
 
 impl Env {
@@ -35,7 +39,7 @@ impl Env {
         for name in BUILTINS {
             vars.insert((*name).into(), Val::Builtin((*name).into()));
         }
-        Self { vars: Arc::new(vars) }
+        Self { vars: Arc::new(vars), target: Target::default_target() }
     }
 }
 
@@ -56,6 +60,8 @@ pub const BUILTINS: &[&str] = &[
     "map", "filter", "reduce", "compose", "partial",
     "sum", "prod", "iterate", "if",
     "len", "length", "cell", "get", "set",
+    // tensor constructors / shape (the compute path)
+    "zeros", "ones", "eye", "linspace", "range", "shape", "rows", "cols",
 ];
 
 pub fn is_protected(name: &str) -> bool {
@@ -81,12 +87,12 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
             let vals = exprs.iter().map(|e| eval(e, env)).collect::<Result<Vec<_>, _>>()?;
             Ok(Val::Tuple(vals))
         }
-        Expr::Neg(e) => neg_val(eval(e, env)?),
+        Expr::Neg(e) => neg_val(eval(e, env)?, env.target),
         Expr::Not(e) => not_val(eval(e, env)?),
         Expr::BinOp(l, op, r) => {
             let lv = eval(l, env)?;
             let rv = eval(r, env)?;
-            binop_val(lv, op, rv)
+            binop_val(lv, op, rv, env.target)
         }
         Expr::Block(stmts) => eval_block(stmts, env),
         Expr::Member(base, field) => {
@@ -111,9 +117,47 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
             }
         }
         Expr::Apply(f_expr, arg_exprs) => eval_apply(f_expr, arg_exprs, env),
-        // Tensor-producing constructs — deferred to Phase 2 (the compute path).
-        Expr::Array(_) | Expr::TensorLit(_) | Expr::Range(..) => {
-            Err("tensors are not in the prototype yet (Phase 2: the CubeCL compute path)".into())
+        Expr::Array(exprs) => {
+            // [a, b, c] — a 1-D real tensor, uploaded to the active target.
+            let mut data = Vec::with_capacity(exprs.len());
+            for e in exprs {
+                match eval(e, env)? {
+                    Val::Num(x) => data.push(x),
+                    Val::Complex(..) => return Err("complex tensors are Phase 5; [] needs real elements".into()),
+                    other => return Err(format!("[] requires numeric elements, got {}", fmt_val(&other))),
+                }
+            }
+            let n = data.len();
+            compute::upload(env.target, &data, vec![n]).map(Val::Tensor)
+        }
+        Expr::TensorLit(rows) => {
+            // (1,2; 3,4) — a 2-D real tensor (row-major).
+            if rows.is_empty() {
+                return compute::upload(env.target, &[], vec![0, 0]).map(Val::Tensor);
+            }
+            let (r, c) = (rows.len(), rows[0].len());
+            let mut data = Vec::with_capacity(r * c);
+            for (ri, row) in rows.iter().enumerate() {
+                if row.len() != c {
+                    return Err(format!("matrix row {ri} has {} elements, expected {c}", row.len()));
+                }
+                for e in row {
+                    data.push(eval(e, env)?.num("matrix literal")?);
+                }
+            }
+            compute::upload(env.target, &data, vec![r, c]).map(Val::Tensor)
+        }
+        Expr::Range(start, end) => {
+            // `a..b` — inclusive integer range as a 1-D tensor (matches the original).
+            let a = eval(start, env)?.num("range")? as i64;
+            let b = eval(end, env)?.num("range")? as i64;
+            let data: Vec<f64> = if a <= b {
+                (a..=b).map(|n| n as f64).collect()
+            } else {
+                (b..=a).rev().map(|n| n as f64).collect()
+            };
+            let n = data.len();
+            compute::upload(env.target, &data, vec![n]).map(Val::Tensor)
         }
         Expr::Slice(..) => Err("slice expression can only appear inside T[…]".into()),
     }
@@ -249,6 +293,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
             }
             Err("tuple apply: expected a single index".into())
         }
+        Val::Tensor(..) => Err("tensors are not callable".into()),
         Val::Cell(..) => Err("cells are not callable (use get/set)".into()),
         Val::Namespace(..) => Err("namespaces are not callable (use ns.member)".into()),
     }
@@ -267,6 +312,7 @@ fn apply_num(s: f64, args: Vec<Val>) -> Result<Val, String> {
                     other => other,
                 }).collect(),
             )),
+            Val::Tensor(..) => Err("scale a tensor with `*` (e.g. 2 * T), not juxtaposition".into()),
             Val::Builtin(_) => Err("cannot scale a builtin function".into()),
             Val::Cell(..) => Err("cannot scale a cell (use get/set)".into()),
             Val::Namespace(..) => Err("cannot scale a namespace".into()),
@@ -299,7 +345,7 @@ fn apply_fn_direct(
 fn make_local(global: &Env, captured: &Arc<HashMap<String, Val>>) -> Env {
     let mut vars = (*global.vars).clone();
     vars.extend(captured.iter().map(|(k, v)| (k.clone(), v.clone())));
-    Env { vars: Arc::new(vars) }
+    Env { vars: Arc::new(vars), target: global.target }
 }
 
 fn compose_fns(f: Val, g: Val) -> Val {
@@ -315,7 +361,7 @@ fn compose_fns(f: Val, g: Val) -> Val {
 
 // ── Operators ─────────────────────────────────────────────────────────────────
 
-pub fn binop_val(lv: Val, op: &Op, rv: Val) -> Result<Val, String> {
+pub fn binop_val(lv: Val, op: &Op, rv: Val, target: Target) -> Result<Val, String> {
     if matches!((&lv, &rv), (Val::Tuple(_), _) | (_, Val::Tuple(_))) {
         if matches!(op, Op::Eq | Op::Ne) {
             if let (Val::Tuple(ls), Val::Tuple(rs)) = (&lv, &rv) {
@@ -323,30 +369,80 @@ pub fn binop_val(lv: Val, op: &Op, rv: Val) -> Result<Val, String> {
                 return Ok(Val::Num(if matches!(op, Op::Eq) == eq { 1.0 } else { 0.0 }));
             }
         }
-        return binop_tuple(lv, op, rv);
+        return binop_tuple(lv, op, rv, target);
+    }
+    if matches!((&lv, &rv), (Val::Tensor(_), _) | (_, Val::Tensor(_))) {
+        return tensor_binop(lv, op, rv, target);
     }
     scalar_binop(lv, op, rv)
 }
 
-fn binop_tuple(lv: Val, op: &Op, rv: Val) -> Result<Val, String> {
+fn binop_tuple(lv: Val, op: &Op, rv: Val, target: Target) -> Result<Val, String> {
     match (lv, rv) {
         (Val::Tuple(ls), Val::Tuple(rs)) => {
             if ls.len() != rs.len() {
                 return Err(format!("tuple op tuple: length mismatch ({} vs {})", ls.len(), rs.len()));
             }
-            let out: Result<Vec<Val>, _> = ls.into_iter().zip(rs).map(|(l, r)| binop_val(l, op, r)).collect();
+            let out: Result<Vec<Val>, _> = ls.into_iter().zip(rs).map(|(l, r)| binop_val(l, op, r, target)).collect();
             Ok(Val::Tuple(out?))
         }
         (Val::Tuple(ls), leaf) => {
-            let out: Result<Vec<Val>, _> = ls.into_iter().map(|l| binop_val(l, op, leaf.clone())).collect();
+            let out: Result<Vec<Val>, _> = ls.into_iter().map(|l| binop_val(l, op, leaf.clone(), target)).collect();
             Ok(Val::Tuple(out?))
         }
         (leaf, Val::Tuple(rs)) => {
-            let out: Result<Vec<Val>, _> = rs.into_iter().map(|r| binop_val(leaf.clone(), op, r)).collect();
+            let out: Result<Vec<Val>, _> = rs.into_iter().map(|r| binop_val(leaf.clone(), op, r, target)).collect();
             Ok(Val::Tuple(out?))
         }
         _ => unreachable!(),
     }
+}
+
+/// Map an AST operator to a compute op code, or `None` if not yet on the device.
+pub fn op_code(op: &Op) -> Option<u32> {
+    Some(match op {
+        Op::Add => compute::OP_ADD,
+        Op::Sub => compute::OP_SUB,
+        Op::Mul => compute::OP_MUL,
+        Op::Div => compute::OP_DIV,
+        Op::Pow => compute::OP_POW,
+        Op::Lt => compute::OP_LT,
+        Op::Gt => compute::OP_GT,
+        Op::LtEq => compute::OP_LE,
+        Op::GtEq => compute::OP_GE,
+        Op::Eq => compute::OP_EQ,
+        Op::Ne => compute::OP_NE,
+        Op::FloorDiv | Op::Rem | Op::And | Op::Or => return None,
+    })
+}
+
+/// Move/clone a tensor onto `target` (re-materialising if backend/precision differ).
+pub fn ensure_on(t: TensorVal, target: Target) -> Result<TensorVal, String> {
+    if t.backend == target.backend && t.prec == target.prec {
+        Ok(t)
+    } else {
+        let host = compute::download(&t)?;
+        compute::upload(target, &host, t.shape.clone())
+    }
+}
+
+/// Coerce any scalar/tensor operand to a tensor on `target` (scalars → length-1,
+/// which the kernel broadcasts).
+fn to_tensor_on(v: Val, target: Target) -> Result<TensorVal, String> {
+    match v {
+        Val::Tensor(t) => ensure_on(t, target),
+        Val::Num(x) => compute::upload(target, &[x], vec![1]),
+        Val::Complex(..) => Err("complex tensors are Phase 5".into()),
+        other => Err(format!("cannot combine {} with a tensor", fmt_val(&other))),
+    }
+}
+
+fn tensor_binop(lv: Val, op: &Op, rv: Val, target: Target) -> Result<Val, String> {
+    let code = op_code(op)
+        .ok_or_else(|| format!("operator `{op:?}` is not available on tensors yet"))?;
+    let a = to_tensor_on(lv, target)?;
+    let b = to_tensor_on(rv, target)?;
+    compute::binop(target, code, &a, &b).map(Val::Tensor)
 }
 
 fn tuple_scalar_eq(ls: &[Val], rs: &[Val]) -> bool {
@@ -408,11 +504,14 @@ pub fn complex_pow(la: f64, lb: f64, ra: f64, rb: f64) -> Val {
     make_complex(mag * new_im.cos(), mag * new_im.sin())
 }
 
-pub fn neg_val(v: Val) -> Result<Val, String> {
+pub fn neg_val(v: Val, target: Target) -> Result<Val, String> {
     match v {
         Val::Num(n) => Ok(Val::Num(-n)),
         Val::Complex(a, b) => Ok(make_complex(-a, -b)),
-        Val::Tuple(items) => Ok(Val::Tuple(items.into_iter().map(neg_val).collect::<Result<Vec<_>, _>>()?)),
+        Val::Tuple(items) => {
+            Ok(Val::Tuple(items.into_iter().map(|x| neg_val(x, target)).collect::<Result<Vec<_>, _>>()?))
+        }
+        Val::Tensor(t) => compute::unary(target, compute::UN_NEG, &t).map(Val::Tensor),
         other => Err(format!("unary minus: expected a number, got {}", fmt_val(&other))),
     }
 }
@@ -451,9 +550,16 @@ pub fn norm_index(i: i64, len: usize, what: &str) -> Result<usize, String> {
 
 fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> {
     let label = if product { "prod" } else { "sum" };
-    // 1-arg: sum(tuple)
+    // 1-arg: sum(tuple) or sum(tensor)
     if args.len() == 1 {
         return match eval(&args[0], env)? {
+            // Interim: pull the tensor to the host and reduce in f64. A device
+            // reduction (compensated) lands in Phase 3.
+            Val::Tensor(t) => {
+                let data = compute::download(&t)?;
+                let acc = if product { data.iter().product::<f64>() } else { data.iter().sum::<f64>() };
+                Ok(Val::Num(acc))
+            }
             Val::Tuple(items) => {
                 let (mut acc_re, mut acc_im) = if product { (1.0, 0.0) } else { (0.0, 0.0) };
                 for v in items {
