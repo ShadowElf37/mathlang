@@ -3272,26 +3272,15 @@ fn pic_op(name: &str, args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut Ha
         (gdim, geom)
     };
     match name {
-        // pic.scatter(positions, weights, template [, kernel]) → field (template geom).
-        // Deposition needs an f32 atomic add (one particle touches several shared grid
-        // nodes); Metal/naga lacks the atomic compare-exchange that requires, so the
-        // deposit runs on the host via the exact CPU kernel and the result is uploaded.
-        // (The particle data is small; gather/gathergrad stay GPU-native.)
-        "scatter" => {
-            if args.len() < 3 || args.len() > 4 {
-                return Err("pic.scatter(positions, weights, template [, kernel]) expects 3 or 4 args".into());
-            }
-            let pos_v = to_val(ctx, &materialize(ctx, eval_gpu(&args[0], env, ctx, scope)?))?;
-            let w_v = to_val(ctx, &materialize(ctx, eval_gpu(&args[1], env, ctx, scope)?))?;
-            let tmpl_v = to_val(ctx, &materialize(ctx, eval_gpu(&args[2], env, ctx, scope)?))?;
-            if !matches!(tmpl_v, Val::Field(_)) { return Err("pic.scatter: template must be a field".into()); }
-            let mut vals = vec![pos_v, w_v, tmpl_v];
-            if let Some(k) = args.get(3) { vals.push(Val::Num(pic_kernel_order(Some(k), env, "pic.scatter")? as f64)); }
-            match crate::ns::pic::dispatch("scatter", vals, env)? {
-                Val::Field(f) => Ok(upload_field(ctx, &f)),
-                other => Err(format!("pic.scatter: expected a field result, got {}", fmt_val(&other))),
-            }
-        }
+        // pic.scatter(positions, weights, template [, kernel]) — NOT available in a
+        // GPU block. A parallel deposit needs an f32 atomic compare-exchange (many
+        // particles add into shared grid nodes), which Metal/naga does not implement.
+        // Rather than silently run it on the host, we error so it is transparent where
+        // the code runs: do the deposit on the CPU and capture the resulting field.
+        "scatter" => Err(
+            "GPU: pic.scatter (deposition) is not supported in a GPU block — it needs an \
+             f32 atomic add this GPU backend lacks. Run pic.scatter on the CPU (outside \
+             the block) and capture the field; pic.gather/pic.gathergrad are GPU-native".into()),
         // pic.gather(field, positions [, kernel]) → [P] or [P, ncomp].
         "gather" => {
             if args.len() < 2 || args.len() > 3 {

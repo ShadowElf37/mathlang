@@ -1941,9 +1941,10 @@ else
     run "gpu.pic.gather.1d.neumann" "F=field(tensor(i->1.0*i*i,16),(0),(16),forms.neumann); P=tensor(i->0.5+i*1.3, 10); round(sum(abs(GPU{pic.gather(F,P)}-pic.gather(F,P))),3)" "0"
     run "gpu.pic.gathergrad.cic" "$FF $PP round(sum(abs(GPU{pic.gathergrad(F,P)}-pic.gathergrad(F,P))),3)" "0"
     run "gpu.pic.gathergrad.tsc" "$FF $PP round(sum(abs(GPU{pic.gathergrad(F,P,pic.tsc)}-pic.gathergrad(F,P,pic.tsc))),3)" "0"
-    run "gpu.pic.scatter.cic"  "$TT $PP round(sum(abs(GPU{pic.scatter(P,W,tmpl)}-pic.scatter(P,W,tmpl))),3)" "0"
-    run "gpu.pic.scatter.tsc"  "$TT $PP round(sum(abs(GPU{pic.scatter(P,W,tmpl,pic.tsc)}-pic.scatter(P,W,tmpl,pic.tsc))),3)" "0"
-    run "gpu.pic.composed"     "$TT $PP round(sum(abs(GPU{pic.gather(pic.scatter(P,W,tmpl),P)}-pic.gather(pic.scatter(P,W,tmpl),P))),3)" "0"
+    # scatter (deposit) is NOT available in a GPU block (no silent host fallback) —
+    # deposit on the CPU, then capture/gather the field on the GPU.
+    run_err "gpu.pic.scatter.nohost" "$TT $PP GPU { pic.scatter(P,W,tmpl) }"
+    run "gpu.pic.scatter.then.gather" "$TT $PP rho=pic.scatter(P,W,tmpl); round(sum(abs(GPU{pic.gather(rho,P)}-pic.gather(rho,P))),3)" "0"
 fi
 
 # ── print summary ─────────────────────────────────────────────────────────────
