@@ -164,9 +164,14 @@ a host geometric object that bridge to device tensors via `field(…)`/`tensor(�
 
 ## Tests
 
-`bash crates/mathlang-cubecl/tests.sh` — scalar/complex/tuple core, tensor
-elementwise/unary/constructors, linear algebra + reductions, resident loops, and
-the cross-backend precision behaviour.
+```sh
+cargo test -p mathlang-cubecl          # 109 tests; 4 wgpu-hardware tests ignored
+cargo test -p mathlang-cubecl -- --ignored  # also run the wgpu hardware tests
+```
+
+Covers scalar/complex/tuple core, tensor ops, linear algebra, resident loops,
+fields & forms, spectral operators, calculus, and cross-backend precision.
+`tests.sh` is retained as a legacy reference but `cargo test` is canonical.
 
 ## Why
 
