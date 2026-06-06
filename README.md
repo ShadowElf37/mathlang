@@ -1336,6 +1336,7 @@ Currently supported inside a block:
 | Linear algebra | `matmul(A, B)` — 2D×2D, 2D×1D, 1D×2D, 1D×1D (dot); compensated inner accumulate |
 | Stencils | `shift(T,n,axis)`, `roll(T,n,axis)`, `ops.lap(T,dx[,bc])`, `ops.grad(T,dx,axis)`, `ops.div(V,dx)`, `ops.curl(V,dx)` (2-D) |
 | Spectral | `fft(T)`, `ifft(T)` (n-D DFT, all axes); `ops.poisson(rhs,dx)`, `ops.invlap(T,dx)`, `ops.specgrad(T,dx,axis)` — radix-2 Stockham FFT ([`src/gpu/fft.wgsl`](src/gpu/fft.wgsl)); transformed axes must be **power-of-two** (other sizes use the CPU) |
+| Complex | first-class complex tensors & scalars (imaginary unit `i`, `3+2i`, captured complex tensors): `+ - * / ^`, `re im abs arg conj`, `exp ln sqrt sin cos`, `sum`/`mean`; mixed real/complex promote (`min`/`max`/comparisons undefined on complex) |
 | Construction | `tensor((i,j) -> expr, m, n)` — built on the GPU in one kernel; the body may gather captured tensors (`T[i,j]`) |
 | Loops | `iterate(step, x0, n)`, `scan(step, x0, n)` |
 | Lambdas | bind a lambda/function and apply it: `f = x -> x*x; f(A)` (inlined; no recursion) |

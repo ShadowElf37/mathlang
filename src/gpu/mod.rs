@@ -39,14 +39,16 @@ enum GpuVal {
         len:   usize,
     },
     /// A GPU-resident complex tensor: interleaved (re, im) pairs as `vec2<f32>`,
-    /// `buf` holding `2*len` f32. Produced by `fft`/`ifft`; it can only be the
-    /// final result of a block (downloaded to a `ComplexTensor`) — combining a
-    /// complex value with further GPU ops is not supported.
+    /// `buf` holding `2*len` f32. Produced by `fft`/`ifft`, complex captures, and
+    /// complex arithmetic; downloaded as a `ComplexTensor`.
     Complex {
         buf:   Rc<wgpu::Buffer>,
         shape: Vec<usize>,
         len:   usize,
     },
+    /// A complex scalar (e.g. the imaginary unit `i`, or `2 + 3*i`). Carried on the
+    /// host like `Scalar` and baked into kernels as a `vec2<f32>` constant.
+    CScalar(f64, f64),
     /// A tuple of values (e.g. coupled fields `(U, V)` carried as a single
     /// `iterate`/`scan` state). Each element is itself a `GpuVal`.
     Tuple(Vec<GpuVal>),
@@ -84,7 +86,9 @@ fn materialize(ctx: &GpuContext, v: GpuVal) -> GpuVal {
 fn lift_val(ctx: &GpuContext, v: &Val) -> Result<GpuVal, String> {
     match v {
         Val::Num(f) => Ok(GpuVal::Scalar(*f)),
+        Val::Complex(r, i) => Ok(GpuVal::CScalar(*r, *i)),
         Val::Tensor { data, shape } => Ok(upload(ctx, data, shape)),
+        Val::ComplexTensor { re, im, shape } => Ok(upload_complex(ctx, re, im, shape)),
         Val::Tuple(items) => {
             let elems = items.iter().map(|it| lift_val(ctx, it)).collect::<Result<Vec<_>, _>>()?;
             Ok(GpuVal::Tuple(elems))
@@ -208,8 +212,14 @@ fn eval_gpu(
             // (and loop bodies) don't re-upload.
             match env.vars.get(name) {
                 Some(Val::Num(f)) => Ok(GpuVal::Scalar(*f)),
+                Some(Val::Complex(r, i)) => Ok(GpuVal::CScalar(*r, *i)),
                 Some(Val::Tensor { data, shape }) => {
                     let gv = upload(ctx, data, shape);
+                    scope.insert(name.clone(), gv.clone());
+                    Ok(gv)
+                }
+                Some(Val::ComplexTensor { re, im, shape }) => {
+                    let gv = upload_complex(ctx, re, im, shape);
                     scope.insert(name.clone(), gv.clone());
                     Ok(gv)
                 }
@@ -220,7 +230,7 @@ fn eval_gpu(
                     Ok(gv)
                 }
                 Some(other) => Err(format!(
-                    "GPU: `{name}`: only scalars, real tensors, and tuples of them are allowed in a GPU block; got {}",
+                    "GPU: `{name}`: only scalars, real/complex tensors, and tuples of them are allowed in a GPU block; got {}",
                     fmt_val(other)
                 )),
                 None => Err(format!("undefined variable `{name}`")),
@@ -335,7 +345,7 @@ fn eval_scalar_elems(
     elems.iter().map(|e| match eval_gpu(e, env, ctx, scope)? {
         GpuVal::Scalar(s) => Ok(s as f32),
         GpuVal::Buffer { .. } | GpuVal::Host { .. } | GpuVal::Tuple(_) | GpuVal::Fn(_)
-        | GpuVal::Complex { .. } =>
+        | GpuVal::Complex { .. } | GpuVal::CScalar(..) =>
             Err("GPU: tensor literals must contain scalar elements".to_string()),
     }).collect()
 }
@@ -442,8 +452,9 @@ fn eval_apply(
             binary_minmax(ctx, "min", lower, GpuVal::Scalar(hi))
         }
 
-        // Unary math.
-        _ if args.len() == 1 && unary_wgsl(name, "x").is_some() => {
+        // Unary math, plus the complex projections re/im/conj/arg (which work on
+        // real values too). Complex inputs dispatch inside `unary_val`.
+        _ if args.len() == 1 && (unary_wgsl(name, "x").is_some() || matches!(name, "re" | "im" | "conj" | "arg")) => {
             let v = eval_gpu(&args[0], env, ctx, scope)?;
             unary_val(ctx, name, v)
         }
@@ -488,9 +499,8 @@ fn expect_buffer(gctx: &GpuContext, v: GpuVal, what: &str) -> Result<(Rc<wgpu::B
         GpuVal::Scalar(_) => Err(format!("GPU: {what} expects a tensor, got a scalar")),
         GpuVal::Tuple(_) => Err(format!("GPU: {what} expects a tensor, got a tuple")),
         GpuVal::Fn(_) => Err(format!("GPU: {what} expects a tensor, got a function")),
-        GpuVal::Complex { .. } => Err(format!(
-            "GPU: {what} expects a real tensor, got a complex tensor (a complex value can \
-             only be the final result of a block, not an operand)")),
+        GpuVal::Complex { .. } => Err(format!("GPU: {what} expects a real tensor, got a complex tensor")),
+        GpuVal::CScalar(..) => Err(format!("GPU: {what} expects a tensor, got a complex scalar")),
         GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
@@ -520,11 +530,6 @@ fn op_expr(op: &Op, a: &str, b: &str) -> Result<String, String> {
     })
 }
 
-/// Shared message: complex GPU values (from fft/ifft) are returnable but not
-/// composable with further GPU ops in this milestone.
-const COMPLEX_OPERAND: &str =
-    "GPU: a complex value (from fft/ifft) can only be the final result of a block, \
-     not combined with other GPU operations";
 
 /// Unary negation on the GPU, recursing over tuple trees (like the CPU `neg_val`).
 fn neg_gpu(ctx: &GpuContext, v: GpuVal) -> Result<GpuVal, String> {
@@ -537,7 +542,11 @@ fn neg_gpu(ctx: &GpuContext, v: GpuVal) -> Result<GpuVal, String> {
         GpuVal::Tuple(elems) => Ok(GpuVal::Tuple(
             elems.into_iter().map(|e| neg_gpu(ctx, e)).collect::<Result<Vec<_>, _>>()?)),
         GpuVal::Fn(_) => Err("GPU: cannot negate a function".into()),
-        GpuVal::Complex { .. } => Err(COMPLEX_OPERAND.into()),
+        GpuVal::CScalar(r, i) => Ok(make_cscalar(-r, -i)),
+        GpuVal::Complex { buf, shape, len } => {
+            let out = run_cmap(ctx, &[(buf.as_ref(), true)], len, "-(in0[i])")?;
+            Ok(GpuVal::Complex { buf: out, shape, len })
+        }
         GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
@@ -563,6 +572,10 @@ fn binop(ctx: &GpuContext, op: &Op, lhs: GpuVal, rhs: GpuVal) -> Result<GpuVal, 
             _ => unreachable!(),
         },
         _ => {}
+    }
+    // Any complex operand routes to the complex elementwise path.
+    if is_complex_val(&lhs) || is_complex_val(&rhs) {
+        return cbinop(ctx, op, lhs, rhs);
     }
     match (materialize(ctx, lhs), materialize(ctx, rhs)) {
         (GpuVal::Scalar(x), GpuVal::Scalar(y)) => Ok(GpuVal::Scalar(scalar_op(op, x, y)?)),
@@ -595,8 +608,8 @@ fn binop(ctx: &GpuContext, op: &Op, lhs: GpuVal, rhs: GpuVal) -> Result<GpuVal, 
         }
         (GpuVal::Tuple(_), _) | (_, GpuVal::Tuple(_)) =>
             Err("GPU: arithmetic on a tuple is not supported (operate on its fields)".into()),
-        (GpuVal::Complex { .. }, _) | (_, GpuVal::Complex { .. }) => Err(COMPLEX_OPERAND.into()),
-        _ => unreachable!("Host values are materialized above"),
+        // Complex operands are routed to `cbinop` before this point.
+        _ => unreachable!("complex routed earlier; host values materialized above"),
     }
 }
 
@@ -691,10 +704,27 @@ fn unary_cpu(name: &str, x: f64) -> f64 {
 }
 
 fn unary_val(ctx: &GpuContext, name: &str, v: GpuVal) -> Result<GpuVal, String> {
+    use std::f64::consts::PI;
     match materialize(ctx, v) {
+        // re/im/conj/arg on a real value behave as on a complex number with im=0.
+        GpuVal::Scalar(s) if matches!(name, "re" | "im" | "conj" | "arg") => Ok(GpuVal::Scalar(match name {
+            "re" | "conj" => s,
+            "im"          => 0.0,
+            _             => if s >= 0.0 { 0.0 } else { PI }, // arg
+        })),
+        GpuVal::Buffer { buf, shape, len } if matches!(name, "re" | "im" | "conj" | "arg") => {
+            let expr = match name {
+                "re" | "conj" => "in0[i]".to_string(),
+                "im"          => "f32(0.0)".to_string(),
+                _             => format!("select({}, 0.0, in0[i] >= 0.0)", wgsl_f32(PI)), // arg
+            };
+            let out = run_map(ctx, &[&buf], len, &expr)?;
+            Ok(GpuVal::Buffer { buf: out, shape, len })
+        }
         GpuVal::Scalar(s) => Ok(GpuVal::Scalar(unary_cpu(name, s))),
         GpuVal::Buffer { buf, shape, len } => {
-            let expr = unary_wgsl(name, "in0[i]").unwrap();
+            let expr = unary_wgsl(name, "in0[i]")
+                .ok_or_else(|| format!("GPU: {name} is not available in a GPU block"))?;
             let out = run_map(ctx, &[&buf], len, &expr)?;
             Ok(GpuVal::Buffer { buf: out, shape, len })
         }
@@ -702,7 +732,8 @@ fn unary_val(ctx: &GpuContext, name: &str, v: GpuVal) -> Result<GpuVal, String> 
         GpuVal::Tuple(elems) => Ok(GpuVal::Tuple(
             elems.into_iter().map(|e| unary_val(ctx, name, e)).collect::<Result<Vec<_>, _>>()?)),
         GpuVal::Fn(_) => Err(format!("GPU: {name} does not apply to a function")),
-        GpuVal::Complex { .. } => Err(COMPLEX_OPERAND.into()),
+        GpuVal::Complex { buf, shape, len } => complex_unary(ctx, name, buf, shape, len),
+        GpuVal::CScalar(r, i) => complex_scalar_unary(name, r, i),
         GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
@@ -730,7 +761,8 @@ fn binary_minmax(ctx: &GpuContext, name: &str, a: GpuVal, b: GpuVal) -> Result<G
         }
         (GpuVal::Tuple(_), _) | (_, GpuVal::Tuple(_)) =>
             Err(format!("GPU: {f} does not apply to a tuple")),
-        (GpuVal::Complex { .. }, _) | (_, GpuVal::Complex { .. }) => Err(COMPLEX_OPERAND.into()),
+        (GpuVal::Complex { .. } | GpuVal::CScalar(..), _) | (_, GpuVal::Complex { .. } | GpuVal::CScalar(..)) =>
+            Err(format!("GPU: {f} is not defined on complex values (no ordering)")),
         _ => unreachable!("Host values are materialized above"),
     }
 }
@@ -750,7 +782,8 @@ fn any_all_val(ctx: &GpuContext, name: &str, v: GpuVal) -> Result<GpuVal, String
         }
         GpuVal::Tuple(_) => Err(format!("GPU: {name} over a tuple is not supported (reduce its fields)")),
         GpuVal::Fn(_) => Err(format!("GPU: {name} does not apply to a function")),
-        GpuVal::Complex { .. } => Err(COMPLEX_OPERAND.into()),
+        GpuVal::Complex { .. } | GpuVal::CScalar(..) =>
+            Err(format!("GPU: {name} is not defined on complex values")),
         GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
@@ -767,7 +800,25 @@ fn reduce_val(ctx: &GpuContext, name: &str, v: GpuVal) -> Result<GpuVal, String>
         }
         GpuVal::Tuple(_) => Err(format!("GPU: {name} does not apply to a tuple")),
         GpuVal::Fn(_) => Err(format!("GPU: {name} does not apply to a function")),
-        GpuVal::Complex { .. } => Err(COMPLEX_OPERAND.into()),
+        // sum/mean over a complex tensor reduce the re and im parts independently.
+        GpuVal::Complex { buf, len, .. } => {
+            if len == 0 { return Err(format!("GPU: {name} of an empty tensor")); }
+            match name {
+                "sum" | "mean" => {
+                    let re = run_c2r_map(ctx, &buf, len, "a0.x")?;
+                    let im = run_c2r_map(ctx, &buf, len, "a0.y")?;
+                    let sr = reduce(ctx, re, len, "sum")?;
+                    let si = reduce(ctx, im, len, "sum")?;
+                    if name == "mean" { Ok(make_cscalar(sr / len as f64, si / len as f64)) }
+                    else { Ok(make_cscalar(sr, si)) }
+                }
+                _ => Err(format!("GPU: {name} is not defined on complex tensors (no ordering)")),
+            }
+        }
+        GpuVal::CScalar(r, i) => match name {
+            "sum" | "mean" => Ok(make_cscalar(r, i)),
+            _ => Err(format!("GPU: {name} is not defined on complex values")),
+        },
         GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
@@ -1705,7 +1756,7 @@ fn eval_count(arg: &Expr, env: &Env, ctx: &GpuContext, scope: &mut HashMap<Strin
         GpuVal::Scalar(s) if s >= 0.0 && s.fract() == 0.0 => Ok(s as usize),
         GpuVal::Scalar(s) => Err(format!("GPU: iterate/scan count must be a non-negative integer, got {s}")),
         GpuVal::Buffer { .. } | GpuVal::Host { .. } | GpuVal::Tuple(_) | GpuVal::Fn(_)
-        | GpuVal::Complex { .. } =>
+        | GpuVal::Complex { .. } | GpuVal::CScalar(..) =>
             Err("GPU: iterate/scan count must be a scalar".into()),
     }
 }
@@ -1821,7 +1872,8 @@ fn stack_frames(ctx: &GpuContext, frames: Vec<GpuVal>) -> Result<GpuVal, String>
         }
         GpuVal::Host { .. } => Err("GPU: scan produced a host value (internal error)".into()),
         GpuVal::Fn(_) => Err("GPU: scan step must return a tensor/scalar state, not a function".into()),
-        GpuVal::Complex { .. } => Err("GPU: scan over complex state is not supported".into()),
+        GpuVal::Complex { .. } | GpuVal::CScalar(..) =>
+            Err("GPU: scan/iterate over complex state is not supported".into()),
     }
 }
 
@@ -2301,6 +2353,276 @@ fn gpu_spectral_op(name: &str, args: &[Expr], env: &Env, ctx: &GpuContext, scope
     Ok(GpuVal::Buffer { buf: real, shape, len: total })
 }
 
+// ───────────────────────────── complex arithmetic ─────────────────────────────
+//
+// Complex tensors live as interleaved (re, im) `vec2<f32>` buffers (GpuVal::Complex)
+// and complex scalars as host-side `CScalar` baked into kernels as vec2 constants.
+// Elementwise ops promote a real operand to (x, 0). Everything mirrors the CPU's
+// complex semantics (see eval.rs make_complex / binop_tuple / the unary table).
+
+/// WGSL helpers shared by every complex kernel.
+const CPLX_PRELUDE: &str = "\
+fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> { return vec2<f32>(a.x*b.x - a.y*b.y, a.x*b.y + a.y*b.x); }\n\
+fn cdiv(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> { let d = b.x*b.x + b.y*b.y; return vec2<f32>((a.x*b.x + a.y*b.y)/d, (a.y*b.x - a.x*b.y)/d); }\n\
+fn cexp(a: vec2<f32>) -> vec2<f32> { let m = exp(a.x); return vec2<f32>(m*cos(a.y), m*sin(a.y)); }\n\
+fn clog(a: vec2<f32>) -> vec2<f32> { return vec2<f32>(0.5*log(a.x*a.x + a.y*a.y), atan2(a.y, a.x)); }\n\
+fn csqrt(a: vec2<f32>) -> vec2<f32> { let r = sqrt(sqrt(a.x*a.x + a.y*a.y)); let t = 0.5*atan2(a.y, a.x); return vec2<f32>(r*cos(t), r*sin(t)); }\n\
+fn cconj(a: vec2<f32>) -> vec2<f32> { return vec2<f32>(a.x, -a.y); }\n\
+fn cpow(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> { return cexp(cmul(b, clog(a))); }\n\
+fn csin(a: vec2<f32>) -> vec2<f32> { return vec2<f32>(sin(a.x)*cosh(a.y), cos(a.x)*sinh(a.y)); }\n\
+fn ccos(a: vec2<f32>) -> vec2<f32> { return vec2<f32>(cos(a.x)*cosh(a.y), -sin(a.x)*sinh(a.y)); }\n";
+
+fn is_complex_val(v: &GpuVal) -> bool { matches!(v, GpuVal::Complex { .. } | GpuVal::CScalar(..)) }
+fn is_scalar_val(v: &GpuVal) -> bool { matches!(v, GpuVal::Scalar(_) | GpuVal::CScalar(..)) }
+
+/// (re, im) of a host-side scalar (real or complex).
+fn cscalar_parts(v: &GpuVal) -> (f64, f64) {
+    match v {
+        GpuVal::Scalar(s) => (*s, 0.0),
+        GpuVal::CScalar(r, i) => (*r, *i),
+        _ => (0.0, 0.0),
+    }
+}
+
+/// Pack a complex scalar result, collapsing to a real `Scalar` when imag == 0.
+fn make_cscalar(r: f64, i: f64) -> GpuVal {
+    if i == 0.0 { GpuVal::Scalar(r) } else { GpuVal::CScalar(r, i) }
+}
+
+/// Complex scalar op evaluated on the host.
+fn complex_scalar_op(op: &Op, ar: f64, ai: f64, br: f64, bi: f64) -> Result<GpuVal, String> {
+    let (r, i) = match op {
+        Op::Add => (ar + br, ai + bi),
+        Op::Sub => (ar - br, ai - bi),
+        Op::Mul => (ar*br - ai*bi, ar*bi + ai*br),
+        Op::Div => {
+            let d = br*br + bi*bi;
+            ((ar*br + ai*bi)/d, (ai*br - ar*bi)/d)
+        }
+        Op::Pow => {
+            // a^b = exp(b * log a)
+            let (lr, li) = (0.5*(ar*ar + ai*ai).ln(), ai.atan2(ar));
+            let (pr, pi) = (br*lr - bi*li, br*li + bi*lr);
+            let m = pr.exp();
+            (m*pi.cos(), m*pi.sin())
+        }
+        _ => return Err("GPU: that operator is not defined on complex values".into()),
+    };
+    Ok(make_cscalar(r, i))
+}
+
+/// The WGSL vec2 expression for a complex binary op (operands already vec2<f32>).
+fn complex_binop_expr(op: &Op, a: &str, b: &str) -> Result<String, String> {
+    Ok(match op {
+        Op::Add => format!("({a} + {b})"),
+        Op::Sub => format!("({a} - {b})"),
+        Op::Mul => format!("cmul({a}, {b})"),
+        Op::Div => format!("cdiv({a}, {b})"),
+        Op::Pow => format!("cpow({a}, {b})"),
+        _ => return Err("GPU: that operator is not defined on complex values".into()),
+    })
+}
+
+/// Fetch expression (a vec2<f32>) for one operand, registering any buffer it needs.
+fn operand_fetch(v: &GpuVal, bufs: &mut Vec<(Rc<wgpu::Buffer>, bool)>) -> String {
+    match v {
+        GpuVal::Scalar(s)     => format!("vec2<f32>({}, 0.0)", wgsl_f32(*s)),
+        GpuVal::CScalar(r, i) => format!("vec2<f32>({}, {})", wgsl_f32(*r), wgsl_f32(*i)),
+        GpuVal::Complex { buf, .. } => {
+            let k = bufs.len(); bufs.push((buf.clone(), true)); format!("in{k}[i]")
+        }
+        GpuVal::Buffer { buf, .. } => {
+            let k = bufs.len(); bufs.push((buf.clone(), false)); format!("vec2<f32>(in{k}[i], 0.0)")
+        }
+        _ => "vec2<f32>(0.0, 0.0)".to_string(),
+    }
+}
+
+/// Run a complex elementwise kernel: `out[i] = <expr>` (a vec2<f32>), where the
+/// `inK` are the registered buffers (complex `vec2<f32>` or real `f32`).
+fn run_cmap(ctx: &GpuContext, inputs: &[(&wgpu::Buffer, bool)], len: usize, expr: &str) -> Result<Rc<wgpu::Buffer>, String> {
+    let out = make_complex_buffer(ctx, len);
+    let n_in = inputs.len();
+    let mut decls = String::new();
+    for (k, (_, is_c)) in inputs.iter().enumerate() {
+        let ty = if *is_c { "vec2<f32>" } else { "f32" };
+        decls += &format!("@group(0) @binding({k}) var<storage, read> in{k}: array<{ty}>;\n");
+    }
+    let (out_b, param_b) = (n_in, n_in + 1);
+    let src = format!(
+        "{CPLX_PRELUDE}{decls}\
+@group(0) @binding({out_b}) var<storage, read_write> out: array<vec2<f32>>;\n\
+struct P {{ len: u32, row: u32 }};\n\
+@group(0) @binding({param_b}) var<uniform> params: P;\n\
+@compute @workgroup_size(256)\n\
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{\n\
+    let i = gid.y * params.row + gid.x;\n\
+    if (i >= params.len) {{ return; }}\n\
+    out[i] = {expr};\n\
+}}\n");
+    let pipeline = get_pipeline(ctx, &src);
+    let (gx, gy, row) = grid(len);
+    let params = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu-cmap-params"),
+        contents: bytemuck::cast_slice(&[len as u32, row, 0u32, 0u32]),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let mut entries: Vec<wgpu::BindGroupEntry> = inputs.iter().enumerate()
+        .map(|(k, (b, _))| wgpu::BindGroupEntry { binding: k as u32, resource: b.as_entire_binding() })
+        .collect();
+    entries.push(wgpu::BindGroupEntry { binding: out_b as u32, resource: out.as_entire_binding() });
+    entries.push(wgpu::BindGroupEntry { binding: param_b as u32, resource: params.as_entire_binding() });
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("gpu-cmap-bg"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &entries,
+    });
+    ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gpu-cmap-encoder") });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("gpu-cmap-pass"), timestamp_writes: None });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(gx, gy, 1);
+    }
+    ctx.queue.submit(Some(encoder.finish()));
+    if let Some(err) = pollster::block_on(ctx.device.pop_error_scope()) {
+        return Err(format!("GPU: {err}"));
+    }
+    Ok(out)
+}
+
+/// Map a complex buffer to a real `f32` buffer: `out[i] = <expr>` with the input
+/// available as `a0` (vec2<f32>). Used by re/im/abs/arg and complex reductions.
+fn run_c2r_map(ctx: &GpuContext, cbuf: &wgpu::Buffer, len: usize, expr: &str) -> Result<Rc<wgpu::Buffer>, String> {
+    let out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gpu-c2r-out"),
+        size: (len.max(1) * 4) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let src = format!(
+        "{CPLX_PRELUDE}\
+@group(0) @binding(0) var<storage, read> in0: array<vec2<f32>>;\n\
+@group(0) @binding(1) var<storage, read_write> out: array<f32>;\n\
+struct P {{ len: u32, row: u32 }};\n\
+@group(0) @binding(2) var<uniform> params: P;\n\
+@compute @workgroup_size(256)\n\
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{\n\
+    let i = gid.y * params.row + gid.x;\n\
+    if (i >= params.len) {{ return; }}\n\
+    let a0 = in0[i];\n\
+    out[i] = {expr};\n\
+}}\n");
+    let pipeline = get_pipeline(ctx, &src);
+    let (gx, gy, row) = grid(len);
+    let params = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu-c2r-params"),
+        contents: bytemuck::cast_slice(&[len as u32, row, 0u32, 0u32]),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("gpu-c2r-bg"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: cbuf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: out.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: params.as_entire_binding() },
+        ],
+    });
+    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gpu-c2r-encoder") });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("gpu-c2r-pass"), timestamp_writes: None });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(gx, gy, 1);
+    }
+    ctx.queue.submit(Some(encoder.finish()));
+    Ok(Rc::new(out))
+}
+
+/// Elementwise binary op where at least one operand is complex.
+fn cbinop(ctx: &GpuContext, op: &Op, lhs: GpuVal, rhs: GpuVal) -> Result<GpuVal, String> {
+    let lhs = materialize(ctx, lhs);
+    let rhs = materialize(ctx, rhs);
+    // Both host scalars → evaluate on the host.
+    if is_scalar_val(&lhs) && is_scalar_val(&rhs) {
+        let (ar, ai) = cscalar_parts(&lhs);
+        let (br, bi) = cscalar_parts(&rhs);
+        return complex_scalar_op(op, ar, ai, br, bi);
+    }
+    // Resolve the output shape/len from whichever operand(s) are buffers.
+    let shape_len = |v: &GpuVal| -> Option<(Vec<usize>, usize)> {
+        match v {
+            GpuVal::Buffer { shape, len, .. } | GpuVal::Complex { shape, len, .. } => Some((shape.clone(), *len)),
+            _ => None,
+        }
+    };
+    let (shape, len) = match (shape_len(&lhs), shape_len(&rhs)) {
+        (Some((sa, la)), Some((sb, _))) => {
+            if sa != sb {
+                return Err(format!("GPU: shape mismatch in complex elementwise op: {sa:?} vs {sb:?}"));
+            }
+            (sa, la)
+        }
+        (Some(sl), None) | (None, Some(sl)) => sl,
+        (None, None) => unreachable!("scalar/scalar handled above"),
+    };
+    let mut bufs: Vec<(Rc<wgpu::Buffer>, bool)> = Vec::new();
+    let a = operand_fetch(&lhs, &mut bufs);
+    let b = operand_fetch(&rhs, &mut bufs);
+    let expr = complex_binop_expr(op, &a, &b)?;
+    let refs: Vec<(&wgpu::Buffer, bool)> = bufs.iter().map(|(buf, c)| (buf.as_ref(), *c)).collect();
+    let out = run_cmap(ctx, &refs, len, &expr)?;
+    Ok(GpuVal::Complex { buf: out, shape, len })
+}
+
+/// Unary functions on a complex buffer. re/im/abs/arg return a real buffer; the
+/// rest return complex. Unsupported names error clearly.
+fn complex_unary(ctx: &GpuContext, name: &str, buf: Rc<wgpu::Buffer>, shape: Vec<usize>, len: usize) -> Result<GpuVal, String> {
+    // Complex → real projections.
+    if let Some(expr) = match name {
+        "re"  => Some("a0.x"),
+        "im"  => Some("a0.y"),
+        "abs" => Some("length(a0)"),
+        "arg" => Some("atan2(a0.y, a0.x)"),
+        _ => None,
+    } {
+        let out = run_c2r_map(ctx, &buf, len, expr)?;
+        return Ok(GpuVal::Buffer { buf: out, shape, len });
+    }
+    // Complex → complex.
+    let expr = match name {
+        "conj" => "cconj(in0[i])",
+        "exp"  => "cexp(in0[i])",
+        "ln"   => "clog(in0[i])",
+        "sqrt" => "csqrt(in0[i])",
+        "sin"  => "csin(in0[i])",
+        "cos"  => "ccos(in0[i])",
+        _ => return Err(format!("GPU: {name} is not supported on complex values")),
+    };
+    let out = run_cmap(ctx, &[(buf.as_ref(), true)], len, expr)?;
+    Ok(GpuVal::Complex { buf: out, shape, len })
+}
+
+/// Unary functions on a host complex scalar (mirrors the CPU complex unary table).
+fn complex_scalar_unary(name: &str, r: f64, i: f64) -> Result<GpuVal, String> {
+    use std::f64::consts::PI;
+    Ok(match name {
+        "re"   => GpuVal::Scalar(r),
+        "im"   => GpuVal::Scalar(i),
+        "abs"  => GpuVal::Scalar((r*r + i*i).sqrt()),
+        "arg"  => GpuVal::Scalar(if i == 0.0 { if r >= 0.0 { 0.0 } else { PI } } else { i.atan2(r) }),
+        "conj" => make_cscalar(r, -i),
+        "exp"  => { let m = r.exp(); make_cscalar(m * i.cos(), m * i.sin()) }
+        "ln"   => make_cscalar(0.5 * (r*r + i*i).ln(), i.atan2(r)),
+        "sqrt" => { let m = (r*r + i*i).sqrt().sqrt(); let t = i.atan2(r) / 2.0; make_cscalar(m * t.cos(), m * t.sin()) }
+        "sin"  => make_cscalar(r.sin() * i.cosh(), r.cos() * i.sinh()),
+        "cos"  => make_cscalar(r.cos() * i.cosh(), -r.sin() * i.sinh()),
+        _ => return Err(format!("GPU: {name} is not supported on complex values")),
+    })
+}
+
 fn upload_f32(ctx: &GpuContext, data: Vec<f32>, shape: Vec<usize>) -> GpuVal {
     let len = data.len();
     let buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2325,6 +2647,23 @@ fn upload(ctx: &GpuContext, data: &TData, shape: &[usize]) -> GpuVal {
         shape: shape.to_vec(),
         len: f32_data.len().min(len), // keep true length; len() may be 0
     }
+}
+
+/// Upload a CPU complex tensor as an interleaved (re, im) `vec2<f32>` buffer.
+fn upload_complex(ctx: &GpuContext, re: &TData, im: &TData, shape: &[usize]) -> GpuVal {
+    let len = re.len();
+    let mut inter: Vec<f32> = Vec::with_capacity(len.max(1) * 2);
+    for (r, i) in re.iter().zip(im.iter()) {
+        inter.push(*r as f32);
+        inter.push(*i as f32);
+    }
+    if inter.is_empty() { inter.extend_from_slice(&[0.0, 0.0]); }
+    let buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu-upload-complex"),
+        contents: bytemuck::cast_slice(&inter),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+    });
+    GpuVal::Complex { buf: Rc::new(buf), shape: shape.to_vec(), len }
 }
 
 /// Get a compute pipeline for a WGSL source, compiling and caching on first use.
@@ -2492,12 +2831,22 @@ fn to_val(ctx: &GpuContext, v: &GpuVal) -> Result<Val, String> {
                 re.push(c[0] as f64);
                 im.push(c[1] as f64);
             }
-            Ok(Val::ComplexTensor {
-                re: TData::new(re),
-                im: TData::new(im),
-                shape: shape.clone(),
-            })
+            // Collapse to a real tensor when every imaginary part is exactly zero,
+            // mirroring the CPU's `maybe_real` (fft output keeps tiny non-zero
+            // imag and so stays complex, exactly as on the CPU).
+            if im.iter().all(|&x| x == 0.0) {
+                Ok(Val::Tensor { data: TData::new(re), shape: shape.clone() })
+            } else {
+                Ok(Val::ComplexTensor {
+                    re: TData::new(re),
+                    im: TData::new(im),
+                    shape: shape.clone(),
+                })
+            }
         }
+        // A complex scalar collapses to a real `Num` when the imaginary part is
+        // exactly zero (matches the CPU `make_complex`).
+        GpuVal::CScalar(r, i) => Ok(if *i == 0.0 { Val::Num(*r) } else { Val::Complex(*r, *i) }),
         GpuVal::Tuple(elems) => Ok(Val::Tuple(
             elems.iter().map(|e| to_val(ctx, e)).collect::<Result<Vec<_>, _>>()?,
         )),

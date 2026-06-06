@@ -1882,6 +1882,30 @@ else
     run "gpu.invlap.parity"   "N=16; rhs=tensor((i,j)->sin(2*pi*i/N)*cos(2*pi*j/N),N,N); round(sum(abs(GPU{ops.invlap(rhs,0.1)} - ops.invlap(rhs,0.1))),3)" "0"
     run "gpu.specgrad.parity" "N=32; T=tensor((i,j)->sin(2*pi*i/N)*cos(2*pi*j/N),N,N); round(sum(abs(GPU{ops.specgrad(T,0.2,0)} - ops.specgrad(T,0.2,0))),3)" "0"
     run_err "gpu.poisson.nonpow2" "rhs=tensor(i->1.0*i, 12); GPU { ops.poisson(rhs,0.1) }"
+
+    # ── first-class complex on the GPU (capture, arithmetic, unary, reductions) ──
+    run "gpu.cplx.add"       "A=[1+2i, 3-1i, 0+1i]; GPU { A + A }"            "[2 + 4i, 6 - 2i, 2i]"
+    run "gpu.cplx.imagunit"  "A=[1,2,3]; GPU { A * i }"                       "[i, 2i, 3i]"
+    run "gpu.cplx.re"        "A=[3+4i, 1-2i]; GPU { re(A) }"                  "[3, 1]"
+    run "gpu.cplx.im"        "A=[3+4i, 1-2i]; GPU { im(A) }"                  "[4, -2]"
+    run "gpu.cplx.conj"      "A=[3+4i, 1-2i]; GPU { conj(A) }"               "[3 - 4i, 1 + 2i]"
+    run "gpu.cplx.abs"       "A=[3+4i, 0+1i]; GPU { abs(A) }"                 "[5, 1]"
+    run "gpu.cplx.sum"       "A=[1+1i,2+2i,3+3i]; GPU { sum(A) }"            "6 + 6i"
+    run "gpu.cplx.mean"      "A=[1+1i,2+2i,3+3i]; GPU { mean(A) }"           "2 + 2i"
+    run "gpu.cplx.collapse"  "A=[1+1i, 2-1i]; GPU { A + conj(A) }"           "[2, 4]"
+    # CPU/GPU parity (rounded) for the elementwise and transcendental complex ops.
+    run "gpu.cplx.mul"       "A=[1+1i,2+0i]; B=[0+1i,1+1i]; round(sum(abs(GPU{A*B}-(A*B))),5)" "0"
+    run "gpu.cplx.div"       "A=[1+1i,2+3i]; B=[0+1i,1-1i]; round(sum(abs(GPU{A/B}-(A/B))),5)" "0"
+    run "gpu.cplx.pow"       "A=[1+1i,2+0i]; B=[2+0i,0+1i]; round(sum(abs(GPU{A^B}-(A^B))),4)" "0"
+    run "gpu.cplx.mixed"     "A=[1,2,3]; B=[0+1i,1+0i,2-1i]; round(sum(abs(GPU{A+B}-(A+B))),5)" "0"
+    run "gpu.cplx.exp"       "th=[0,1.0,2.5,-1.3]; round(sum(abs(GPU{exp(i*th)}-exp(i*th))),5)" "0"
+    run "gpu.cplx.sqrt"      "A=[1+1i,-2+0.5i,0.3-1i]; round(sum(abs(GPU{sqrt(A)}-sqrt(A))),5)" "0"
+    run "gpu.cplx.ln"        "A=[1+1i,-2+0.5i,0.3-1i]; round(sum(abs(GPU{ln(A)}-ln(A))),5)" "0"
+    run "gpu.cplx.sin"       "A=[1+1i,-2+0.5i,0.3-1i]; round(sum(abs(GPU{sin(A)}-sin(A))),5)" "0"
+    # FFT output composes with complex ops (power spectrum, conjugate-FFT identity).
+    run "gpu.cplx.powerspec" "A=[1,2,3,4,5,6,7,8]; round(sum(abs(GPU{abs(fft(A))^2}-abs(fft(A))^2)),3)" "0"
+    run "gpu.cplx.ifftident" "A=[1,2,3,4]; round(sum(abs(GPU{conj(fft(conj(fft(A))))*0.25}-A)),4)" "0"
+    run_err "gpu.cplx.nomin" "A=[1+1i,2+0i]; GPU { min(A, 0) }"
 fi
 
 # ── print summary ─────────────────────────────────────────────────────────────
