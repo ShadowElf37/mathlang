@@ -788,3 +788,83 @@ fn pic_gathergrad_matches_fd() {
         "1"
     );
 }
+
+// ── file I/O: save / load (.npy, .mlt) ─────────────────────────────────────────
+
+/// A unique temp path so parallel tests don't collide.
+fn tmp(name: &str) -> String {
+    std::env::temp_dir().join(format!("mc_io_{name}")).to_string_lossy().into_owned()
+}
+
+#[test]
+fn io_npy_real_roundtrip() {
+    let p = tmp("npy_real.npy");
+    assert_eq!(run(&format!("save([1,2,3,4], \"{p}\"); load(\"{p}\")")), "[1, 2, 3, 4]");
+}
+
+#[test]
+fn io_npy_complex_roundtrip() {
+    let p = tmp("npy_cx.npy");
+    assert_eq!(run(&format!("save([1+2i, 3-4i], \"{p}\"); load(\"{p}\")")), "[1 + 2i, 3 - 4i]");
+}
+
+#[test]
+fn io_mlt_real_roundtrip() {
+    let p = tmp("mlt_real.mlt");
+    assert_eq!(run(&format!("save([0.5, 1.5, 2.5], \"{p}\"); load(\"{p}\")")), "[0.5, 1.5, 2.5]");
+}
+
+#[test]
+fn io_mlt_complex_roundtrip() {
+    let p = tmp("mlt_cx.mlt");
+    assert_eq!(run(&format!("save([1+1i], \"{p}\"); load(\"{p}\")")), "[1 + i]");
+}
+
+#[test]
+fn io_mlt_2d_shape_preserved() {
+    let p = tmp("mlt_2d.mlt");
+    assert_eq!(run(&format!("save((1,2,3;4,5,6), \"{p}\"); shape(load(\"{p}\"))")), "[2, 3]");
+}
+
+#[test]
+fn io_save_returns_value() {
+    // save passes the value through, so it composes in a pipeline.
+    let p = tmp("pass.npy");
+    assert_eq!(run(&format!("save([10,20,30], \"{p}\")")), "[10, 20, 30]");
+}
+
+#[test]
+fn io_load_feeds_pipeline() {
+    let p = tmp("pipe.npy");
+    assert_eq!(run(&format!("save(linspace(0,1,5), \"{p}\"); sum(load(\"{p}\"))")), "2.5");
+}
+
+#[test]
+fn io_unknown_extension_errors() {
+    let p = tmp("bad.foo");
+    assert!(run(&format!("save([1,2,3], \"{p}\")")).contains("unrecognised extension"));
+}
+
+#[test]
+fn io_save_nontensor_errors() {
+    let p = tmp("fn.npy");
+    assert!(run(&format!("save(x -> x, \"{p}\")")).contains("can only serialize"));
+}
+
+#[test]
+fn io_path_must_be_string() {
+    assert!(run("save([1,2,3], 42)").contains("expected a string"));
+}
+
+#[test]
+fn io_string_literal_displays() {
+    assert_eq!(run("\"hello\""), "\"hello\"");
+}
+
+#[test]
+fn io_bang_npy_roundtrip() {
+    let p = tmp("bang.npy");
+    let out = run_repl(&format!("A = [7,8,9]\n!savenpy A {p}\n!loadnpy B {p}\nB"));
+    assert!(out.contains("saved A"), "got: {out}");
+    assert!(out.contains("[7, 8, 9]"), "got: {out}");
+}

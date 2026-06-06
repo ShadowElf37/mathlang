@@ -119,6 +119,12 @@ impl Repl {
             "!type" => self.cmd_type(rest),
             "!print" => self.cmd_print(rest),
             "!spike" => crate::spike::run(),
+            "!savenpy" => self.cmd_save(rest, "savenpy", "npy"),
+            "!loadnpy" => self.cmd_load(rest, "loadnpy", "npy"),
+            "!savetensor" => self.cmd_save(rest, "savetensor", "mlt"),
+            "!loadtensor" => self.cmd_load(rest, "loadtensor", "mlt"),
+            "!savehdf5" => self.cmd_save_hdf5(rest),
+            "!loadhdf5" => self.cmd_load_hdf5(rest),
             other => eprintln!("unknown command: {other} (try !help)"),
         }
         false
@@ -263,6 +269,136 @@ impl Repl {
             println!("  {k} : {ty}");
         }
     }
+
+    // ── file I/O bang-commands (operate on a named variable) ───────────────────
+
+    /// `!savenpy/!savetensor <var> <file>` — write a variable's tensor to disk.
+    fn cmd_save(&mut self, rest: &str, cmd: &str, fmt: &str) {
+        let mut it = rest.splitn(2, char::is_whitespace);
+        let (var, file) = (it.next().unwrap_or("").trim(), it.next().unwrap_or("").trim());
+        if var.is_empty() || file.is_empty() {
+            eprintln!("usage: !{cmd} <var> <file>");
+            return;
+        }
+        let val = match self.env.vars.get(var) {
+            Some(v) => v.clone(),
+            None => { eprintln!("{cmd}: {var} not defined"); return; }
+        };
+        let res = match fmt {
+            "npy" => crate::io::save_npy_val(file, &val),
+            _ => crate::io::save_mlt_val(file, &val),
+        };
+        match res {
+            Ok(n) => println!("saved {var} ({n} elements, {}) → {file}", io_kind(&val)),
+            Err(e) => eprintln!("{cmd}: {e}"),
+        }
+    }
+
+    /// `!loadnpy/!loadtensor <var> <file>` — read a tensor into a variable.
+    fn cmd_load(&mut self, rest: &str, cmd: &str, fmt: &str) {
+        let mut it = rest.splitn(2, char::is_whitespace);
+        let (var, file) = (it.next().unwrap_or("").trim(), it.next().unwrap_or("").trim());
+        if var.is_empty() || file.is_empty() {
+            eprintln!("usage: !{cmd} <var> <file>");
+            return;
+        }
+        let res = match fmt {
+            "npy" => crate::io::load_npy_val(file, self.env.target),
+            _ => crate::io::load_mlt_val(file, self.env.target),
+        };
+        match res {
+            Ok(val) => {
+                let desc = io_kind(&val);
+                self.env.define(var.to_string(), val);
+                println!("loaded {var} ({desc}) ← {file}");
+            }
+            Err(e) => eprintln!("{cmd}: {e}"),
+        }
+    }
+
+    /// `!savehdf5 <var> <file> [/dataset] [--append] [--overwrite] [--gzip N]`.
+    fn cmd_save_hdf5(&mut self, rest: &str) {
+        let tokens: Vec<&str> = rest.split_whitespace().collect();
+        if tokens.len() < 2 {
+            eprintln!("usage: !savehdf5 <var> <file> [/dataset] [--append] [--overwrite] [--gzip <0-9>]");
+            return;
+        }
+        let (var, file) = (tokens[0], tokens[1]);
+        let mut ds_path = format!("/{var}");
+        let mut append = false;
+        let mut gzip: Option<u32> = None;
+        let mut i = 2;
+        loop {
+            match tokens.get(i).copied() {
+                None => break,
+                Some("--append") => { append = true; i += 1; }
+                Some("--overwrite") => { append = false; i += 1; }
+                Some("--gzip") => {
+                    i += 1;
+                    match tokens.get(i).and_then(|s| s.parse::<u32>().ok()).filter(|&n| n <= 9) {
+                        Some(n) => { gzip = Some(n); i += 1; }
+                        None => { eprintln!("savehdf5: --gzip requires a level 0–9"); return; }
+                    }
+                }
+                Some(s) if !s.starts_with("--") => { ds_path = s.to_string(); i += 1; }
+                Some(s) => { eprintln!("savehdf5: unknown option {s}"); return; }
+            }
+        }
+        let val = match self.env.vars.get(var) {
+            Some(v) => v.clone(),
+            None => { eprintln!("savehdf5: {var} not defined"); return; }
+        };
+        match crate::io::save_hdf5_val(file, &ds_path, &val, append, gzip) {
+            Ok(n) => println!("saved {var} ({n} elements) → {file}:{ds_path}"),
+            Err(e) => eprintln!("savehdf5: {e}"),
+        }
+    }
+
+    /// `!loadhdf5 <var> <file> [/dataset] [--list]`.
+    fn cmd_load_hdf5(&mut self, rest: &str) {
+        let tokens: Vec<&str> = rest.split_whitespace().collect();
+        if tokens.len() < 2 {
+            eprintln!("usage: !loadhdf5 <var> <file> [/dataset] [--list]");
+            return;
+        }
+        let (var, file) = (tokens[0], tokens[1]);
+        let mut ds_path = format!("/{var}");
+        let mut list_only = false;
+        let mut i = 2;
+        loop {
+            match tokens.get(i).copied() {
+                None => break,
+                Some("--list") => { list_only = true; i += 1; }
+                Some(s) if !s.starts_with("--") => { ds_path = s.to_string(); i += 1; }
+                Some(s) => { eprintln!("loadhdf5: unknown option {s}"); return; }
+            }
+        }
+        if list_only {
+            if let Err(e) = crate::io::h5_list(&crate::io::expand_path(file)) {
+                eprintln!("loadhdf5: {e}");
+            }
+            return;
+        }
+        match crate::io::load_hdf5_val(file, &ds_path, self.env.target) {
+            Ok(val) => {
+                let desc = io_kind(&val);
+                self.env.define(var.to_string(), val);
+                println!("loaded {var} ({desc}) ← {file}:{ds_path}");
+            }
+            Err(e) => eprintln!("loadhdf5: {e}"),
+        }
+    }
+}
+
+/// Short human description of a value for I/O status lines.
+fn io_kind(v: &Val) -> String {
+    match v {
+        Val::Tensor(t) => format!("{:?} real f64", t.shape),
+        Val::ComplexTensor(t) => format!("{:?} complex f64", t.shape),
+        Val::Num(_) => "real scalar".into(),
+        Val::Complex(..) => "complex scalar".into(),
+        _ => "value".into(),
+    }
 }
 
 fn fmt_repl(v: &Val) -> String {
@@ -279,6 +415,7 @@ fn type_of(v: &Val) -> String {
     match v {
         Val::Num(_) => "real".into(),
         Val::Complex(..) => "complex".into(),
+        Val::Str(_) => "string".into(),
         Val::Tensor(t) => {
             let dims = t.shape.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("×");
             format!("real tensor [{dims}] ({})", t.prec.name())
@@ -339,6 +476,9 @@ Commands:
   !clear             clear user definitions
   !print <text>      print with {{expr}} interpolation
   !spike             run the f64-vs-f32 backend precision demo
+  !savenpy/!loadnpy <var> <file>     NumPy .npy I/O
+  !savetensor/!loadtensor <var> <file>   native .mlt I/O
+  !savehdf5/!loadhdf5 <var> <file> [/ds] [opts]   HDF5 (build --features hdf5)
   !version           version
   !q / !quit         quit
 
@@ -351,8 +491,10 @@ PIC (particle/grid): pic.scatter(pos, w, template [, kernel]) deposits particles
 onto a field; pic.gather(field, pos [, kernel]) interpolates; pic.gathergrad(field,
 pos [, kernel]) returns the gradient of the shape function (variational force).
 Kernels: pic.ngp (nearest), pic.cic (linear, default), pic.tsc (quadratic).
+File I/O: save(value, \"path\" [, \"/dataset\"]) writes and returns value;
+load(\"path\" [, \"/dataset\"]) reads a tensor. Format from extension: .npy
+(NumPy), .mlt (native), .h5/.hdf5 (HDF5, --features hdf5). Real + complex f64.
 
-Not yet present (later phases): file I/O, animation; field-polymorphic
-ops.*(field)."
+Not yet present (later phases): animation; field-polymorphic ops.*(field)."
     );
 }

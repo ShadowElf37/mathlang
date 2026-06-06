@@ -58,10 +58,10 @@ the original, which was f32-only and block-scoped).
 
 Switching to wgpu auto-downgrades f64→f32; `!prec f64` on wgpu is rejected.
 
-REPL commands: `!help !backend !prec !type !defs !clear !print !spike !version !q`.
+REPL commands: `!help !backend !prec !type !defs !clear !print !spike !version !q`
+plus I/O: `!savenpy !loadnpy !savetensor !loadtensor !savehdf5 !loadhdf5`.
 
-Deferred to later phases: tensor indexing/slicing, matmul/linalg, on-device
-reductions, fft, fields/forms, pic, calculus, file I/O, animation.
+Deferred to later phases: animation/plotting.
 
 ## Complex tensors
 
@@ -186,16 +186,44 @@ Adjointness holds by construction: `⟨gather(f,X), w⟩ == ⟨f, scatter(X,w)�
 derivative — a Verlet stepper using it conserves the Hamiltonian exactly for
 self-gravitating or barotropic particle-mesh gases (no grid-scale heating).
 
+## File I/O
+
+`save`/`load` are expression builtins; the format is auto-detected from the file
+extension. Device tensors are downloaded on save and uploaded to the active
+target on load — real and complex f64 both supported.
+
+```
+save([1,2,3], "out.npy")          # write; returns the value so it chains
+load("out.npy")                   # → tensor on the active backend
+save(fft(load("sig.npy")), "spec.npy")          # composes in a pipeline
+save(z, "field.h5", "/run/density")             # HDF5 with a dataset path
+load("field.h5", "/run/density")
+```
+
+| ext | format | needs |
+|-----|--------|-------|
+| `.npy` | NumPy interchange — round-trips with `numpy.save/load`; the loader also decodes f2/f4/f8, c8/c16, int and bool | nothing (pure Rust) |
+| `.mlt` | mathlang-native tensor (`MLTENSOR` magic) | nothing (pure Rust) |
+| `.h5`/`.hdf5` | HDF5 (standard files; readable by `h5py`/`h5dump`) | `--features hdf5` + system libhdf5 |
+
+This is the first text-carrying value in the language: a minimal **string** type
+(`"…"`, with `\\ \" \n \t` escapes) exists purely to name paths. For parity with
+the original `m` REPL there are also bang-command aliases — `!savenpy`/`!loadnpy`,
+`!savetensor`/`!loadtensor`, and `!savehdf5`/`!loadhdf5` (with `/dataset`,
+`--append`, `--overwrite`, `--gzip N`, `--list`) — which operate on a named
+variable.
+
 ## Tests
 
 ```sh
-cargo test -p mathlang-cubecl
+cargo test -p mathlang-cubecl                      # .npy + .mlt I/O included
+cargo test -p mathlang-cubecl --features hdf5      # also exercises HDF5
 ```
 
-123 `#[test]` functions covering scalar/complex/tuple core, tensor ops, linear
-algebra, resident loops, fields & forms, spectral operators, calculus, PIC, and
-cross-backend precision (including wgpu/Metal). `tests.sh` is retained as a
-legacy reference; `cargo test` is canonical.
+135 `#[test]` functions covering scalar/complex/tuple core, tensor ops, linear
+algebra, resident loops, fields & forms, spectral operators, calculus, PIC, file
+I/O, and cross-backend precision (including wgpu/Metal). `tests.sh` is retained as
+a legacy reference; `cargo test` is canonical.
 
 ## Why
 

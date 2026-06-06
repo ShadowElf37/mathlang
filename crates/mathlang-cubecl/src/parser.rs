@@ -460,6 +460,7 @@ impl Parser {
                 }
             }
             Token::Imag(n) => { self.bump(); Ok(Expr::ImagLit(n)) }
+            Token::Str(s)  => { self.bump(); Ok(Expr::StrLit(s)) }
             Token::LBrace => {
                 self.bump();
                 self.parse_block_inner()

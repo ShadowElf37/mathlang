@@ -283,6 +283,33 @@ pub fn eval_builtin(name: &str, args: Vec<Val>, env: &Env) -> Result<Val, String
             }
         }
 
+        // ── file I/O (format auto-detected from extension) ──────────────────────
+        // save(value, "path" [, "/dataset"]) writes and returns the value (so it
+        // chains); load("path" [, "/dataset"]) reads a tensor onto the active target.
+        "save" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err("save(value, \"path\" [, \"/dataset\"]) expects 2 or 3 args".into());
+            }
+            let path = as_str(&args[1], "save: path")?;
+            let dataset = match args.get(2) {
+                Some(d) => Some(as_str(d, "save: dataset")?),
+                None => None,
+            };
+            crate::io::save_value(&path, &args[0], dataset.as_deref())?;
+            Ok(args.into_iter().next().unwrap())
+        }
+        "load" => {
+            if args.is_empty() || args.len() > 2 {
+                return Err("load(\"path\" [, \"/dataset\"]) expects 1 or 2 args".into());
+            }
+            let path = as_str(&args[0], "load: path")?;
+            let dataset = match args.get(1) {
+                Some(d) => Some(as_str(d, "load: dataset")?),
+                None => None,
+            };
+            crate::io::load_value(&path, env.target, dataset.as_deref())
+        }
+
         // ── linear algebra (the @ operator routes here) ─────────────────────────
         "matmul" => {
             let (a, b) = two(args, name)?;
@@ -577,6 +604,13 @@ fn two(args: Vec<Val>, name: &str) -> Result<(Val, Val), String> {
 fn two_nums(args: Vec<Val>, name: &str) -> Result<(f64, f64), String> {
     let (a, b) = two(args, name)?;
     Ok((a.num(name)?, b.num(name)?))
+}
+
+fn as_str(v: &Val, ctx: &str) -> Result<String, String> {
+    match v {
+        Val::Str(s) => Ok(s.clone()),
+        other => Err(format!("{ctx}: expected a string, got {}", fmt_val(other))),
+    }
 }
 
 /// Apply a leaf op across a value, broadcasting over tuple trees.

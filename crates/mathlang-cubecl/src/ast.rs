@@ -43,6 +43,7 @@ pub struct Param {
 pub enum Expr {
     Num(f64),
     ImagLit(f64),
+    StrLit(String),
     Var(String),
     BinOp(Box<Expr>, Op, Box<Expr>),
     Neg(Box<Expr>),

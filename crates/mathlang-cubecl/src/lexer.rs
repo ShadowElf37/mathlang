@@ -1,6 +1,6 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
-    Num(f64), Imag(f64), Ident(String),
+    Num(f64), Imag(f64), Ident(String), Str(String),
     Plus, Minus, Star, Slash, SlashSlash, Percent, Caret, StarStar,
     LParen, RParen, LBrace, RBrace, LBracket, RBracket,
     Comma, Colon, Semicolon, Eq, Arrow, DotDot, Dot,
@@ -86,6 +86,32 @@ impl<'a> Lexer<'a> {
                     }
                     b'@' => { self.bump(); out.push(Token::At); }
                     b'~' => { self.bump(); out.push(Token::Tilde); }
+                    b'"' => {
+                        // String literal — the only place mathlang carries text (file
+                        // paths for save/load). Supports \\ \" \n \t escapes; an
+                        // unterminated string consumes to end-of-input. Byte-collected
+                        // so multi-byte UTF-8 path characters survive intact.
+                        self.bump();
+                        let mut bytes: Vec<u8> = Vec::new();
+                        while let Some(c) = self.peek() {
+                            if c == b'"' { self.bump(); break; }
+                            if c == b'\\' {
+                                self.bump();
+                                match self.bump() {
+                                    Some(b'n') => bytes.push(b'\n'),
+                                    Some(b't') => bytes.push(b'\t'),
+                                    Some(b'\\') => bytes.push(b'\\'),
+                                    Some(b'"') => bytes.push(b'"'),
+                                    Some(other) => { bytes.push(b'\\'); bytes.push(other); }
+                                    None => break,
+                                }
+                            } else {
+                                self.bump();
+                                bytes.push(c);
+                            }
+                        }
+                        out.push(Token::Str(String::from_utf8_lossy(&bytes).into_owned()));
+                    }
                     b'.' => {
                         self.bump();
                         if self.peek() == Some(b'.') { self.bump(); out.push(Token::DotDot); }

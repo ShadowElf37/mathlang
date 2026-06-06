@@ -85,6 +85,8 @@ pub const BUILTINS: &[&str] = &[
     // spectral
     "fft", "ifft",
     "len", "length", "cell", "get", "set",
+    // file I/O (.npy / .mlt / .h5)
+    "save", "load",
     // tensor constructors / shape (the compute path)
     "zeros", "ones", "eye", "linspace", "range", "shape", "rows", "cols",
     "tensor", "matrix", "lingrid", "diag",
@@ -110,6 +112,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
     match expr {
         Expr::Num(n) => Ok(Val::Num(*n)),
         Expr::ImagLit(n) => Ok(if *n == 0.0 { Val::Num(0.0) } else { Val::Complex(0.0, *n) }),
+        Expr::StrLit(s) => Ok(Val::Str(s.clone())),
         Expr::Var(n) => env.vars.get(n).cloned().ok_or_else(|| format!("undefined: {n}")),
         Expr::Lambda(params, ret_hint, body) => {
             let names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
@@ -369,6 +372,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
         }
         Val::Tensor(..) | Val::ComplexTensor(..) => Err("tensors are not callable".into()),
         Val::Field(..) => Err("fields are not callable".into()),
+        Val::Str(..) => Err("strings are not callable".into()),
         Val::Cell(..) => Err("cells are not callable (use get/set)".into()),
         Val::Namespace(..) => Err("namespaces are not callable (use ns.member)".into()),
     }
@@ -390,6 +394,7 @@ fn apply_num(s: f64, args: Vec<Val>) -> Result<Val, String> {
             Val::Tensor(..) | Val::ComplexTensor(..) => Err("scale a tensor with `*` (e.g. 2 * T), not juxtaposition".into()),
             Val::Field(..) => Err("scale a field with `*` (e.g. 2 * f), not juxtaposition".into()),
             Val::Builtin(_) => Err("cannot scale a builtin function".into()),
+            Val::Str(..) => Err("cannot scale a string".into()),
             Val::Cell(..) => Err("cannot scale a cell (use get/set)".into()),
             Val::Namespace(..) => Err("cannot scale a namespace".into()),
         };

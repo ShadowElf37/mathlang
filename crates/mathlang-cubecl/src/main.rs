@@ -25,6 +25,7 @@ mod builtins;
 mod compute;
 mod field;
 mod interp;
+mod io;
 mod pic;
 mod repl;
 mod spike;

@@ -39,6 +39,8 @@ pub enum Val {
         sig: Arc<FnSig>,
     },
     Builtin(String),
+    /// A string — mathlang's only text value, carried for file paths (save/load).
+    Str(String),
     /// A device-resident real tensor (the CubeCL compute path).
     Tensor(TensorVal),
     /// A device-resident complex tensor (interleaved re/im).
@@ -70,6 +72,7 @@ impl Val {
             Val::Complex(..) => Err(format!("{ctx}: expected a real number, got complex")),
             Val::Fn { .. } => Err(format!("{ctx}: expected a number, got a function")),
             Val::Builtin(n) => Err(format!("{ctx}: expected a number, got builtin '{n}'")),
+            Val::Str(..) => Err(format!("{ctx}: expected a number, got a string")),
             Val::Tensor(..) => Err(format!("{ctx}: expected a number, got a tensor")),
             Val::ComplexTensor(..) => Err(format!("{ctx}: expected a number, got a complex tensor")),
             Val::Field(..) => Err(format!("{ctx}: expected a number, got a field")),
@@ -146,6 +149,7 @@ pub fn fmt_val(v: &Val) -> String {
             format!("<fn({}){}= …>", param_strs.join(", "), if ret_str.is_empty() { " ".into() } else { format!("{ret_str} ") })
         }
         Val::Builtin(name) => format!("<builtin {name}>"),
+        Val::Str(s) => format!("\"{s}\""),
         Val::Cell(c) => format!("cell({})", fmt_val(&c.borrow())),
         Val::Namespace(map) => {
             let mut names: Vec<&String> = map.keys().collect();

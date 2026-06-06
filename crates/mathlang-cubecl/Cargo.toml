@@ -1,6 +1,6 @@
 [package]
 name = "mathlang-cubecl"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2024"
 description = "CubeCL-based prototype port of mathlang (single compute path, native f64)"
 
@@ -15,6 +15,9 @@ cubecl = { version = "=0.10.0", default-features = false, features = ["std"] }
 # Host FFT for the spectral operators (any size, f64 — exceeds the original GPU
 # power-of-two f32 path). A device-resident FFT is a later optimization.
 rustfft = "6"
+# HDF5 I/O (optional). Same crate as the original `m`; needs system libhdf5 to
+# build/run. `.npy` and `.mlt` I/O are always available (pure Rust, no deps).
+hdf5 = { package = "hdf5-metno", version = "0.12", optional = true }
 
 [features]
 # Runnable on macOS: cpu (native f64) + wgpu (Metal, f32). cuda/hip compile-check
@@ -24,3 +27,5 @@ cpu  = ["cubecl/cpu"]
 wgpu = ["cubecl/wgpu"]
 cuda = ["cubecl/cuda"]
 hip  = ["cubecl/hip"]
+# HDF5 tensor I/O (off by default; requires system libhdf5).
+hdf5 = ["dep:hdf5"]
