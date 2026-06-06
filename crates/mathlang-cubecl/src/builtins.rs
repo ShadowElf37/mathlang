@@ -306,9 +306,22 @@ pub fn eval_builtin(name: &str, args: Vec<Val>, env: &Env) -> Result<Val, String
             let x = host_solve(m, bv, n)?;
             compute::upload(env.target, &x, vec![n]).map(Val::Tensor)
         }
-        "eig" | "eigvals" => Err(format!(
-            "{name} is staged (a robust real eigensolver is pending); det/inv/solve are available"
-        )),
+        "trace" => {
+            let (m, n, _) = real_square(&one(args, name)?, name)?;
+            Ok(Val::Num((0..n).map(|i| m[i * n + i]).sum()))
+        }
+        "eigvals" => {
+            let (m, n, _) = real_square(&one(args, name)?, name)?;
+            let (lams, _) = eig_qr(&m, n);
+            compute::upload(env.target, &lams, vec![n]).map(Val::Tensor)
+        }
+        "eig" => {
+            let (m, n, _) = real_square(&one(args, name)?, name)?;
+            let (lams, evecs) = eig_qr(&m, n);
+            let lam = compute::upload(env.target, &lams, vec![n])?;
+            let vecs = compute::upload(env.target, &evecs, vec![n, n])?;
+            Ok(Val::Tuple(vec![Val::Tensor(lam), Val::Tensor(vecs)]))
+        }
 
         // ── elementwise select (where): cond ? a : b, via masking ───────────────
         "select" => {
@@ -340,6 +353,34 @@ pub fn eval_builtin(name: &str, args: Vec<Val>, env: &Env) -> Result<Val, String
                 Val::Tensor(t) => Err(format!("reshape: {} elements can't form {dims:?}", t.len)),
                 Val::ComplexTensor(t) => Err(format!("reshape: {} elements can't form {dims:?}", t.len)),
                 other => Err(format!("reshape: expected a tensor, got {}", fmt_val(other))),
+            }
+        }
+        "diag" => {
+            // vector/numeric-tuple → diagonal matrix; square matrix → its diagonal
+            match one(args, name)? {
+                Val::Tuple(items) => {
+                    let d: Vec<f64> = items.iter().map(|x| x.clone().num(name)).collect::<Result<_, _>>()?;
+                    let n = d.len();
+                    let mut m = vec![0.0; n * n];
+                    for i in 0..n { m[i * n + i] = d[i]; }
+                    compute::upload(env.target, &m, vec![n, n]).map(Val::Tensor)
+                }
+                Val::Tensor(t) => match t.shape.as_slice() {
+                    [n] => {
+                        let d = compute::download(&t)?;
+                        let mut m = vec![0.0; n * n];
+                        for i in 0..*n { m[i * n + i] = d[i]; }
+                        compute::upload(env.target, &m, vec![*n, *n]).map(Val::Tensor)
+                    }
+                    [r, c] => {
+                        let d = compute::download(&t)?;
+                        let k = (*r).min(*c);
+                        let diag: Vec<f64> = (0..k).map(|i| d[i * c + i]).collect();
+                        compute::upload(env.target, &diag, vec![k]).map(Val::Tensor)
+                    }
+                    _ => Err("diag: expected a 1-D or 2-D tensor".into()),
+                },
+                other => Err(format!("diag: expected a vector or matrix, got {}", fmt_val(&other))),
             }
         }
         "transpose" => transpose_val(one(args, name)?, env),
@@ -671,6 +712,88 @@ fn host_inv(mut m: Vec<f64>, n: usize) -> Result<Vec<f64>, String> {
         }
     }
     Ok(inv)
+}
+
+// ── eigenvalues / eigenvectors (unshifted Householder-QR iteration) ──────────────
+// Converges for symmetric matrices to real eigenvalues + orthogonal eigenvectors;
+// for non-symmetric input it returns the converged diagonal (matching the original).
+
+fn eye_n(n: usize) -> Vec<f64> {
+    let mut e = vec![0.0; n * n];
+    for i in 0..n {
+        e[i * n + i] = 1.0;
+    }
+    e
+}
+
+fn matmul_nn(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
+    let mut c = vec![0.0; n * n];
+    for i in 0..n {
+        for k in 0..n {
+            let aik = a[i * n + k];
+            for j in 0..n {
+                c[i * n + j] += aik * b[k * n + j];
+            }
+        }
+    }
+    c
+}
+
+/// Full QR via Householder reflections (n×n). Returns (Q, R).
+fn qr_householder(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut r = a.to_vec();
+    let mut q = eye_n(n);
+    for k in 0..n.saturating_sub(1) {
+        let len = n - k;
+        let x: Vec<f64> = (k..n).map(|i| r[i * n + k]).collect();
+        let norm_x: f64 = x.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if norm_x < 1e-14 {
+            continue;
+        }
+        let mut hv = x;
+        let sign = if hv[0] >= 0.0 { 1.0 } else { -1.0 };
+        hv[0] += sign * norm_x;
+        let norm_hv: f64 = hv.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if norm_hv < 1e-14 {
+            continue;
+        }
+        for v in &mut hv {
+            *v /= norm_hv;
+        }
+        for j in k..n {
+            let dot: f64 = (0..len).map(|i| hv[i] * r[(i + k) * n + j]).sum();
+            for i in 0..len {
+                r[(i + k) * n + j] -= 2.0 * hv[i] * dot;
+            }
+        }
+        for i in 0..n {
+            let dot: f64 = (0..len).map(|j| q[i * n + (j + k)] * hv[j]).sum();
+            for j in 0..len {
+                q[i * n + (j + k)] -= 2.0 * hv[j] * dot;
+            }
+        }
+    }
+    (q, r)
+}
+
+fn eig_qr(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut ak = a.to_vec();
+    let mut eigvecs = eye_n(n);
+    for _ in 0..2000 {
+        let (q, r) = qr_householder(&ak, n);
+        ak = matmul_nn(&r, &q, n);
+        eigvecs = matmul_nn(&eigvecs, &q, n);
+        let off: f64 = (0..n)
+            .flat_map(|i| (0..i).map(move |j| (i, j)))
+            .map(|(i, j)| ak[i * n + j] * ak[i * n + j])
+            .sum::<f64>()
+            .sqrt();
+        if off < 1e-12 {
+            break;
+        }
+    }
+    let eigenvalues: Vec<f64> = (0..n).map(|i| ak[i * n + i]).collect();
+    (eigenvalues, eigvecs)
 }
 
 /// Solve Ax = b via Gaussian elimination with back-substitution.

@@ -109,7 +109,10 @@ check 'solve((2,1;1,3),(5,10))' '[1, 3]'
 check 'solve((2,1;1,3),[5,10])' '[1, 3]'
 # heat equation: total heat conserved under Neumann (≈ 9)
 check 'round(sum(iterate(u -> u + 0.2*ops.lap(u,1,ops.neumann), (0,0,0;0,9,0;0,0,0), 10)))' '9'
-check_repl $'eigvals((2,0;0,3))' 'staged'
+check 'eigvals((2,0;0,3))'      '[2, 3]'
+check 'trace((1,2;3,4))'        '5'
+check 'diag((1,2,3))'           "$($MC '(1,0,0;0,2,0;0,0,3)' 2>/dev/null)"
+check 'diag((2,0;0,5))'         '[2, 5]'
 
 # ── resident loops: iterate / scan (Phase 4) ───────────────────────────────────
 check 'iterate(x -> 2*x, 1, 10)'        '1024'                    # scalar

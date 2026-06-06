@@ -69,13 +69,13 @@ pub const BUILTINS: &[&str] = &[
     "len", "length", "cell", "get", "set",
     // tensor constructors / shape (the compute path)
     "zeros", "ones", "eye", "linspace", "range", "shape", "rows", "cols",
-    "tensor", "matrix", "lingrid",
+    "tensor", "matrix", "lingrid", "diag",
     // assembly
     "reshape", "transpose", "cat", "vstack", "hstack",
     // elementwise branching
     "select",
     // linear algebra + reductions
-    "matmul", "norm", "mean", "std", "det", "inv", "solve", "eig", "eigvals",
+    "matmul", "norm", "mean", "std", "det", "inv", "solve", "eig", "eigvals", "trace",
     // stencils
     "shift", "roll",
 ];

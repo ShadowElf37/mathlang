@@ -35,7 +35,8 @@ broadcasting; unary math (`sin`/`exp`/`sqrt`/`sign`/`floor`/`ceil`/...); element
 **Stencils on device:** `shift`/`roll`, and the `ops` namespace `ops.lap(T,dx[,bc])`
 and `ops.grad(T,dx[,axis])` (periodic or `ops.neumann`) — enough to run the heat
 equation under `iterate` fully resident. **Dense linalg (host-side):** `det`/`inv`/
-`solve` (Gaussian elimination); `eig`/`eigvals` are staged. Every tensor op runs on
+`solve` (Gaussian elimination), `trace`, `diag`, and `eig`/`eigvals` (unshifted
+Householder-QR — converges for symmetric matrices). Every tensor op runs on
 the selected backend/precision — **no `GPU {}` block needed** (an improvement over
 the original, which was f32-only and block-scoped).
 

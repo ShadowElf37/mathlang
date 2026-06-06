@@ -338,10 +338,10 @@ Commands:
   !version           version
   !q / !quit         quit
 
-Linalg: det/inv/solve (eig staged). Stencils: shift/roll, ops.lap/grad
+Linalg: det/inv/solve/trace/diag/eig/eigvals. Stencils: shift/roll, ops.lap/grad
 (ops.periodic/ops.neumann).
 
-Not yet present (later phases): eig, spectral (fft/ops.poisson), fields/forms,
+Not yet present (later phases): spectral (fft/ops.poisson), fields/forms,
 pic, calculus, file I/O, animation."
     );
 }
