@@ -340,9 +340,8 @@ Commands:
 
 Linalg: det/inv/solve/trace/diag/eig/eigvals. Stencils: shift/roll, ops.lap/grad
 (ops.periodic/ops.neumann). Calculus: integral/deriv (scalar; multidim integrals
-and gradients too).
+and gradients too). Spectral: fft/ifft, ops.specgrad/poisson/invlap.
 
-Not yet present (later phases): spectral (fft/ops.poisson), fields/forms,
-pic, file I/O, animation."
+Not yet present (later phases): fields/forms, pic, file I/O, animation."
     );
 }

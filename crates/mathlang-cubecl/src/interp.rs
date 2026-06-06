@@ -43,6 +43,9 @@ impl Env {
         let mut ops = HashMap::new();
         ops.insert("lap".to_string(), Val::Builtin("ops.lap".into()));
         ops.insert("grad".to_string(), Val::Builtin("ops.grad".into()));
+        ops.insert("specgrad".to_string(), Val::Builtin("ops.specgrad".into()));
+        ops.insert("poisson".to_string(), Val::Builtin("ops.poisson".into()));
+        ops.insert("invlap".to_string(), Val::Builtin("ops.invlap".into()));
         ops.insert("periodic".to_string(), Val::Num(0.0));
         ops.insert("neumann".to_string(), Val::Num(1.0));
         vars.insert("ops".into(), Val::Namespace(Arc::new(ops)));
@@ -68,6 +71,8 @@ pub const BUILTINS: &[&str] = &[
     "sum", "prod", "iterate", "scan", "if",
     // calculus
     "integral", "deriv",
+    // spectral
+    "fft", "ifft",
     "len", "length", "cell", "get", "set",
     // tensor constructors / shape (the compute path)
     "zeros", "ones", "eye", "linspace", "range", "shape", "rows", "cols",

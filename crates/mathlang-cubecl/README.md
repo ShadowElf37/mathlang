@@ -105,6 +105,21 @@ hundreds/thousands of steps on real grids). Fusing the whole loop body into one
 on-device kernel (the README's "loop inside the kernel") is a later optimization
 built on the runtime-AST→IR codegen proven in Phase 0.
 
+## Spectral
+
+`fft`/`ifft` (n-D over all axes, or `fft(T, axes)`; real or complex input → complex
+output) and the `ops` spectral operators built on them:
+
+```
+fft([1,1,0,0])                 → [2, 1 - i, 0, 1 + i]
+ops.specgrad(sin(x), dx, 0)    → cos(x)   (machine-precision on smooth periodic data)
+ops.poisson(rhs, dx)           → u solving ∇²u = rhs (zero-mean), spectral
+ops.invlap(T, dx)              → inverse Laplacian (alias of poisson)
+```
+
+Host FFT via `rustfft` — **f64 and any size**, which *exceeds* the original GPU path
+(f32, power-of-two only). A device-resident FFT (Stockham) is a later optimization.
+
 ## Calculus
 
 `integral` and `deriv` (host-side, functions evaluated pointwise):

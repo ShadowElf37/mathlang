@@ -80,6 +80,16 @@ check 'exp([0+0i, 0+3.141592653589793i])' '[1, -1]'           # display collapse
 check 'sum([1+2i, 3+4i, 5+6i])' '9 + 12i'
 check_repl $'!type [1+2i, 3]'   'complex tensor'
 
+# ── spectral: fft/ifft + ops.poisson/specgrad ──────────────────────────────────
+check 'fft([1,1,0,0])'                   '[2, 1 - i, 0, 1 + i]'
+check 'fft([1,2,3,4])'                   '[10, -2 + 2i, -2, -2 - 2i]'
+check 're(ifft(fft([1,2,3,4])))'         '[1, 2, 3, 4]'
+check 'im(ifft(fft([1,2,3,4])))'         '[0, 0, 0, 0]'
+# spectral derivative is machine-precision accurate on a smooth periodic signal
+check_repl $'x = linspace(0, 2*pi - 2*pi/32, 32)\nnorm(ops.specgrad(sin(x), 2*pi/32, 0) - cos(x)) < 1e-10' '1'
+# Poisson solution is zero-mean
+check 'round(sum(ops.poisson([1.0,-2.0,1.0,0.0,1.0,-2.0,1.0,0.0], 1.0)))' '0'
+
 # ── calculus (Phase: integral/deriv, scalar + multidim) ─────────────────────────
 check 'integral(x -> x^2, 0, 1)'        '0.33333333333333315'    # scalar Simpson (== m)
 check 'deriv(x -> x^3, 2)'              '12.000000000182233'     # 5-point stencil (== m)

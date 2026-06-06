@@ -1,6 +1,6 @@
 [package]
 name = "mathlang-cubecl"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 description = "CubeCL-based prototype port of mathlang (single compute path, native f64)"
 
@@ -12,6 +12,9 @@ path = "src/main.rs"
 # Pinned: CubeCL is alpha and breaks between minors. All CubeCL types are confined
 # to the `compute` module so a version bump touches one place.
 cubecl = { version = "=0.10.0", default-features = false, features = ["std"] }
+# Host FFT for the spectral operators (any size, f64 — exceeds the original GPU
+# power-of-two f32 path). A device-resident FFT is a later optimization.
+rustfft = "6"
 
 [features]
 # Runnable on macOS: cpu (native f64) + wgpu (Metal, f32). cuda/hip compile-check

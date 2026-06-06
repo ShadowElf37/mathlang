@@ -46,6 +46,22 @@ pub fn eval_builtin(name: &str, args: Vec<Val>, env: &Env) -> Result<Val, String
             }
         }
         if let Val::Tensor(t) = &args[0] {
+            // complex-projection ops on a *real* tensor: re/conj are identity,
+            // im is zeros, arg is 0 where x≥0 and π where x<0.
+            match name {
+                "re" | "conj" => return Ok(Val::Tensor(t.clone())),
+                "im" => {
+                    let z = compute::upload(env.target, &[0.0], vec![1])?;
+                    return compute::binop(env.target, compute::OP_MUL, t, &z).map(Val::Tensor);
+                }
+                "arg" => {
+                    let z = compute::upload(env.target, &[0.0], vec![1])?;
+                    let lt = compute::binop(env.target, compute::OP_LT, t, &z)?;
+                    let pi = compute::upload(env.target, &[std::f64::consts::PI], vec![1])?;
+                    return compute::binop(env.target, compute::OP_MUL, &lt, &pi).map(Val::Tensor);
+                }
+                _ => {}
+            }
             if let Some(code) = unary_tensor_code(name) {
                 return compute::unary(env.target, code, t).map(Val::Tensor);
             }
@@ -381,6 +397,59 @@ pub fn eval_builtin(name: &str, args: Vec<Val>, env: &Env) -> Result<Val, String
                     Ok(Val::Num(integ_nd(&f, &lo, &hi, n, env)?))
                 }
             }
+        }
+
+        // ── spectral ────────────────────────────────────────────────────────────
+        "fft" | "ifft" => {
+            if args.is_empty() || args.len() > 2 {
+                return Err(format!("{name}(T[, axes]) expects 1 or 2 args"));
+            }
+            let forward = name == "fft";
+            let (mut re, mut im, shape) = as_complex_input(&args[0], name)?;
+            let ndim = shape.len();
+            let axes: Vec<usize> = match args.get(1) {
+                None => (0..ndim).collect(),
+                Some(Val::Num(n)) => vec![*n as usize],
+                Some(Val::Tensor(t)) => compute::download(t)?.iter().map(|&x| x as usize).collect(),
+                Some(Val::Tuple(items)) => items.iter().map(|v| Ok(v.clone().num(name)? as usize)).collect::<Result<_, String>>()?,
+                Some(other) => return Err(format!("{name}: axes must be a number, tuple, or tensor, got {}", fmt_val(other))),
+            };
+            for &ax in &axes {
+                if ax >= ndim {
+                    return Err(format!("{name}: axis {ax} out of range for {ndim}-D tensor"));
+                }
+            }
+            for &ax in &axes {
+                fft_axis_inplace(&mut re, &mut im, &shape, ax, forward);
+            }
+            maybe_real_upload(env, re, im, shape)
+        }
+        "ops.specgrad" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err("ops.specgrad(T, dx[, axis]) expects 2 or 3 args".into());
+            }
+            let (data, shape) = real_data(&args[0], "ops.specgrad")?;
+            let dx = args[1].clone().num("ops.specgrad dx")?;
+            let ndim = shape.len();
+            let axis = match args.get(2) {
+                Some(v) => v.clone().num("ops.specgrad axis")? as usize,
+                None if ndim == 1 => 0,
+                None => return Err("ops.specgrad: specify an axis for a multi-D tensor".into()),
+            };
+            if axis >= ndim {
+                return Err(format!("ops.specgrad: axis {axis} out of range for {ndim}-D tensor"));
+            }
+            let out = spec_deriv(&data, &shape, dx, axis);
+            compute::upload(env.target, &out, shape).map(Val::Tensor)
+        }
+        "ops.poisson" | "ops.invlap" => {
+            if args.len() != 2 {
+                return Err(format!("{name}(rhs, dx) expects 2 args"));
+            }
+            let (mut re, mut im, shape) = as_complex_input(&args[0], name)?;
+            let dx = args[1].clone().num("dx")?;
+            poisson_solve(&mut re, &mut im, &shape, dx);
+            compute::upload(env.target, &re, shape).map(Val::Tensor)
         }
 
         // ── elementwise select (where): cond ? a : b, via masking ───────────────
@@ -1103,6 +1172,145 @@ fn host_cat_2d(parts: Vec<(Vec<f64>, usize, usize)>, axis: usize) -> Result<(Vec
     } else {
         Err("cat: axis must be 0 or 1 for 2-D tensors".into())
     }
+}
+
+// ── spectral helpers (host FFT via rustfft; f64, any size) ──────────────────────
+
+fn t_strides(shape: &[usize]) -> Vec<usize> {
+    let n = shape.len();
+    let mut s = vec![1usize; n];
+    for k in (0..n.saturating_sub(1)).rev() {
+        s[k] = s[k + 1] * shape[k + 1];
+    }
+    s
+}
+
+fn unravel(mut flat: usize, shape: &[usize]) -> Vec<usize> {
+    let n = shape.len();
+    let mut idx = vec![0usize; n];
+    for k in (0..n).rev() {
+        idx[k] = flat % shape[k];
+        flat /= shape[k];
+    }
+    idx
+}
+
+/// FFT frequency index: m for m ≤ n/2, else m − n (so derivatives use signed k).
+fn kfreq(m: usize, n: usize) -> f64 {
+    if 2 * m < n { m as f64 } else { m as f64 - n as f64 }
+}
+
+/// In-place FFT along one axis over a flat row-major (re, im) buffer.
+fn fft_axis_inplace(re: &mut [f64], im: &mut [f64], shape: &[usize], axis: usize, forward: bool) {
+    use rustfft::{num_complex::Complex64, FftPlanner};
+    let n = shape[axis];
+    let s = t_strides(shape);
+    let axis_stride = s[axis];
+    let other_shape: Vec<usize> = shape.iter().enumerate().filter(|&(k, _)| k != axis).map(|(_, &d)| d).collect();
+    let other_strides: Vec<usize> = s.iter().enumerate().filter(|&(k, _)| k != axis).map(|(_, &st)| st).collect();
+    let other_total: usize = if other_shape.is_empty() { 1 } else { other_shape.iter().product() };
+    let mut planner = FftPlanner::new();
+    let fft = if forward { planner.plan_fft_forward(n) } else { planner.plan_fft_inverse(n) };
+    let mut buf = vec![Complex64::new(0.0, 0.0); n];
+    for other_flat in 0..other_total {
+        let other_multi = unravel(other_flat, &other_shape);
+        let base: usize = other_multi.iter().zip(&other_strides).map(|(&i, &st)| i * st).sum();
+        for i in 0..n {
+            let f = base + i * axis_stride;
+            buf[i] = Complex64::new(re[f], im[f]);
+        }
+        fft.process(&mut buf);
+        if !forward {
+            let sc = 1.0 / n as f64;
+            for c in &mut buf {
+                *c *= sc;
+            }
+        }
+        for i in 0..n {
+            let f = base + i * axis_stride;
+            re[f] = buf[i].re;
+            im[f] = buf[i].im;
+        }
+    }
+}
+
+fn fftn(re: &mut [f64], im: &mut [f64], shape: &[usize], forward: bool) {
+    for a in 0..shape.len() {
+        fft_axis_inplace(re, im, shape, a, forward);
+    }
+}
+
+/// Real tensor → (data, shape).
+fn real_data(v: &Val, name: &str) -> Result<(Vec<f64>, Vec<usize>), String> {
+    match v {
+        Val::Tensor(t) => Ok((compute::download(t)?, t.shape.clone())),
+        other => Err(format!("{name}: expected a real tensor, got {}", fmt_val(other))),
+    }
+}
+
+/// Real or complex tensor → (re, im, shape) for FFT input.
+fn as_complex_input(v: &Val, name: &str) -> Result<(Vec<f64>, Vec<f64>, Vec<usize>), String> {
+    match v {
+        Val::Tensor(t) => {
+            let re = compute::download(t)?;
+            let im = vec![0.0; re.len()];
+            Ok((re, im, t.shape.clone()))
+        }
+        Val::ComplexTensor(ct) => {
+            let (re, im) = compute::download_complex(ct)?;
+            Ok((re, im, ct.shape.clone()))
+        }
+        other => Err(format!("{name}: expected a tensor, got {}", fmt_val(other))),
+    }
+}
+
+/// Upload (re, im) as a complex tensor, collapsing to real if every im is exactly 0.
+fn maybe_real_upload(env: &Env, re: Vec<f64>, im: Vec<f64>, shape: Vec<usize>) -> Result<Val, String> {
+    if im.iter().all(|&x| x == 0.0) {
+        compute::upload(env.target, &re, shape).map(Val::Tensor)
+    } else {
+        compute::upload_complex(env.target, &re, &im, shape).map(Val::ComplexTensor)
+    }
+}
+
+/// Spectral derivative along `axis`: FFT → ×ik → IFFT, real part.
+fn spec_deriv(data: &[f64], shape: &[usize], dx: f64, axis: usize) -> Vec<f64> {
+    let mut re = data.to_vec();
+    let mut im = vec![0.0; data.len()];
+    fftn(&mut re, &mut im, shape, true);
+    let n_ax = shape[axis];
+    for p in 0..re.len() {
+        let multi = unravel(p, shape);
+        let k = kfreq(multi[axis], n_ax) * 2.0 * std::f64::consts::PI / (n_ax as f64 * dx);
+        let nr = -k * im[p];
+        let ni = k * re[p];
+        re[p] = nr;
+        im[p] = ni;
+    }
+    fftn(&mut re, &mut im, shape, false);
+    re
+}
+
+/// Spectral Poisson solve ∇²u = rhs (zero-mean): FFT → −r̂/k² → IFFT, real part.
+fn poisson_solve(re: &mut [f64], im: &mut [f64], shape: &[usize], dx: f64) {
+    fftn(re, im, shape, true);
+    let ndim = shape.len();
+    for p in 0..re.len() {
+        let multi = unravel(p, shape);
+        let mut k2 = 0.0;
+        for a in 0..ndim {
+            let k = kfreq(multi[a], shape[a]) * 2.0 * std::f64::consts::PI / (shape[a] as f64 * dx);
+            k2 += k * k;
+        }
+        if k2 == 0.0 {
+            re[p] = 0.0;
+            im[p] = 0.0;
+        } else {
+            re[p] = -re[p] / k2;
+            im[p] = -im[p] / k2;
+        }
+    }
+    fftn(re, im, shape, false);
 }
 
 // ── calculus helpers (host; functions are evaluated pointwise) ──────────────────
