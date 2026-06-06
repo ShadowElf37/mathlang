@@ -80,6 +80,23 @@ check 'exp([0+0i, 0+3.141592653589793i])' '[1, -1]'           # display collapse
 check 'sum([1+2i, 3+4i, 5+6i])' '9 + 12i'
 check_repl $'!type [1+2i, 3]'   'complex tensor'
 
+# ── indexing/slicing, constructors, assembly, branching, axis reductions ────────
+check 'A=(1,2,3;4,5,6;7,8,9); A[1,2]'    '6'
+check 'A=(1,2,3;4,5,6;7,8,9); A[0, ..]'  '[1, 2, 3]'
+check 'A=(1,2,3;4,5,6;7,8,9); A[.., 0]'  '[1, 4, 7]'
+check '[10,20,30,40,50][1..3]'           '[20, 30, 40]'
+check 'lingrid(0, 1, 5, x -> x^2)'       '[0, 0.0625, 0.25, 0.5625, 1]'
+check 'shape(tensor((i,j) -> i+j, 3, 4))' '[3, 4]'
+check 'reshape([1,2,3,4,5,6], 2, 3)'     "$($MC '(1,2,3;4,5,6)')"
+check 'transpose((1,2,3;4,5,6))'         "$($MC '(1,4;2,5;3,6)')"
+check 'vstack((1,2;3,4),(5,6))'          "$($MC '(1,2;3,4;5,6)')"
+check 'hstack((1,2),(3,4))'              "$($MC '(1,3;2,4)')"
+check 'sign([-2, 0, 3])'                 '[-1, 0, 1]'
+check 'max([1,5,2], [3,1,4])'            '[3, 5, 4]'
+check 'select([1,0,1], [10,20,30], [-1,-2,-3])' '[10, -2, 30]'
+check 'sum((1,2,3;4,5,6), 0)'            '[5, 7, 9]'
+check 'sum((1,2,3;4,5,6), 1)'            '[6, 15]'
+
 # ── stencils + dense linalg (Phase 3.x) ─────────────────────────────────────────
 check 'roll([1,2,3,4], 1, 0)'   '[4, 1, 2, 3]'
 check 'roll([1,2,3,4], -1, 0)'  '[2, 3, 4, 1]'

@@ -160,13 +160,15 @@ pub fn download(tv: &TensorVal) -> Result<Vec<f64>, String> {
 
 // ── elementwise dispatch ─────────────────────────────────────────────────────────
 
-pub use kernels::{OP_ADD, OP_DIV, OP_EQ, OP_GE, OP_GT, OP_LE, OP_LT, OP_MUL, OP_NE, OP_POW, OP_SUB};
+pub use kernels::{
+    OP_ADD, OP_DIV, OP_EQ, OP_GE, OP_GT, OP_LE, OP_LT, OP_MAX, OP_MIN, OP_MUL, OP_NE, OP_POW, OP_SUB,
+};
 pub use kernels::{RED_MAX, RED_MIN, RED_PROD, RED_SUM};
 // OP_MIN / OP_MAX kernels exist but the host min/max builtins reduce on the host
 // for now; they'll be wired to the device elementwise form in Phase 3.
 pub use kernels::{
-    UN_ABS, UN_ACOS, UN_ASIN, UN_ATAN, UN_COS, UN_COSH, UN_DEG, UN_EXP, UN_LN, UN_NEG, UN_RAD, UN_SIN,
-    UN_SINH, UN_SQRT, UN_TAN, UN_TANH, UN_TRUNC,
+    UN_ABS, UN_ACOS, UN_ASIN, UN_ATAN, UN_CEIL, UN_COS, UN_COSH, UN_DEG, UN_EXP, UN_FLOOR, UN_LN,
+    UN_NEG, UN_RAD, UN_SIGN, UN_SIN, UN_SINH, UN_SQRT, UN_TAN, UN_TANH, UN_TRUNC,
 };
 
 fn out_shape(a: &TensorVal, b: &TensorVal) -> Vec<usize> {

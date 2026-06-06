@@ -202,17 +202,24 @@ fn fmt_complex_tensor(t: &CTensor) -> String {
 /// Format a device tensor by pulling it to the host. 1-D → `[…]`, 2-D → a boxed
 /// matrix, higher rank → a shape header plus the flat data.
 fn fmt_tensor(t: &TensorVal) -> String {
-    let data = match compute::download(t) {
-        Ok(d) => d,
-        Err(e) => return format!("<tensor read error: {e}>"),
-    };
-    match t.shape.as_slice() {
+    match compute::download(t) {
+        Ok(d) => fmt_nd(&d, &t.shape),
+        Err(e) => format!("<tensor read error: {e}>"),
+    }
+}
+
+/// Recursive n-D display: 1-D `[…]`, 2-D boxed matrix, higher rank as `[i]`-labelled
+/// slices (matching the original).
+fn fmt_nd(data: &[f64], shape: &[usize]) -> String {
+    match shape {
         [] | [_] => format!("[{}]", data.iter().map(|x| fmt_f(*x)).collect::<Vec<_>>().join(", ")),
-        [r, c] => fmt_mat(&data, *r, *c),
-        shape => {
-            let dims = shape.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("×");
-            let body = data.iter().map(|x| fmt_f(*x)).collect::<Vec<_>>().join(", ");
-            format!("tensor[{dims}] [{body}]")
+        [r, c] => fmt_mat(data, *r, *c),
+        [d0, rest @ ..] => {
+            let sub: usize = rest.iter().product();
+            (0..*d0)
+                .map(|i| format!("[{i}]\n{}", fmt_nd(&data[i * sub..(i + 1) * sub], rest)))
+                .collect::<Vec<_>>()
+                .join("\n")
         }
     }
 }

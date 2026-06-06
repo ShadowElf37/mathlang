@@ -315,9 +315,11 @@ Scalars, complex, tuples, lambdas, closures, blocks, if, comparisons.
 Tensors run on the compute path: [a,b,c], matrices (1,2; 3,4), a..b,
 zeros/ones/eye/linspace/range; elementwise + - * / ^ and comparisons,
 broadcasting a scalar against a tensor; unary math (sin/exp/sqrt/...);
-shape/rows/cols/len; @ / matmul; sum/prod/mean/min/max/norm/std (device
-reductions). Complex tensors: [1+2i,…], promotion, re/im/abs/arg/conj,
-exp/ln/sqrt/sin/cos, complex sum/mean. Precision: f32, f64
+shape/rows/cols/len; indexing/slicing T[i,j]/T[..,j]/T[a..b]; constructors
+tensor/matrix/lingrid; assembly reshape/transpose/cat/vstack/hstack;
+select/elementwise min,max; sum(T,axis). @ / matmul; sum/prod/mean/min/max/
+norm/std (device reductions). Complex tensors: [1+2i,…], promotion,
+re/im/abs/arg/conj, exp/ln/sqrt/sin/cos, complex sum/mean. Precision: f32, f64
 (cpu/cuda/hip), or df64 double-single (+ - * / & compares on cpu/cuda/hip;
 gated on wgpu; pow/transcendentals staged).
 Other builtins: min/max/pow/hypot/gcd/lcm/ncr, lt/leq/gt/geq/eq/neq,
@@ -339,7 +341,7 @@ Commands:
 Linalg: det/inv/solve (eig staged). Stencils: shift/roll, ops.lap/grad
 (ops.periodic/ops.neumann).
 
-Not yet present (later phases): tensor indexing/slicing, eig, spectral
-(fft/ops.poisson), fields/forms, pic, calculus, file I/O, animation."
+Not yet present (later phases): eig, spectral (fft/ops.poisson), fields/forms,
+pic, calculus, file I/O, animation."
     );
 }

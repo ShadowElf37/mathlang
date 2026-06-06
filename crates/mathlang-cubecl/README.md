@@ -23,9 +23,13 @@ functions/lambdas/closures/recursion, `if`, comparisons, `sum`/`prod`/`map`/
 `filter`/`reduce`/`iterate`, `compose`/`partial`, `cell`/`get`/`set`, scalar math.
 
 **Tensors (the compute path):** `[a,b,c]`, matrices `(1,2; 3,4)`, `a..b`,
-`zeros`/`ones`/`eye`/`linspace`/`range`; elementwise `+ - * / ^` and comparisons
-with scalar↔tensor broadcasting; unary math (`sin`/`exp`/`sqrt`/...); `shape`/
-`rows`/`cols`/`len`. **Linear algebra & reductions on device:** `@`/`matmul`
+`zeros`/`ones`/`eye`/`linspace`/`range`, build-by-function `tensor((i,j)->…)`/
+`matrix`/`lingrid`; elementwise `+ - * / ^` and comparisons with scalar↔tensor
+broadcasting; unary math (`sin`/`exp`/`sqrt`/`sign`/`floor`/`ceil`/...); elementwise
+`min`/`max`/`select(cond,a,b)`; `shape`/`rows`/`cols`/`len`. **Indexing & slicing:**
+`T[i,j]`, `T[.., j]`, `T[i, ..]`, `T[a..b]` (host-side gather). **Assembly:**
+`reshape`, `transpose`, `cat`, `vstack`, `hstack`. **Axis reductions:** `sum(T,axis)`,
+`prod(T,axis)`. **Linear algebra & reductions on device:** `@`/`matmul`
 (2D×2D, mat·vec, vec·mat, dot), and `sum`/`prod`/`mean`/`min`/`max`/`norm`/`std`
 (parallel reduction, Neumaier-compensated sum; df64 reduces via host fallback).
 **Stencils on device:** `shift`/`roll`, and the `ops` namespace `ops.lap(T,dx[,bc])`

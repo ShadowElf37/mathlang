@@ -87,6 +87,9 @@ pub const UN_TANH: u32 = 13;
 pub const UN_TRUNC: u32 = 14;
 pub const UN_DEG: u32 = 15;
 pub const UN_RAD: u32 = 16;
+pub const UN_SIGN: u32 = 17;
+pub const UN_FLOOR: u32 = 18;
+pub const UN_CEIL: u32 = 19;
 
 #[cube]
 fn apply_un<F: Float>(x: F, #[comptime] op: u32) -> F {
@@ -123,6 +126,12 @@ fn apply_un<F: Float>(x: F, #[comptime] op: u32) -> F {
         r = F::to_degrees(x);
     } else if comptime![op == UN_RAD] {
         r = F::to_radians(x);
+    } else if comptime![op == UN_SIGN] {
+        r = F::cast_from(x > F::new(0.0)) - F::cast_from(x < F::new(0.0));
+    } else if comptime![op == UN_FLOOR] {
+        r = F::floor(x);
+    } else if comptime![op == UN_CEIL] {
+        r = F::ceil(x);
     }
     r
 }

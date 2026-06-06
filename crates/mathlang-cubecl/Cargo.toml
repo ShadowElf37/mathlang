@@ -1,6 +1,6 @@
 [package]
 name = "mathlang-cubecl"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 description = "CubeCL-based prototype port of mathlang (single compute path, native f64)"
 

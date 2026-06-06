@@ -4,7 +4,7 @@
 
 use crate::ast::Op;
 use crate::compute::{self, TensorVal};
-use crate::interp::{binop_val, ensure_on, Env};
+use crate::interp::{apply_val, binop_val, ensure_on, to_tensor_on, Env};
 use crate::value::{fmt_val, make_complex, to_complex, Val};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -161,8 +161,27 @@ pub fn eval_builtin(name: &str, args: Vec<Val>, env: &Env) -> Result<Val, String
             for k in 0..r { acc = acc * (n - k) as f64 / (k + 1) as f64; }
             Ok(Val::Num(acc.round()))
         }
-        "min" => Ok(Val::Num(num_leaves(args, name)?.into_iter().fold(f64::INFINITY, f64::min))),
-        "max" => Ok(Val::Num(num_leaves(args, name)?.into_iter().fold(f64::NEG_INFINITY, f64::max))),
+        // 2-arg elementwise on tensors; otherwise reduce numeric leaves on the host.
+        // (A single tensor arg is handled by the whole-tensor reduction above.)
+        "min" | "max" => {
+            let elementwise = args.len() == 2 && args.iter().any(|a| matches!(a, Val::Tensor(_)));
+            if elementwise {
+                let code = if name == "min" { compute::OP_MIN } else { compute::OP_MAX };
+                let mut it = args.into_iter();
+                let a = to_tensor_on(it.next().unwrap(), env.target)?;
+                let b = to_tensor_on(it.next().unwrap(), env.target)?;
+                compute::binop(env.target, code, &a, &b).map(Val::Tensor)
+            } else {
+                let leaves = num_leaves(args, name)?;
+                let init = if name == "min" { f64::INFINITY } else { f64::NEG_INFINITY };
+                let folded = if name == "min" {
+                    leaves.into_iter().fold(init, f64::min)
+                } else {
+                    leaves.into_iter().fold(init, f64::max)
+                };
+                Ok(Val::Num(folded))
+            }
+        }
 
         // ── comparison functions (reuse the operator semantics) ────────────────
         "lt" => cmp(args, name, Op::Lt, env),
@@ -291,6 +310,49 @@ pub fn eval_builtin(name: &str, args: Vec<Val>, env: &Env) -> Result<Val, String
             "{name} is staged (a robust real eigensolver is pending); det/inv/solve are available"
         )),
 
+        // ── elementwise select (where): cond ? a : b, via masking ───────────────
+        "select" => {
+            if args.len() != 3 {
+                return Err("select(cond, a, b) expects 3 args".into());
+            }
+            let mut it = args.into_iter();
+            let (c, a, b) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+            let one_minus = binop_val(Val::Num(1.0), &Op::Sub, c.clone(), env.target)?;
+            let ca = binop_val(c, &Op::Mul, a, env.target)?;
+            let cb = binop_val(one_minus, &Op::Mul, b, env.target)?;
+            binop_val(ca, &Op::Add, cb, env.target)
+        }
+
+        // ── build-by-function constructors ──────────────────────────────────────
+        "tensor" | "matrix" => build_by_fn(args, name, env),
+        "lingrid" => build_lingrid(args, env),
+
+        // ── assembly ────────────────────────────────────────────────────────────
+        "reshape" => {
+            if args.len() < 2 {
+                return Err("reshape(T, n1, ...) expects a tensor and new dims".into());
+            }
+            let dims: Vec<usize> = args[1..].iter().map(|v| Ok(v.clone().num(name)? as usize)).collect::<Result<_, String>>()?;
+            let total: usize = dims.iter().product();
+            match &args[0] {
+                Val::Tensor(t) if t.len == total => { let mut t2 = t.clone(); t2.shape = dims; Ok(Val::Tensor(t2)) }
+                Val::ComplexTensor(t) if t.len == total => { let mut t2 = t.clone(); t2.shape = dims; Ok(Val::ComplexTensor(t2)) }
+                Val::Tensor(t) => Err(format!("reshape: {} elements can't form {dims:?}", t.len)),
+                Val::ComplexTensor(t) => Err(format!("reshape: {} elements can't form {dims:?}", t.len)),
+                other => Err(format!("reshape: expected a tensor, got {}", fmt_val(other))),
+            }
+        }
+        "transpose" => transpose_val(one(args, name)?, env),
+        "cat" => {
+            if args.len() < 2 {
+                return Err("cat(axis, T1, T2, ...) expects an axis and tensors".into());
+            }
+            let axis = args[0].clone().num(name)? as usize;
+            cat_vals(&args[1..], axis, env)
+        }
+        "vstack" => stack_vals(&args, 0, env),
+        "hstack" => stack_vals(&args, 1, env),
+
         _ => {
             // Help the user: many names exist in the real `m` but await later phases.
             Err(format!("`{name}` is not available in the prototype yet (later phase)"))
@@ -367,6 +429,9 @@ fn unary_tensor_code(name: &str) -> Option<u32> {
         "trunc" => compute::UN_TRUNC,
         "deg" => compute::UN_DEG,
         "rad" => compute::UN_RAD,
+        "sign" | "signum" => compute::UN_SIGN,
+        "floor" => compute::UN_FLOOR,
+        "ceil" => compute::UN_CEIL,
         _ => return None,
     })
 }
@@ -643,6 +708,218 @@ fn host_solve(mut a: Vec<f64>, mut b: Vec<f64>, n: usize) -> Result<Vec<f64>, St
         x[col] = s / a[col * n + col];
     }
     Ok(x)
+}
+
+/// `tensor(f, n1, ...)` / `matrix(f, r, c)` — build a tensor by calling `f` at each
+/// integer multi-index (host-side; promotes to complex if `f` returns complex).
+fn build_by_fn(args: Vec<Val>, name: &str, env: &Env) -> Result<Val, String> {
+    if args.len() < 2 {
+        return Err(format!("{name}(f, n1, ...) expects a function and dims"));
+    }
+    let f = args[0].clone();
+    let dims: Vec<usize> = args[1..].iter().map(|v| Ok(v.clone().num(name)? as usize)).collect::<Result<_, String>>()?;
+    let total: usize = dims.iter().product();
+    let (mut re, mut im, mut has_c) = (Vec::with_capacity(total), Vec::with_capacity(total), false);
+    let mut counter = vec![0usize; dims.len()];
+    for _ in 0..total {
+        let idx_args: Vec<Val> = counter.iter().map(|&c| Val::Num(c as f64)).collect();
+        match apply_val(f.clone(), idx_args, env)? {
+            Val::Num(x) => { re.push(x); im.push(0.0); }
+            Val::Complex(a, b) => { re.push(a); im.push(b); has_c = true; }
+            other => return Err(format!("{name}: f must return a number, got {}", fmt_val(&other))),
+        }
+        for k in (0..dims.len()).rev() {
+            counter[k] += 1;
+            if counter[k] < dims[k] { break; }
+            counter[k] = 0;
+        }
+    }
+    if has_c {
+        compute::upload_complex(env.target, &re, &im, dims).map(Val::ComplexTensor)
+    } else {
+        compute::upload(env.target, &re, dims).map(Val::Tensor)
+    }
+}
+
+/// `lingrid(start, end, counts, f)` — sample `f` at physical coords on a uniform grid.
+fn build_lingrid(args: Vec<Val>, env: &Env) -> Result<Val, String> {
+    if args.len() != 4 {
+        return Err("lingrid(start, end, counts, f) expects 4 args".into());
+    }
+    let starts = vals_to_f64s(&args[0], "lingrid")?;
+    let ends = vals_to_f64s(&args[1], "lingrid")?;
+    let counts: Vec<usize> = vals_to_f64s(&args[2], "lingrid")?.iter().map(|&x| x as usize).collect();
+    let ndim = counts.len();
+    if starts.len() != ndim || ends.len() != ndim {
+        return Err("lingrid: start/end/counts must have the same length".into());
+    }
+    let f = args[3].clone();
+    let total: usize = counts.iter().product();
+    let (mut re, mut im, mut has_c) = (Vec::with_capacity(total), Vec::with_capacity(total), false);
+    let mut counter = vec![0usize; ndim];
+    for _ in 0..total {
+        let coords: Vec<Val> = (0..ndim).map(|a| {
+            let n = counts[a];
+            let x = if n <= 1 { starts[a] } else { starts[a] + (ends[a] - starts[a]) * counter[a] as f64 / (n - 1) as f64 };
+            Val::Num(x)
+        }).collect();
+        match apply_val(f.clone(), coords, env)? {
+            Val::Num(x) => { re.push(x); im.push(0.0); }
+            Val::Complex(a, b) => { re.push(a); im.push(b); has_c = true; }
+            other => return Err(format!("lingrid: f must return a number (tuple/tensor returns not supported yet), got {}", fmt_val(&other))),
+        }
+        for k in (0..ndim).rev() {
+            counter[k] += 1;
+            if counter[k] < counts[k] { break; }
+            counter[k] = 0;
+        }
+    }
+    if has_c {
+        compute::upload_complex(env.target, &re, &im, counts).map(Val::ComplexTensor)
+    } else {
+        compute::upload(env.target, &re, counts).map(Val::Tensor)
+    }
+}
+
+/// A scalar or numeric tuple → Vec<f64> (for lingrid's start/end/counts).
+fn vals_to_f64s(v: &Val, name: &str) -> Result<Vec<f64>, String> {
+    match v {
+        Val::Num(x) => Ok(vec![*x]),
+        Val::Tuple(items) => items.iter().map(|x| x.clone().num(name)).collect(),
+        other => Err(format!("{name}: expected a scalar or tuple, got {}", fmt_val(other))),
+    }
+}
+
+/// 2-D transpose (1-D is returned unchanged).
+fn transpose_val(v: Val, env: &Env) -> Result<Val, String> {
+    match v {
+        Val::Tensor(t) => match t.shape.as_slice() {
+            [_] => Ok(Val::Tensor(t)),
+            [r, c] => {
+                let (r, c) = (*r, *c);
+                let data = compute::download(&t)?;
+                let mut out = vec![0.0; data.len()];
+                for i in 0..r {
+                    for j in 0..c {
+                        out[j * r + i] = data[i * c + j];
+                    }
+                }
+                compute::upload(env.target, &out, vec![c, r]).map(Val::Tensor)
+            }
+            _ => Err("transpose: only 1-D and 2-D tensors are supported".into()),
+        },
+        Val::ComplexTensor(ct) => match ct.shape.as_slice() {
+            [_] => Ok(Val::ComplexTensor(ct)),
+            [r, c] => {
+                let (r, c) = (*r, *c);
+                let (re, im) = compute::download_complex(&ct)?;
+                let (mut or, mut oi) = (vec![0.0; re.len()], vec![0.0; im.len()]);
+                for i in 0..r {
+                    for j in 0..c {
+                        or[j * r + i] = re[i * c + j];
+                        oi[j * r + i] = im[i * c + j];
+                    }
+                }
+                compute::upload_complex(env.target, &or, &oi, vec![c, r]).map(Val::ComplexTensor)
+            }
+            _ => Err("transpose: only 1-D and 2-D tensors are supported".into()),
+        },
+        other => Err(format!("transpose: expected a tensor, got {}", fmt_val(&other))),
+    }
+}
+
+/// Coerce a value to a real (data, shape) block: tensor, numeric tuple → 1-D, or
+/// scalar → length-1. (Numeric tuples act as vectors, matching the original.)
+fn as_real_block(v: &Val) -> Result<(Vec<f64>, Vec<usize>), String> {
+    match v {
+        Val::Tensor(t) => Ok((compute::download(t)?, t.shape.clone())),
+        Val::Tuple(items) => {
+            let d: Vec<f64> = items.iter().map(|x| x.clone().num("stack")).collect::<Result<_, _>>()?;
+            let n = d.len();
+            Ok((d, vec![n]))
+        }
+        Val::Num(x) => Ok((vec![*x], vec![1])),
+        other => Err(format!("expected a real tensor/vector, got {}", fmt_val(other))),
+    }
+}
+
+/// Promote a block to 2-D for stacking: 1-D → row (axis 0) or column (axis 1).
+fn promote_2d(block: (Vec<f64>, Vec<usize>), axis: usize) -> Result<(Vec<f64>, usize, usize), String> {
+    let (d, s) = block;
+    match s.as_slice() {
+        [n] => Ok(if axis == 0 { (d, 1, *n) } else { (d, *n, 1) }),
+        [r, c] => Ok((d, *r, *c)),
+        _ => Err("stacking supports only scalars, 1-D, and 2-D tensors".into()),
+    }
+}
+
+/// Concatenate along `axis`. All-1-D along axis 0 stays 1-D; otherwise blocks are
+/// promoted to 2-D (numeric tuples act as vectors).
+fn cat_vals(parts: &[Val], axis: usize, env: &Env) -> Result<Val, String> {
+    let blocks: Vec<(Vec<f64>, Vec<usize>)> = parts.iter().map(as_real_block).collect::<Result<_, _>>()?;
+    if blocks.is_empty() {
+        return Err("cat: needs at least one tensor".into());
+    }
+    if blocks.iter().all(|(_, s)| s.len() == 1) && axis == 0 {
+        let mut out = vec![];
+        for (d, _) in &blocks {
+            out.extend_from_slice(d);
+        }
+        let n = out.len();
+        return compute::upload(env.target, &out, vec![n]).map(Val::Tensor);
+    }
+    let twod = blocks.into_iter().map(|b| promote_2d(b, axis)).collect::<Result<_, _>>()?;
+    let (out, shape) = host_cat_2d(twod, axis)?;
+    compute::upload(env.target, &out, shape).map(Val::Tensor)
+}
+
+/// vstack (axis 0) / hstack (axis 1) — always 2-D, with 1-D → row/column promotion.
+fn stack_vals(parts: &[Val], axis: usize, env: &Env) -> Result<Val, String> {
+    let twod = parts
+        .iter()
+        .map(|v| promote_2d(as_real_block(v)?, axis))
+        .collect::<Result<_, _>>()?;
+    let (out, shape) = host_cat_2d(twod, axis)?;
+    compute::upload(env.target, &out, shape).map(Val::Tensor)
+}
+
+/// Concatenate row-major 2-D blocks along axis 0 (stack rows) or 1 (stack columns).
+fn host_cat_2d(parts: Vec<(Vec<f64>, usize, usize)>, axis: usize) -> Result<(Vec<f64>, Vec<usize>), String> {
+    if parts.is_empty() {
+        return Err("cat: needs at least one tensor".into());
+    }
+    if axis == 0 {
+        let c = parts[0].2;
+        if parts.iter().any(|(_, _, pc)| *pc != c) {
+            return Err("cat axis 0: all blocks must have the same number of columns".into());
+        }
+        let mut out = vec![];
+        let mut rows = 0;
+        for (d, r, _) in &parts {
+            out.extend_from_slice(d);
+            rows += r;
+        }
+        Ok((out, vec![rows, c]))
+    } else if axis == 1 {
+        let r = parts[0].1;
+        if parts.iter().any(|(_, pr, _)| *pr != r) {
+            return Err("cat axis 1: all blocks must have the same number of rows".into());
+        }
+        let total_c: usize = parts.iter().map(|(_, _, c)| c).sum();
+        let mut out = vec![0.0; r * total_c];
+        for i in 0..r {
+            let mut col0 = 0;
+            for (d, _, c) in &parts {
+                for j in 0..*c {
+                    out[i * total_c + col0 + j] = d[i * c + j];
+                }
+                col0 += c;
+            }
+        }
+        Ok((out, vec![r, total_c]))
+    } else {
+        Err("cat: axis must be 0 or 1 for 2-D tensors".into())
+    }
 }
 
 /// Population standard deviation of a tensor: sqrt(mean((x − mean)²)) — all on device.

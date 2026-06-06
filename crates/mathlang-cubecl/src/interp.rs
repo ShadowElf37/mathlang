@@ -69,6 +69,11 @@ pub const BUILTINS: &[&str] = &[
     "len", "length", "cell", "get", "set",
     // tensor constructors / shape (the compute path)
     "zeros", "ones", "eye", "linspace", "range", "shape", "rows", "cols",
+    "tensor", "matrix", "lingrid",
+    // assembly
+    "reshape", "transpose", "cat", "vstack", "hstack",
+    // elementwise branching
+    "select",
     // linear algebra + reductions
     "matmul", "norm", "mean", "std", "det", "inv", "solve", "eig", "eigvals",
     // stencils
@@ -124,7 +129,28 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                     let i = norm_index(i, items.len(), "tuple")?;
                     items.into_iter().nth(i).ok_or_else(|| "index out of range".into())
                 }
-                _ => Err("indexing requires a tuple (tensors land in Phase 2)".into()),
+                Val::Tensor(t) => {
+                    let data = compute::download(&t)?;
+                    let (lin, out_shape) = resolve_index(&t.shape, idx, env)?;
+                    let out: Vec<f64> = lin.iter().map(|&i| data[i]).collect();
+                    if out_shape.is_empty() {
+                        Ok(Val::Num(out[0]))
+                    } else {
+                        compute::upload(env.target, &out, out_shape).map(Val::Tensor)
+                    }
+                }
+                Val::ComplexTensor(ct) => {
+                    let (re, im) = compute::download_complex(&ct)?;
+                    let (lin, out_shape) = resolve_index(&ct.shape, idx, env)?;
+                    let or: Vec<f64> = lin.iter().map(|&i| re[i]).collect();
+                    let oi: Vec<f64> = lin.iter().map(|&i| im[i]).collect();
+                    if out_shape.is_empty() {
+                        Ok(make_complex(or[0], oi[0]))
+                    } else {
+                        compute::upload_complex(env.target, &or, &oi, out_shape).map(Val::ComplexTensor)
+                    }
+                }
+                _ => Err("indexing requires a tuple or tensor".into()),
             }
         }
         Expr::Apply(f_expr, arg_exprs) => eval_apply(f_expr, arg_exprs, env),
@@ -499,7 +525,7 @@ pub fn ensure_on(t: TensorVal, target: Target) -> Result<TensorVal, String> {
 
 /// Coerce any scalar/tensor operand to a tensor on `target` (scalars → length-1,
 /// which the kernel broadcasts).
-fn to_tensor_on(v: Val, target: Target) -> Result<TensorVal, String> {
+pub fn to_tensor_on(v: Val, target: Target) -> Result<TensorVal, String> {
     match v {
         Val::Tensor(t) => ensure_on(t, target),
         Val::Num(x) => compute::upload(target, &[x], vec![1]),
@@ -618,6 +644,94 @@ pub fn norm_index(i: i64, len: usize, what: &str) -> Result<usize, String> {
     Ok(adj as usize)
 }
 
+// ── tensor indexing / slicing (host-side gather) ─────────────────────────────────
+
+/// Resolve one index item for an axis of size `dim`: returns (is_range, indices).
+/// `..`/`lo..`/`..hi`/`lo..hi` are ranges (keep the axis, inclusive); a scalar
+/// collapses the axis. Matches the original's semantics.
+fn resolve_index_item(item: &Expr, dim: usize, k: usize, env: &Env) -> Result<(bool, Vec<usize>), String> {
+    let clamp = |raw: i64| -> Result<usize, String> {
+        let i = if raw < 0 { raw + dim as i64 } else { raw };
+        if i < 0 || i >= dim as i64 {
+            Err(format!("index {raw} out of range for dim {k} (size={dim})"))
+        } else {
+            Ok(i as usize)
+        }
+    };
+    match item {
+        Expr::Slice(None, None) => Ok((true, (0..dim).collect())),
+        Expr::Slice(Some(lo), None) => {
+            let lo = eval(lo, env)?.num("slice lo")? as i64;
+            let lo = if lo < 0 { (dim as i64 + lo).max(0) as usize } else { lo as usize };
+            Ok((true, (lo.min(dim)..dim).collect()))
+        }
+        Expr::Slice(None, Some(hi)) => {
+            let hi = clamp(eval(hi, env)?.num("slice hi")? as i64)?;
+            Ok((true, (0..=hi).collect()))
+        }
+        Expr::Slice(Some(lo), Some(hi)) => {
+            let lo = eval(lo, env)?.num("slice lo")? as i64;
+            let lo = if lo < 0 { (dim as i64 + lo).max(0) as usize } else { lo as usize };
+            let hi = clamp(eval(hi, env)?.num("slice hi")? as i64)?;
+            if lo > hi { return Ok((true, vec![])); }
+            Ok((true, (lo..=hi).collect()))
+        }
+        other => {
+            let i = clamp(eval(other, env)?.num("tensor index")? as i64)?;
+            Ok((false, vec![i]))
+        }
+    }
+}
+
+/// Resolve a full index expression against `shape`, returning the source linear
+/// indices (in row-major result order) and the result shape (collapsed axes drop).
+fn resolve_index(shape: &[usize], idx: &Expr, env: &Env) -> Result<(Vec<usize>, Vec<usize>), String> {
+    let rank = shape.len();
+    let items: Vec<&Expr> = match idx {
+        Expr::Tuple(es) => es.iter().collect(),
+        single => vec![single],
+    };
+    if items.len() > rank {
+        return Err(format!("got {} indices for a {}-D tensor", items.len(), rank));
+    }
+    // Per-axis spec; axes beyond the given items are full slices.
+    let mut sel: Vec<Vec<usize>> = Vec::with_capacity(rank);
+    let mut out_shape: Vec<usize> = Vec::new();
+    for k in 0..rank {
+        let (is_range, idxs) = match items.get(k) {
+            Some(item) => resolve_index_item(item, shape[k], k, env)?,
+            None => (true, (0..shape[k]).collect()),
+        };
+        if is_range {
+            out_shape.push(idxs.len());
+        }
+        sel.push(idxs);
+    }
+    // Row-major strides of the source.
+    let mut strides = vec![1usize; rank];
+    for k in (0..rank.saturating_sub(1)).rev() {
+        strides[k] = strides[k + 1] * shape[k + 1];
+    }
+    let total: usize = sel.iter().map(|s| s.len()).product();
+    let mut lin = Vec::with_capacity(total);
+    let mut counter = vec![0usize; rank];
+    for _ in 0..total {
+        let mut src = 0;
+        for k in 0..rank {
+            src += sel[k][counter[k]] * strides[k];
+        }
+        lin.push(src);
+        for k in (0..rank).rev() {
+            counter[k] += 1;
+            if counter[k] < sel[k].len() {
+                break;
+            }
+            counter[k] = 0;
+        }
+    }
+    Ok((lin, out_shape))
+}
+
 // ── special forms ─────────────────────────────────────────────────────────────
 
 fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> {
@@ -656,6 +770,23 @@ fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> {
             other => Err(format!("{label}: 1-arg form requires a tuple, got {}", fmt_val(&other))),
         };
     }
+    // 2-arg: sum(tensor, axis) — axis reduction (host-side; result drops the axis)
+    if args.len() == 2 {
+        if let Val::Tensor(t) = eval(&args[0], env)? {
+            let axis = eval(&args[1], env)?.num(label)? as usize;
+            if axis >= t.shape.len() {
+                return Err(format!("{label}: axis {axis} out of range for {}-D tensor", t.shape.len()));
+            }
+            let data = compute::download(&t)?;
+            let (out, out_shape) = axis_reduce(&data, &t.shape, axis, product);
+            return if out_shape.is_empty() {
+                Ok(Val::Num(out[0]))
+            } else {
+                compute::upload(env.target, &out, out_shape).map(Val::Tensor)
+            };
+        }
+        return Err(format!("{label}: 2-arg form is {label}(tensor, axis)"));
+    }
     // 3-arg: sum(f, lo, hi) inclusive
     if args.len() == 3 {
         let f = eval(&args[0], env)?;
@@ -677,6 +808,45 @@ fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> {
         return Ok(make_complex(acc_re, acc_im));
     }
     Err(format!("{label}: expected {label}(tuple) or {label}(f, lo, hi) in the prototype"))
+}
+
+/// Reduce a flat row-major tensor along one axis (sum or product). Returns the
+/// flat result and its shape (the axis removed; empty shape ⇒ scalar).
+fn axis_reduce(data: &[f64], shape: &[usize], axis: usize, product: bool) -> (Vec<f64>, Vec<usize>) {
+    let rank = shape.len();
+    let asize = shape[axis];
+    let mut strides = vec![1usize; rank];
+    for k in (0..rank.saturating_sub(1)).rev() {
+        strides[k] = strides[k + 1] * shape[k + 1];
+    }
+    let out_shape: Vec<usize> = (0..rank).filter(|&k| k != axis).map(|k| shape[k]).collect();
+    let out_total: usize = out_shape.iter().product::<usize>().max(1);
+    let mut out_strides = vec![1usize; out_shape.len()];
+    for k in (0..out_shape.len().saturating_sub(1)).rev() {
+        out_strides[k] = out_strides[k + 1] * out_shape[k + 1];
+    }
+    let mut out = vec![if product { 1.0 } else { 0.0 }; out_total];
+    for (o, slot) in out.iter_mut().enumerate() {
+        // decode the output multi-index
+        let mut om = vec![0usize; out_shape.len()];
+        let mut r = o;
+        for k in 0..out_shape.len() {
+            om[k] = r / out_strides[k];
+            r %= out_strides[k];
+        }
+        let mut acc = if product { 1.0 } else { 0.0 };
+        for j in 0..asize {
+            let mut src = 0;
+            let mut oi = 0;
+            for (k, &stride) in strides.iter().enumerate() {
+                let coord = if k == axis { j } else { let c = om[oi]; oi += 1; c };
+                src += coord * stride;
+            }
+            if product { acc *= data[src]; } else { acc += data[src]; }
+        }
+        *slot = acc;
+    }
+    (out, out_shape)
 }
 
 fn eval_iterate(args: &[Expr], env: &Env) -> Result<Val, String> {
