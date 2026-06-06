@@ -1335,6 +1335,7 @@ Currently supported inside a block:
 | Interpolation | `lerp(a, b, t)`, `clamp(x, lo, hi)` |
 | Linear algebra | `matmul(A, B)` — 2D×2D, 2D×1D, 1D×2D, 1D×1D (dot); compensated inner accumulate |
 | Stencils | `shift(T,n,axis)`, `roll(T,n,axis)`, `ops.lap(T,dx[,bc])`, `ops.grad(T,dx,axis)`, `ops.div(V,dx)`, `ops.curl(V,dx)` (2-D) |
+| Spectral | `fft(T)`, `ifft(T)` (n-D DFT, all axes); `ops.poisson(rhs,dx)`, `ops.invlap(T,dx)`, `ops.specgrad(T,dx,axis)` — radix-2 Stockham FFT ([`src/gpu/fft.wgsl`](src/gpu/fft.wgsl)); transformed axes must be **power-of-two** (other sizes use the CPU) |
 | Construction | `tensor((i,j) -> expr, m, n)` — built on the GPU in one kernel; the body may gather captured tensors (`T[i,j]`) |
 | Loops | `iterate(step, x0, n)`, `scan(step, x0, n)` |
 | Lambdas | bind a lambda/function and apply it: `f = x -> x*x; f(A)` (inlined; no recursion) |
@@ -1452,5 +1453,6 @@ is performed in `f32` on the device and converted back to `f64` on download, so
 expect roughly 7 significant digits compared to a CPU result; precision-sensitive
 workloads (chaotic maps, long symplectic integrations) will diverge from the f64
 CPU result — see `docs/CONSIDERATIONS.md` §7. Still to come from that design:
-the rest of `ops.*`/`forms.*` (`div`, `curl`, exterior calculus), `matmul`, and an FFT
-(for the spectral `ops.poisson`/`specgrad`).
+`forms.*` exterior calculus as a first-class GPU value, df64/Tier-2 precision, and
+PIC scatter/gather. (Spectral operators are now on the GPU via a radix-2 Stockham
+FFT — see `src/gpu/fft.wgsl` — for power-of-two grids.)

@@ -1758,7 +1758,7 @@ else
     run "gpu.lap.2d"         "T=tensor((i,j)->1.0*(i*i+j*j),5,5); GPU { sum(abs(ops.lap(T, 0.5))) }" "1472"
     run "gpu.grad.axis"      "A=[1,2,4,7,11]; GPU { ops.grad(A, 1, 0) }"      "[-4.5, 1.5, 2.5, 3.5, -3]"
     run_err "gpu.grad.noaxis" "A=[1,2,3]; GPU { ops.grad(A, 1) }"
-    run_err "gpu.ops.spectral" "A=[1,2,3,4]; GPU { ops.poisson(A, 1) }"
+    run_err "gpu.ops.unknown" "A=[1,2,3,4]; GPU { ops.bogus(A, 1) }"
 
     # GPU-side tensor construction from index lambdas (no CPU per-cell loop)
     run "gpu.tensor.1d"      "GPU { tensor(i -> i*i, 6) }"                     "[0, 1, 4, 9, 16, 25]"
@@ -1811,7 +1811,7 @@ else
 
     # ── host helpers restricted to get(cell); other host fns are NOT run on CPU ──
     run "gpu.get.hoisted"    "st=cell(([1,2,3],[10,20,30])); r=GPU{iterate((u,v)->(u+v,v),get(st),2)}; r[0]" "[21, 42, 63]"
-    run_err "gpu.err.nofft"  "A=[1,2,3,4]; GPU { fft(A) }"
+    run_err "gpu.fft.twoarg" "A=[1,2,3,4]; GPU { fft(A, 0) }"
     run_err "gpu.err.nosort" "A=[3,1,2]; GPU { sort(A) }"
 
     # ── conditionals & extra operators in GPU lambdas (#2) ──
@@ -1870,6 +1870,18 @@ else
     # ── compensated sum: a 20M-element grid-strided reduction stays exact ──
     # (true sum = 2,000,000; the per-thread Neumaier accumulator recovers f32 round-off)
     run "gpu.sum.compensated" "T=tensor(i->0.1, 20000000); GPU { sum(T) }"     "2000000"
+
+    # ── FFT (radix-2 Stockham, src/gpu/fft.wgsl) and spectral operators ──
+    # All parities are CPU-vs-GPU (rounded to 3 dp; f32 vs f64 agree to ~1e-6).
+    run "gpu.fft.parity"     "T=[1,2,3,4,5,6,7,8]; g=GPU{fft(T)}; c=fft(T); round(sum(abs(g-c)),3)" "0"
+    run "gpu.fft.2d"         "T=tensor((i,j)->i*2.0+j,4,8); g=GPU{fft(T)}; c=fft(T); round(sum(abs(g-c)),3)" "0"
+    run "gpu.ifft.roundtrip" "T=tensor(i->1.0*i,8); r=GPU{ifft(fft(T))}; round(sum(abs(r-T)),3)" "0"
+    run_err "gpu.fft.nonpow2" "T=[1,2,3]; GPU { fft(T) }"
+    run "gpu.poisson.parity"  "N=16; rhs=tensor((i,j)->sin(2*pi*i/N)*cos(2*pi*j/N),N,N); round(sum(abs(GPU{ops.poisson(rhs,0.1)} - ops.poisson(rhs,0.1))),3)" "0"
+    run "gpu.poisson.3d"      "N=8; rhs=tensor((i,j,k)->sin(2*pi*i/N)*cos(2*pi*j/N)*sin(2*pi*k/N),N,N,N); round(sum(abs(GPU{ops.poisson(rhs,0.3)} - ops.poisson(rhs,0.3))),3)" "0"
+    run "gpu.invlap.parity"   "N=16; rhs=tensor((i,j)->sin(2*pi*i/N)*cos(2*pi*j/N),N,N); round(sum(abs(GPU{ops.invlap(rhs,0.1)} - ops.invlap(rhs,0.1))),3)" "0"
+    run "gpu.specgrad.parity" "N=32; T=tensor((i,j)->sin(2*pi*i/N)*cos(2*pi*j/N),N,N); round(sum(abs(GPU{ops.specgrad(T,0.2,0)} - ops.specgrad(T,0.2,0))),3)" "0"
+    run_err "gpu.poisson.nonpow2" "rhs=tensor(i->1.0*i, 12); GPU { ops.poisson(rhs,0.1) }"
 fi
 
 # ── print summary ─────────────────────────────────────────────────────────────

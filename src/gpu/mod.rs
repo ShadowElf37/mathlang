@@ -38,6 +38,15 @@ enum GpuVal {
         shape: Vec<usize>,
         len:   usize,
     },
+    /// A GPU-resident complex tensor: interleaved (re, im) pairs as `vec2<f32>`,
+    /// `buf` holding `2*len` f32. Produced by `fft`/`ifft`; it can only be the
+    /// final result of a block (downloaded to a `ComplexTensor`) — combining a
+    /// complex value with further GPU ops is not supported.
+    Complex {
+        buf:   Rc<wgpu::Buffer>,
+        shape: Vec<usize>,
+        len:   usize,
+    },
     /// A tuple of values (e.g. coupled fields `(U, V)` carried as a single
     /// `iterate`/`scan` state). Each element is itself a `GpuVal`.
     Tuple(Vec<GpuVal>),
@@ -325,7 +334,8 @@ fn eval_scalar_elems(
 ) -> Result<Vec<f32>, String> {
     elems.iter().map(|e| match eval_gpu(e, env, ctx, scope)? {
         GpuVal::Scalar(s) => Ok(s as f32),
-        GpuVal::Buffer { .. } | GpuVal::Host { .. } | GpuVal::Tuple(_) | GpuVal::Fn(_) =>
+        GpuVal::Buffer { .. } | GpuVal::Host { .. } | GpuVal::Tuple(_) | GpuVal::Fn(_)
+        | GpuVal::Complex { .. } =>
             Err("GPU: tensor literals must contain scalar elements".to_string()),
     }).collect()
 }
@@ -408,6 +418,10 @@ fn eval_apply(
         // matmul(A, B) — handled by a dedicated kernel.
         "matmul" if args.len() == 2 => gpu_matmul(args, env, ctx, scope),
 
+        // fft(T) / ifft(T) — n-D DFT over all axes (real input → complex tensor).
+        "fft"  => gpu_fft(args, env, ctx, scope, true),
+        "ifft" => gpu_fft(args, env, ctx, scope, false),
+
         // lerp(a, b, t) = a + (b - a)*t, broadcasting scalars/tensors via binop.
         "lerp" if args.len() == 3 => {
             let a = eval_gpu(&args[0], env, ctx, scope)?;
@@ -474,6 +488,9 @@ fn expect_buffer(gctx: &GpuContext, v: GpuVal, what: &str) -> Result<(Rc<wgpu::B
         GpuVal::Scalar(_) => Err(format!("GPU: {what} expects a tensor, got a scalar")),
         GpuVal::Tuple(_) => Err(format!("GPU: {what} expects a tensor, got a tuple")),
         GpuVal::Fn(_) => Err(format!("GPU: {what} expects a tensor, got a function")),
+        GpuVal::Complex { .. } => Err(format!(
+            "GPU: {what} expects a real tensor, got a complex tensor (a complex value can \
+             only be the final result of a block, not an operand)")),
         GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
@@ -503,6 +520,12 @@ fn op_expr(op: &Op, a: &str, b: &str) -> Result<String, String> {
     })
 }
 
+/// Shared message: complex GPU values (from fft/ifft) are returnable but not
+/// composable with further GPU ops in this milestone.
+const COMPLEX_OPERAND: &str =
+    "GPU: a complex value (from fft/ifft) can only be the final result of a block, \
+     not combined with other GPU operations";
+
 /// Unary negation on the GPU, recursing over tuple trees (like the CPU `neg_val`).
 fn neg_gpu(ctx: &GpuContext, v: GpuVal) -> Result<GpuVal, String> {
     match materialize(ctx, v) {
@@ -514,6 +537,7 @@ fn neg_gpu(ctx: &GpuContext, v: GpuVal) -> Result<GpuVal, String> {
         GpuVal::Tuple(elems) => Ok(GpuVal::Tuple(
             elems.into_iter().map(|e| neg_gpu(ctx, e)).collect::<Result<Vec<_>, _>>()?)),
         GpuVal::Fn(_) => Err("GPU: cannot negate a function".into()),
+        GpuVal::Complex { .. } => Err(COMPLEX_OPERAND.into()),
         GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
@@ -571,6 +595,7 @@ fn binop(ctx: &GpuContext, op: &Op, lhs: GpuVal, rhs: GpuVal) -> Result<GpuVal, 
         }
         (GpuVal::Tuple(_), _) | (_, GpuVal::Tuple(_)) =>
             Err("GPU: arithmetic on a tuple is not supported (operate on its fields)".into()),
+        (GpuVal::Complex { .. }, _) | (_, GpuVal::Complex { .. }) => Err(COMPLEX_OPERAND.into()),
         _ => unreachable!("Host values are materialized above"),
     }
 }
@@ -677,6 +702,7 @@ fn unary_val(ctx: &GpuContext, name: &str, v: GpuVal) -> Result<GpuVal, String> 
         GpuVal::Tuple(elems) => Ok(GpuVal::Tuple(
             elems.into_iter().map(|e| unary_val(ctx, name, e)).collect::<Result<Vec<_>, _>>()?)),
         GpuVal::Fn(_) => Err(format!("GPU: {name} does not apply to a function")),
+        GpuVal::Complex { .. } => Err(COMPLEX_OPERAND.into()),
         GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
@@ -704,6 +730,7 @@ fn binary_minmax(ctx: &GpuContext, name: &str, a: GpuVal, b: GpuVal) -> Result<G
         }
         (GpuVal::Tuple(_), _) | (_, GpuVal::Tuple(_)) =>
             Err(format!("GPU: {f} does not apply to a tuple")),
+        (GpuVal::Complex { .. }, _) | (_, GpuVal::Complex { .. }) => Err(COMPLEX_OPERAND.into()),
         _ => unreachable!("Host values are materialized above"),
     }
 }
@@ -723,6 +750,7 @@ fn any_all_val(ctx: &GpuContext, name: &str, v: GpuVal) -> Result<GpuVal, String
         }
         GpuVal::Tuple(_) => Err(format!("GPU: {name} over a tuple is not supported (reduce its fields)")),
         GpuVal::Fn(_) => Err(format!("GPU: {name} does not apply to a function")),
+        GpuVal::Complex { .. } => Err(COMPLEX_OPERAND.into()),
         GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
@@ -739,6 +767,7 @@ fn reduce_val(ctx: &GpuContext, name: &str, v: GpuVal) -> Result<GpuVal, String>
         }
         GpuVal::Tuple(_) => Err(format!("GPU: {name} does not apply to a tuple")),
         GpuVal::Fn(_) => Err(format!("GPU: {name} does not apply to a function")),
+        GpuVal::Complex { .. } => Err(COMPLEX_OPERAND.into()),
         GpuVal::Host { .. } => unreachable!("materialized above"),
     }
 }
@@ -1150,9 +1179,10 @@ fn ops_op(name: &str, args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut Ha
             let out = run_map(ctx, &[&dvy, &dvx], base_total, "in0[i] - in1[i]")?;
             Ok(GpuVal::Buffer { buf: out, shape: base, len: base_total })
         }
-        _ => Err(format!(
-            "GPU: ops.{name} not supported in a GPU block (spectral operators need an FFT — not yet on GPU)"
-        )),
+        // Spectral operators — built on the GPU FFT (src/gpu/fft.wgsl).
+        "poisson" | "invlap" | "specgrad" => gpu_spectral_op(name, args, env, ctx, scope),
+
+        _ => Err(format!("GPU: ops.{name} not supported in a GPU block")),
     }
 }
 
@@ -1674,7 +1704,8 @@ fn eval_count(arg: &Expr, env: &Env, ctx: &GpuContext, scope: &mut HashMap<Strin
     match eval_gpu(arg, env, ctx, scope)? {
         GpuVal::Scalar(s) if s >= 0.0 && s.fract() == 0.0 => Ok(s as usize),
         GpuVal::Scalar(s) => Err(format!("GPU: iterate/scan count must be a non-negative integer, got {s}")),
-        GpuVal::Buffer { .. } | GpuVal::Host { .. } | GpuVal::Tuple(_) | GpuVal::Fn(_) =>
+        GpuVal::Buffer { .. } | GpuVal::Host { .. } | GpuVal::Tuple(_) | GpuVal::Fn(_)
+        | GpuVal::Complex { .. } =>
             Err("GPU: iterate/scan count must be a scalar".into()),
     }
 }
@@ -1790,6 +1821,7 @@ fn stack_frames(ctx: &GpuContext, frames: Vec<GpuVal>) -> Result<GpuVal, String>
         }
         GpuVal::Host { .. } => Err("GPU: scan produced a host value (internal error)".into()),
         GpuVal::Fn(_) => Err("GPU: scan step must return a tensor/scalar state, not a function".into()),
+        GpuVal::Complex { .. } => Err("GPU: scan over complex state is not supported".into()),
     }
 }
 
@@ -1908,6 +1940,367 @@ fn gpu_matmul(args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut HashMap<St
     Ok(GpuVal::Buffer { buf: out, shape: out_shape, len })
 }
 
+// ───────────────────────────── FFT / spectral ─────────────────────────────
+//
+// A complete GPU spectral path: real input → interleaved complex (vec2<f32>) →
+// per-axis radix-2 Stockham FFT (src/gpu/fft.wgsl) → spectral multiply → inverse
+// FFT → real part. This backs the `fft`/`ifft` builtins and the spectral
+// operators `ops.poisson`, `ops.invlap`, `ops.specgrad`. Conventions match the
+// CPU exactly: forward DFT exp(-2πi·kn/N) unnormalised, inverse exp(+2πi·kn/N)
+// with a 1/N per-axis scale; wavenumber k = 2π·kfreq / (N·dx).
+
+/// The radix-2 Stockham butterfly pass — one dispatch per stage. Kept in its own
+/// file (the heart of the spectral backend) and compiled once via the cache.
+const FFT_PASS_WGSL: &str = include_str!("fft.wgsl");
+
+/// real `array<f32>` → interleaved complex `array<vec2<f32>>` (imag = 0).
+const R2C_WGSL: &str = "\
+@group(0) @binding(0) var<storage, read> inp: array<f32>;\n\
+@group(0) @binding(1) var<storage, read_write> outp: array<vec2<f32>>;\n\
+struct P { len: u32, row: u32 };\n\
+@group(0) @binding(2) var<uniform> p: P;\n\
+@compute @workgroup_size(256)\n\
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
+    let i = gid.y * p.row + gid.x;\n\
+    if (i >= p.len) { return; }\n\
+    outp[i] = vec2<f32>(inp[i], 0.0);\n\
+}\n";
+
+/// interleaved complex `array<vec2<f32>>` → real part as `array<f32>`.
+const C2R_WGSL: &str = "\
+@group(0) @binding(0) var<storage, read> inp: array<vec2<f32>>;\n\
+@group(0) @binding(1) var<storage, read_write> outp: array<f32>;\n\
+struct P { len: u32, row: u32 };\n\
+@group(0) @binding(2) var<uniform> p: P;\n\
+@compute @workgroup_size(256)\n\
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
+    let i = gid.y * p.row + gid.x;\n\
+    if (i >= p.len) { return; }\n\
+    outp[i] = inp[i].x;\n\
+}\n";
+
+/// Spectral Poisson solve, in place on the complex spectrum: û ← -r̂/k²
+/// (k=0 mode → 0, the zero-mean solution). `meta` carries [shape…, strides…].
+const POISSON_WGSL: &str = "\
+const TWO_PI: f32 = 6.28318530717958647692;\n\
+@group(0) @binding(0) var<storage, read_write> data: array<vec2<f32>>;\n\
+@group(0) @binding(1) var<storage, read> dims: array<u32>;\n\
+struct SP { len: u32, row: u32, ndim: u32, ax: u32, dx: f32, p0: f32, p1: f32, p2: f32 };\n\
+@group(0) @binding(2) var<uniform> sp: SP;\n\
+fn kfreq(m: u32, n: u32) -> f32 { if (2u * m < n) { return f32(m); } return f32(m) - f32(n); }\n\
+@compute @workgroup_size(256)\n\
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
+    let i = gid.y * sp.row + gid.x;\n\
+    if (i >= sp.len) { return; }\n\
+    var k2: f32 = 0.0;\n\
+    for (var a: u32 = 0u; a < sp.ndim; a = a + 1u) {\n\
+        let na = dims[a];\n\
+        let sa = dims[sp.ndim + a];\n\
+        let idx = (i / sa) % na;\n\
+        let kk = kfreq(idx, na) * TWO_PI / (f32(na) * sp.dx);\n\
+        k2 = k2 + kk * kk;\n\
+    }\n\
+    if (k2 == 0.0) { data[i] = vec2<f32>(0.0, 0.0); }\n\
+    else { data[i] = data[i] * (-1.0 / k2); }\n\
+}\n";
+
+/// Spectral derivative, in place: multiply the spectrum by i·k along axis `ax`.
+const SPECGRAD_WGSL: &str = "\
+const TWO_PI: f32 = 6.28318530717958647692;\n\
+@group(0) @binding(0) var<storage, read_write> data: array<vec2<f32>>;\n\
+@group(0) @binding(1) var<storage, read> dims: array<u32>;\n\
+struct SP { len: u32, row: u32, ndim: u32, ax: u32, dx: f32, p0: f32, p1: f32, p2: f32 };\n\
+@group(0) @binding(2) var<uniform> sp: SP;\n\
+fn kfreq(m: u32, n: u32) -> f32 { if (2u * m < n) { return f32(m); } return f32(m) - f32(n); }\n\
+@compute @workgroup_size(256)\n\
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
+    let i = gid.y * sp.row + gid.x;\n\
+    if (i >= sp.len) { return; }\n\
+    let na = dims[sp.ax];\n\
+    let sa = dims[sp.ndim + sp.ax];\n\
+    let idx = (i / sa) % na;\n\
+    let k = kfreq(idx, na) * TWO_PI / (f32(na) * sp.dx);\n\
+    let c = data[i];\n\
+    data[i] = vec2<f32>(-k * c.y, k * c.x);\n\
+}\n";
+
+fn is_pow2(n: usize) -> bool { n != 0 && (n & (n - 1)) == 0 }
+
+/// 2-D dispatch grid for `threads` work-items at workgroup size 256, keeping each
+/// dimension within the 65535 cap. Returns (groups_x, groups_y, row=gx*256).
+fn grid(threads: usize) -> (u32, u32, u32) {
+    const WG: u32 = 256;
+    const MAX_DIM: u32 = 65535;
+    let needed = (threads as u32).div_ceil(WG).max(1);
+    let gx = needed.min(MAX_DIM);
+    let gy = needed.div_ceil(gx).max(1);
+    (gx, gy, gx * WG)
+}
+
+/// Allocate a zeroed interleaved-complex buffer holding `total` (re, im) pairs.
+fn make_complex_buffer(ctx: &GpuContext, total: usize) -> Rc<wgpu::Buffer> {
+    Rc::new(ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gpu-fft-complex"),
+        size: (total.max(1) * 8) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    }))
+}
+
+/// Run a kernel that reads one buffer and writes another, both bound at 0/1 with a
+/// {len,row} uniform at 2 — used by the real↔complex conversions.
+fn run_convert(ctx: &GpuContext, src_wgsl: &str, inp: &wgpu::Buffer, out: &wgpu::Buffer, total: usize) {
+    let pipeline = get_pipeline(ctx, src_wgsl);
+    let (gx, gy, row) = grid(total);
+    let params = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu-convert-params"),
+        contents: bytemuck::cast_slice(&[total as u32, row, 0u32, 0u32]),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("gpu-convert-bg"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: inp.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: out.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: params.as_entire_binding() },
+        ],
+    });
+    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("gpu-convert-encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("gpu-convert-pass"), timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(gx, gy, 1);
+    }
+    ctx.queue.submit(Some(encoder.finish()));
+}
+
+fn real_to_complex(ctx: &GpuContext, real: &wgpu::Buffer, total: usize) -> Rc<wgpu::Buffer> {
+    let cbuf = make_complex_buffer(ctx, total);
+    run_convert(ctx, R2C_WGSL, real, &cbuf, total);
+    cbuf
+}
+
+/// Byte-copy an interleaved-complex buffer into a fresh one. Used when an FFT is
+/// applied to an existing complex value, so the in-place ping-pong does not
+/// clobber a buffer that may still be referenced elsewhere in the block scope.
+fn clone_complex_buffer(ctx: &GpuContext, src: &wgpu::Buffer, total: usize) -> Rc<wgpu::Buffer> {
+    let dst = make_complex_buffer(ctx, total);
+    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("gpu-complex-copy"),
+    });
+    encoder.copy_buffer_to_buffer(src, 0, &dst, 0, (total.max(1) * 8) as u64);
+    ctx.queue.submit(Some(encoder.finish()));
+    dst
+}
+
+fn complex_real_part(ctx: &GpuContext, cbuf: &wgpu::Buffer, total: usize) -> Rc<wgpu::Buffer> {
+    let out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gpu-fft-real"),
+        size: (total.max(1) * 4) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    run_convert(ctx, C2R_WGSL, cbuf, &out, total);
+    Rc::new(out)
+}
+
+/// One radix-2 Stockham butterfly pass over every line of one axis.
+#[allow(clippy::too_many_arguments)]
+fn fft_pass(
+    ctx: &GpuContext, src: &wgpu::Buffer, dst: &wgpu::Buffer,
+    n: usize, ns: usize, stride: usize, half: usize, nlines: usize, sign: f32, scale: f32,
+) {
+    let pipeline = get_pipeline(ctx, FFT_PASS_WGSL);
+    let total_bf = nlines * half;
+    let (gx, gy, row) = grid(total_bf);
+    // Params layout matches struct in fft.wgsl: 8 u32 then 4 f32 (sign/scale + pad).
+    let u: [u32; 12] = [
+        n as u32, ns as u32, stride as u32, half as u32,
+        nlines as u32, total_bf as u32, row, 0,
+        sign.to_bits(), scale.to_bits(), 0, 0,
+    ];
+    let params = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu-fft-params"),
+        contents: bytemuck::cast_slice(&u),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("gpu-fft-bg"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: src.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: dst.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: params.as_entire_binding() },
+        ],
+    });
+    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("gpu-fft-encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("gpu-fft-pass"), timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(gx, gy, 1);
+    }
+    ctx.queue.submit(Some(encoder.finish()));
+}
+
+/// In-place n-D FFT over `axes` of an interleaved-complex buffer, ping-ponging
+/// against a scratch buffer. Returns whichever buffer holds the final result.
+/// Each transformed axis must have a power-of-two length (the common spectral
+/// grid; other sizes fall back to the CPU).
+fn fft_axes(
+    ctx: &GpuContext, input: Rc<wgpu::Buffer>, shape: &[usize], total: usize,
+    axes: &[usize], forward: bool,
+) -> Result<Rc<wgpu::Buffer>, String> {
+    let mut cur = input;
+    let mut other = make_complex_buffer(ctx, total);
+    let sign = if forward { -1.0f32 } else { 1.0f32 };
+    for &a in axes {
+        let n = shape[a];
+        if n <= 1 { continue; }
+        if !is_pow2(n) {
+            return Err(format!(
+                "GPU FFT: axis {a} has length {n}, which is not a power of two; GPU spectral \
+                 operators require power-of-two axis lengths (use the CPU for other sizes)"));
+        }
+        let stride: usize = shape[a + 1..].iter().product();
+        let half = n / 2;
+        let nlines = total / n;
+        let passes = n.trailing_zeros();
+        let mut ns = 1usize;
+        for s in 0..passes {
+            let last = s == passes - 1;
+            let scale = if !forward && last { 1.0 / n as f32 } else { 1.0 };
+            fft_pass(ctx, &cur, &other, n, ns, stride, half, nlines, sign, scale);
+            std::mem::swap(&mut cur, &mut other);
+            ns *= 2;
+        }
+    }
+    Ok(cur)
+}
+
+/// Apply a spectral multiply (`"poisson"` or `"specgrad"`) in place on the complex
+/// spectrum, computing wavenumbers from the flat index via `meta` (shape+strides).
+fn spectral_apply(
+    ctx: &GpuContext, cbuf: &wgpu::Buffer, shape: &[usize], total: usize,
+    dx: f64, kind: &str, axis: usize,
+) {
+    let src_wgsl = if kind == "poisson" { POISSON_WGSL } else { SPECGRAD_WGSL };
+    let pipeline = get_pipeline(ctx, src_wgsl);
+    let ndim = shape.len();
+    let mut strides = vec![1usize; ndim];
+    for a in (0..ndim.saturating_sub(1)).rev() {
+        strides[a] = strides[a + 1] * shape[a + 1];
+    }
+    let mut meta: Vec<u32> = shape.iter().map(|&d| d as u32).collect();
+    meta.extend(strides.iter().map(|&s| s as u32));
+    let meta_buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu-spectral-meta"),
+        contents: bytemuck::cast_slice(&meta),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    });
+    let (gx, gy, row) = grid(total);
+    // SP: len,row,ndim,ax (u32) + dx (f32) + 3 f32 pad.
+    let u: [u32; 8] = [total as u32, row, ndim as u32, axis as u32, (dx as f32).to_bits(), 0, 0, 0];
+    let params = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu-spectral-params"),
+        contents: bytemuck::cast_slice(&u),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("gpu-spectral-bg"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: cbuf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: meta_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: params.as_entire_binding() },
+        ],
+    });
+    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("gpu-spectral-encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("gpu-spectral-pass"), timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(gx, gy, 1);
+    }
+    ctx.queue.submit(Some(encoder.finish()));
+}
+
+/// `fft(T)` / `ifft(T)` inside a GPU block: forward/inverse n-D DFT over all axes
+/// of a real tensor, returning a complex tensor. (The result can be the block's
+/// value but cannot be fed into further GPU ops — see `GpuVal::Complex`.)
+fn gpu_fft(args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut HashMap<String, GpuVal>, forward: bool) -> Result<GpuVal, String> {
+    let name = if forward { "fft" } else { "ifft" };
+    if args.len() != 1 {
+        return Err(format!("GPU: {name}(T) takes one real tensor and transforms all axes"));
+    }
+    // Accept a real tensor (uploaded as complex with zero imaginary part) or an
+    // already-complex value (e.g. `ifft(fft(T))`) — copied so the in-place
+    // transform does not clobber the original.
+    let v = materialize(ctx, eval_gpu(&args[0], env, ctx, scope)?);
+    let (cbuf, shape) = match v {
+        GpuVal::Complex { buf, shape, len } => (clone_complex_buffer(ctx, &buf, len), shape),
+        other => {
+            let (buf, shape, _len) = expect_buffer(ctx, other, name)?;
+            if shape.is_empty() { return Err(format!("GPU: {name}: need a tensor of rank >= 1")); }
+            let total: usize = shape.iter().product();
+            (real_to_complex(ctx, &buf, total), shape)
+        }
+    };
+    if shape.is_empty() { return Err(format!("GPU: {name}: need a tensor of rank >= 1")); }
+    let total: usize = shape.iter().product();
+    let axes: Vec<usize> = (0..shape.len()).collect();
+    let out = fft_axes(ctx, cbuf, &shape, total, &axes, forward)?;
+    Ok(GpuVal::Complex { buf: out, shape, len: total })
+}
+
+/// `ops.poisson(rhs, dx)` / `ops.invlap(T, dx)` / `ops.specgrad(T, dx, axis)` on
+/// the GPU: real → FFT (all axes) → spectral multiply → inverse FFT → real part.
+fn gpu_spectral_op(name: &str, args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut HashMap<String, GpuVal>) -> Result<GpuVal, String> {
+    let (kind, axis, t_expr, dx_expr) = match name {
+        "poisson" | "invlap" => {
+            if args.len() != 2 { return Err(format!("ops.{name}(T, dx) expects 2 args")); }
+            ("poisson", 0usize, &args[0], &args[1])
+        }
+        "specgrad" => {
+            if args.len() != 3 {
+                return Err("GPU: ops.specgrad requires an explicit axis: ops.specgrad(T, dx, axis)".into());
+            }
+            let axis = cpu_scalar(&args[2], env)? as usize;
+            ("specgrad", axis, &args[0], &args[1])
+        }
+        _ => unreachable!(),
+    };
+    let t = eval_gpu(t_expr, env, ctx, scope)?;
+    let dx = cpu_scalar(dx_expr, env)?;
+    let (buf, shape, _len) = expect_buffer(ctx, t, name)?;
+    if shape.is_empty() { return Err(format!("ops.{name}: need a tensor of rank >= 1")); }
+    if kind == "specgrad" && axis >= shape.len() {
+        return Err(format!("ops.specgrad: axis {axis} out of range for rank-{} tensor", shape.len()));
+    }
+    let total: usize = shape.iter().product();
+    let axes: Vec<usize> = (0..shape.len()).collect();
+    let cbuf = real_to_complex(ctx, &buf, total);
+    let spec = fft_axes(ctx, cbuf, &shape, total, &axes, true)?;
+    spectral_apply(ctx, &spec, &shape, total, dx, kind, axis);
+    let back = fft_axes(ctx, spec, &shape, total, &axes, false)?;
+    let real = complex_real_part(ctx, &back, total);
+    Ok(GpuVal::Buffer { buf: real, shape, len: total })
+}
+
 fn upload_f32(ctx: &GpuContext, data: Vec<f32>, shape: Vec<usize>) -> GpuVal {
     let len = data.len();
     let buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1939,10 +2332,16 @@ fn get_pipeline(ctx: &GpuContext, src: &str) -> std::sync::Arc<wgpu::ComputePipe
     if let Some(p) = ctx.pipelines.borrow().get(src) {
         return p.clone();
     }
+    // Surface WGSL compilation errors with the offending source: without this the
+    // failure only shows up later as an opaque "Pipeline is invalid" panic.
+    ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
     let module = ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("gpu-shader"),
         source: wgpu::ShaderSource::Wgsl(src.into()),
     });
+    if let Some(err) = pollster::block_on(ctx.device.pop_error_scope()) {
+        eprintln!("GPU shader compile error: {err}\n--- shader source ---\n{src}\n---------------------");
+    }
     let pipeline = std::sync::Arc::new(ctx.device.create_compute_pipeline(
         &wgpu::ComputePipelineDescriptor {
             label: Some("gpu-pipeline"),
@@ -2084,6 +2483,21 @@ fn to_val(ctx: &GpuContext, v: &GpuVal) -> Result<Val, String> {
             data: TData::new(data.iter().map(|&x| x as f64).collect()),
             shape: shape.clone(),
         }),
+        // Interleaved (re, im) f32 pairs → split into parallel re/im f64 arrays.
+        GpuVal::Complex { buf, shape, len } => {
+            let inter = download(ctx, buf, *len * 2)?;
+            let mut re = Vec::with_capacity(*len);
+            let mut im = Vec::with_capacity(*len);
+            for c in inter.chunks_exact(2) {
+                re.push(c[0] as f64);
+                im.push(c[1] as f64);
+            }
+            Ok(Val::ComplexTensor {
+                re: TData::new(re),
+                im: TData::new(im),
+                shape: shape.clone(),
+            })
+        }
         GpuVal::Tuple(elems) => Ok(Val::Tuple(
             elems.iter().map(|e| to_val(ctx, e)).collect::<Result<Vec<_>, _>>()?,
         )),

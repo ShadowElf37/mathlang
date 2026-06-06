@@ -23,6 +23,12 @@ Supported inside a block:
   - stencils:     shift(T,n,axis)  roll(T,n,axis)
                   ops.lap(T,dx[,bc])   ops.grad(T,dx,axis)   (bc: ops.neumann)
                   ops.div(V,dx)   ops.curl(V,dx)   (V: [grid..., ncomp]; curl 2-D)
+  - spectral:     fft(T)  ifft(T)   (n-D DFT over all axes; real in -> complex)
+                  ops.poisson(rhs,dx)  ops.invlap(T,dx)  ops.specgrad(T,dx,axis)
+                  radix-2 Stockham FFT (src/gpu/fft.wgsl); transformed axes must
+                  have POWER-OF-TWO lengths (use the CPU for other sizes). A
+                  complex fft/ifft result can be returned but not fed to further
+                  GPU ops (and ifft(fft(T)) is allowed).
   - construct:    tensor((i,j) -> expr, m, n)   — built on the GPU in one kernel;
                   the body may gather from captured tensors, e.g. T[i,j]
   - loops:        iterate(step, x0, n)   scan(step, x0, n)
