@@ -391,6 +391,9 @@ fn eval_apply(
             if ns == "forms" {
                 return forms_op(member, args, env, ctx, scope);
             }
+            if ns == "pic" {
+                return pic_op(member, args, env, ctx, scope);
+            }
         }
         return Err(format!("GPU: `{}.{member}` not supported in a GPU block", fmt_member_base(base)));
     }
@@ -3135,6 +3138,264 @@ fn forms_laplace(ctx: &GpuContext, f: GpuVal) -> Result<GpuVal, String> {
     field_add(ctx, term_dd, term_cd)
 }
 
+// ───────────────────────────── PIC (particle ↔ grid) ─────────────────────────
+//
+// scatter (deposit), gather (sample), gathergrad (sample ∇) — one GPU thread per
+// PARTICLE. The shape-function stencil (NGP/CIC/TSC, with per-axis BC) is unrolled
+// in WGSL with ndim and kernel order baked in: each axis contributes K=order+1
+// (node, weight[, dweight]) pairs, and a single loop over K^ndim combinations
+// forms the tensor product — exactly mirroring the CPU node_stencil. gather/
+// gathergrad write each particle's own output slot (no races); scatter adds into
+// shared grid nodes via an f32 atomic-add (CAS on atomic<u32>).
+
+/// Per-axis stencil WGSL: fills `nod{a}[K]`, `wgt{a}[K]` (and `dwt{a}[K]` if
+/// `deriv`) from the particle coordinate, applying the axis BC. `gdim` holds the
+/// grid dims (index a) then strides; `geom` holds lo (index a) then spacing.
+fn pic_axis_wgsl(a: usize, n: usize, order: usize, neumann: bool, deriv: bool) -> String {
+    let bc = |raw: &str| -> String {
+        if neumann {
+            format!("u32(clamp({raw}, 0, dimI - 1))")
+        } else {
+            format!("u32((({raw} % dimI) + dimI) % dimI)")
+        }
+    };
+    let mut s = String::new();
+    s += &format!("  {{\n    let u = (positions[pi * {n}u + {a}u] - geom[{a}u]) / geom[{}u];\n", n + a);
+    s += &format!("    let dimI = i32(gdim[{a}u]);\n");
+    match order {
+        0 => {
+            s += "    let i0 = i32(rnd(u));\n";
+            s += &format!("    nod{a}[0] = {};\n    wgt{a}[0] = 1.0;\n", bc("i0"));
+            if deriv { s += &format!("    dwt{a}[0] = 0.0;\n"); }
+        }
+        1 => {
+            s += "    let fl = floor(u); let f = u - fl; let i0 = i32(fl);\n";
+            s += &format!("    nod{a}[0] = {}; wgt{a}[0] = 1.0 - f;\n", bc("i0"));
+            s += &format!("    nod{a}[1] = {}; wgt{a}[1] = f;\n", bc("i0 + 1"));
+            if deriv { s += &format!("    dwt{a}[0] = -1.0; dwt{a}[1] = 1.0;\n"); }
+        }
+        _ => {
+            s += "    let i0 = i32(rnd(u)); let d = u - f32(i0);\n";
+            s += &format!("    nod{a}[0] = {}; wgt{a}[0] = 0.5 * (0.5 - d) * (0.5 - d);\n", bc("i0 - 1"));
+            s += &format!("    nod{a}[1] = {}; wgt{a}[1] = 0.75 - d * d;\n", bc("i0"));
+            s += &format!("    nod{a}[2] = {}; wgt{a}[2] = 0.5 * (0.5 + d) * (0.5 + d);\n", bc("i0 + 1"));
+            if deriv {
+                s += &format!("    dwt{a}[0] = d - 0.5; dwt{a}[1] = -2.0 * d; dwt{a}[2] = 0.5 + d;\n");
+            }
+        }
+    }
+    s += "  }\n";
+    s
+}
+
+/// Generate a PIC kernel for `op` ∈ {gather, gathergrad} with `n` axes and kernel
+/// `order`. `neumann` is the per-axis BC. (scatter deposition runs on the host —
+/// Metal lacks the float atomic-compare-exchange a parallel deposit needs.)
+fn pic_kernel_wgsl(op: &str, n: usize, order: usize, neumann: &[bool]) -> String {
+    let k = order + 1;
+    let kpow = k.pow(n as u32);
+    let deriv = op == "gathergrad";
+    let mut s = String::new();
+    s += "@group(0) @binding(0) var<storage, read> positions: array<f32>;\n";
+    s += "@group(0) @binding(1) var<storage, read> fieldd: array<f32>;\n";
+    s += "@group(0) @binding(2) var<storage, read_write> outp: array<f32>;\n";
+    s += "@group(0) @binding(3) var<storage, read> gdim: array<u32>;\n";
+    s += "@group(0) @binding(4) var<storage, read> geom: array<f32>;\n";
+    s += "struct P { p: u32, ncomp: u32, row: u32, pad: u32 };\n";
+    s += "@group(0) @binding(5) var<uniform> par: P;\n";
+    s += "fn rnd(x: f32) -> f32 { return floor(abs(x) + 0.5) * select(1.0, -1.0, x < 0.0); }\n";
+    s += "@compute @workgroup_size(256)\n";
+    s += "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n";
+    s += "  let pi = gid.y * par.row + gid.x;\n  if (pi >= par.p) { return; }\n";
+    for a in 0..n {
+        s += &format!("  var nod{a}: array<u32, {k}>; var wgt{a}: array<f32, {k}>;\n");
+        if deriv { s += &format!("  var dwt{a}: array<f32, {k}>;\n"); }
+    }
+    for a in 0..n {
+        s += &pic_axis_wgsl(a, n, order, neumann[a], deriv);
+    }
+    // Tensor-product combination loop.
+    s += &format!("  for (var c: u32 = 0u; c < {kpow}u; c = c + 1u) {{\n");
+    s += "    var t = c;\n    var node: u32 = 0u;\n    var w: f32 = 1.0;\n";
+    for a in 0..n {
+        s += &format!("    let c{a} = t % {k}u; t = t / {k}u;\n");
+        s += &format!("    node = node + nod{a}[c{a}] * gdim[{}u];\n", n + a);
+        s += &format!("    w = w * wgt{a}[c{a}];\n");
+    }
+    match op {
+        "gather" => {
+            s += "    for (var cc: u32 = 0u; cc < par.ncomp; cc = cc + 1u) {\n";
+            s += "      outp[pi * par.ncomp + cc] = outp[pi * par.ncomp + cc] + w * fieldd[node * par.ncomp + cc];\n";
+            s += "    }\n";
+        }
+        _ => {
+            // gathergrad: scalar field; out[pi*n + b] += gradweight_b * field[node].
+            s += "    let fv = fieldd[node];\n";
+            for b in 0..n {
+                let mut prod = String::new();
+                for a in 0..n {
+                    if a == b {
+                        prod += &format!("dwt{a}[c{a}] * (1.0 / geom[{}u]) * ", n + a);
+                    } else {
+                        prod += &format!("wgt{a}[c{a}] * ");
+                    }
+                }
+                s += &format!("    outp[pi * {n}u + {b}u] = outp[pi * {n}u + {b}u] + {prod}fv;\n");
+            }
+        }
+    }
+    s += "  }\n}\n";
+    s
+}
+
+/// Parse a positions tensor (shape) into (P, n_pos) matching the CPU rules.
+fn pic_positions_pn(shape: &[usize], len: usize, n: usize, what: &str) -> Result<usize, String> {
+    match shape {
+        [p] if n == 1 => Ok(*p),
+        [p, m] if *m == n => Ok(*p),
+        [m] if *m == n => Ok(1),
+        _ => Err(format!("{what}: positions must be shape [P,{n}] (or [P] when n=1), got {shape:?} (len {len})")),
+    }
+}
+
+/// `pic.<name>(...)` inside a GPU block.
+fn pic_op(name: &str, args: &[Expr], env: &Env, ctx: &GpuContext, scope: &mut HashMap<String, GpuVal>) -> Result<GpuVal, String> {
+    // Geometry buffers (grid dims+strides, lo+spacing) shared by every kernel.
+    let make_geom = |grid: &[usize], lo: &[f64], spacing: &[f64]| -> (Vec<u32>, Vec<f32>) {
+        let n = grid.len();
+        let mut strides = vec![1usize; n];
+        for a in (0..n.saturating_sub(1)).rev() { strides[a] = strides[a + 1] * grid[a + 1]; }
+        let mut gdim: Vec<u32> = grid.iter().map(|&d| d as u32).collect();
+        gdim.extend(strides.iter().map(|&s| s as u32));
+        let mut geom: Vec<f32> = lo.iter().map(|&x| x as f32).collect();
+        geom.extend(spacing.iter().map(|&x| x as f32));
+        (gdim, geom)
+    };
+    match name {
+        // pic.scatter(positions, weights, template [, kernel]) → field (template geom).
+        // Deposition needs an f32 atomic add (one particle touches several shared grid
+        // nodes); Metal/naga lacks the atomic compare-exchange that requires, so the
+        // deposit runs on the host via the exact CPU kernel and the result is uploaded.
+        // (The particle data is small; gather/gathergrad stay GPU-native.)
+        "scatter" => {
+            if args.len() < 3 || args.len() > 4 {
+                return Err("pic.scatter(positions, weights, template [, kernel]) expects 3 or 4 args".into());
+            }
+            let pos_v = to_val(ctx, &materialize(ctx, eval_gpu(&args[0], env, ctx, scope)?))?;
+            let w_v = to_val(ctx, &materialize(ctx, eval_gpu(&args[1], env, ctx, scope)?))?;
+            let tmpl_v = to_val(ctx, &materialize(ctx, eval_gpu(&args[2], env, ctx, scope)?))?;
+            if !matches!(tmpl_v, Val::Field(_)) { return Err("pic.scatter: template must be a field".into()); }
+            let mut vals = vec![pos_v, w_v, tmpl_v];
+            if let Some(k) = args.get(3) { vals.push(Val::Num(pic_kernel_order(Some(k), env, "pic.scatter")? as f64)); }
+            match crate::ns::pic::dispatch("scatter", vals, env)? {
+                Val::Field(f) => Ok(upload_field(ctx, &f)),
+                other => Err(format!("pic.scatter: expected a field result, got {}", fmt_val(&other))),
+            }
+        }
+        // pic.gather(field, positions [, kernel]) → [P] or [P, ncomp].
+        "gather" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err("pic.gather(field, positions [, kernel]) expects 2 or 3 args".into());
+            }
+            let order = pic_kernel_order(args.get(2), env, "pic.gather")?;
+            let fld = materialize(ctx, eval_gpu(&args[0], env, ctx, scope)?);
+            let pos = eval_gpu(&args[1], env, ctx, scope)?;
+            let GpuVal::Field { buf, grid, spacing, lo, bc, len: flen, .. } = fld
+                else { return Err("pic.gather: first argument must be a field".into()); };
+            let n = grid.len();
+            let gt = grid_total(&grid);
+            let ncomp = flen / gt;
+            let (posbuf, psh, plen) = expect_buffer(ctx, pos, "pic.gather positions")?;
+            let p = pic_positions_pn(&psh, plen, n, "pic.gather")?;
+            let (gdim, geom) = make_geom(&grid, &lo, &spacing);
+            let out = make_real_buffer(ctx, p * ncomp);
+            let src = pic_kernel_wgsl("gather", n, order, &bc_bools(&bc));
+            run_pic(ctx, &src, p, ncomp, &[&posbuf, &buf, &out], &gdim, &geom)?;
+            let shape = if ncomp == 1 { vec![p] } else { vec![p, ncomp] };
+            Ok(GpuVal::Buffer { buf: out, shape, len: p * ncomp })
+        }
+        // pic.gathergrad(scalar field, positions [, kernel]) → [P] or [P, n].
+        "gathergrad" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err("pic.gathergrad(field, positions [, kernel]) expects 2 or 3 args".into());
+            }
+            let order = pic_kernel_order(args.get(2), env, "pic.gathergrad")?;
+            let fld = materialize(ctx, eval_gpu(&args[0], env, ctx, scope)?);
+            let pos = eval_gpu(&args[1], env, ctx, scope)?;
+            let GpuVal::Field { buf, grid, spacing, lo, bc, len: flen, .. } = fld
+                else { return Err("pic.gathergrad: first argument must be a field".into()); };
+            let n = grid.len();
+            let gt = grid_total(&grid);
+            if flen / gt != 1 { return Err("pic.gathergrad: field must be scalar (a 0-form)".into()); }
+            let (posbuf, psh, plen) = expect_buffer(ctx, pos, "pic.gathergrad positions")?;
+            let p = pic_positions_pn(&psh, plen, n, "pic.gathergrad")?;
+            let (gdim, geom) = make_geom(&grid, &lo, &spacing);
+            let out = make_real_buffer(ctx, p * n);
+            let src = pic_kernel_wgsl("gathergrad", n, order, &bc_bools(&bc));
+            run_pic(ctx, &src, p, 1, &[&posbuf, &buf, &out], &gdim, &geom)?;
+            let shape = if n == 1 { vec![p] } else { vec![p, n] };
+            Ok(GpuVal::Buffer { buf: out, shape, len: p * n })
+        }
+        _ => Err(format!("GPU: pic.{name} is not supported in a GPU block")),
+    }
+}
+
+/// Resolve a PIC kernel-order argument (pic.ngp/cic/tsc → 0/1/2; default CIC).
+fn pic_kernel_order(arg: Option<&Expr>, env: &Env, what: &str) -> Result<usize, String> {
+    match arg {
+        None => Ok(1),
+        Some(e) => {
+            let x = cpu_scalar(e, env)?;
+            let o = x.round() as i64;
+            if (x - o as f64).abs() > 1e-9 || !(0..=2).contains(&o) {
+                return Err(format!("{what}: kernel must be pic.ngp, pic.cic, or pic.tsc"));
+            }
+            Ok(o as usize)
+        }
+    }
+}
+
+/// Dispatch a PIC kernel: one thread per particle, with the geometry buffers.
+fn run_pic(ctx: &GpuContext, src: &str, p: usize, ncomp: usize, bufs: &[&wgpu::Buffer], gdim: &[u32], geom: &[f32]) -> Result<(), String> {
+    let pipeline = get_pipeline(ctx, src);
+    let (gx, gy, row) = grid(p);
+    let gdim_buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu-pic-gdim"), contents: bytemuck::cast_slice(gdim),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    });
+    let geom_buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu-pic-geom"), contents: bytemuck::cast_slice(geom),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    });
+    let params = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu-pic-params"),
+        contents: bytemuck::cast_slice(&[p as u32, ncomp as u32, row, 0u32]),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let mut entries: Vec<wgpu::BindGroupEntry> = bufs.iter().enumerate()
+        .map(|(i, b)| wgpu::BindGroupEntry { binding: i as u32, resource: b.as_entire_binding() })
+        .collect();
+    entries.push(wgpu::BindGroupEntry { binding: 3, resource: gdim_buf.as_entire_binding() });
+    entries.push(wgpu::BindGroupEntry { binding: 4, resource: geom_buf.as_entire_binding() });
+    entries.push(wgpu::BindGroupEntry { binding: 5, resource: params.as_entire_binding() });
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("gpu-pic-bg"), layout: &pipeline.get_bind_group_layout(0), entries: &entries,
+    });
+    ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gpu-pic-encoder") });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("gpu-pic-pass"), timestamp_writes: None });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(gx, gy, 1);
+    }
+    ctx.queue.submit(Some(encoder.finish()));
+    if let Some(err) = pollster::block_on(ctx.device.pop_error_scope()) {
+        return Err(format!("GPU: {err}"));
+    }
+    Ok(())
+}
+
 fn upload_f32(ctx: &GpuContext, data: Vec<f32>, shape: Vec<usize>) -> GpuVal {
     let len = data.len();
     let buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -3200,16 +3461,14 @@ fn get_pipeline(ctx: &GpuContext, src: &str) -> std::sync::Arc<wgpu::ComputePipe
     if let Some(p) = ctx.pipelines.borrow().get(src) {
         return p.clone();
     }
-    // Surface WGSL compilation errors with the offending source: without this the
-    // failure only shows up later as an opaque "Pipeline is invalid" panic.
+    // Surface WGSL compile / pipeline-validation errors with the offending source:
+    // without this the failure only shows up later as an opaque "Pipeline is
+    // invalid" panic. The scope spans both shader-module and pipeline creation.
     ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
     let module = ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("gpu-shader"),
         source: wgpu::ShaderSource::Wgsl(src.into()),
     });
-    if let Some(err) = pollster::block_on(ctx.device.pop_error_scope()) {
-        eprintln!("GPU shader compile error: {err}\n--- shader source ---\n{src}\n---------------------");
-    }
     let pipeline = std::sync::Arc::new(ctx.device.create_compute_pipeline(
         &wgpu::ComputePipelineDescriptor {
             label: Some("gpu-pipeline"),
@@ -3220,6 +3479,9 @@ fn get_pipeline(ctx: &GpuContext, src: &str) -> std::sync::Arc<wgpu::ComputePipe
             cache: None,
         },
     ));
+    if let Some(err) = pollster::block_on(ctx.device.pop_error_scope()) {
+        eprintln!("GPU shader/pipeline error: {err}\n--- shader source ---\n{src}\n---------------------");
+    }
     ctx.pipelines.borrow_mut().insert(src.to_string(), pipeline.clone());
     pipeline
 }

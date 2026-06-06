@@ -1338,6 +1338,7 @@ Currently supported inside a block:
 | Spectral | `fft(T)`, `ifft(T)` (n-D DFT, all axes); `ops.poisson(rhs,dx)`, `ops.invlap(T,dx)`, `ops.specgrad(T,dx,axis)` — radix-2 Stockham FFT ([`src/gpu/fft.wgsl`](src/gpu/fft.wgsl)); transformed axes must be **power-of-two** (other sizes use the CPU) |
 | Complex | first-class complex tensors & scalars (imaginary unit `i`, `3+2i`, captured complex tensors): `+ - * / ^`, `re im abs arg conj`, `exp ln sqrt sin cos`, `sum`/`mean`; mixed real/complex promote (`min`/`max`/comparisons undefined on complex) |
 | Fields & forms | capture a field and operate on-device: field-polymorphic `ops.lap/grad/div/curl/poisson/invlap/specgrad` (dx/bc from the field), exterior calculus `forms.d/hodge/wedge/raise/lower/codiff/laplace/contract`, field arithmetic & componentwise unary math (build fields on the CPU, then capture) |
+| PIC (particle↔grid) | `pic.gather`/`pic.gathergrad` sample a field at particles (one GPU thread per particle); `pic.scatter` deposits particles onto a grid (host fallback — Metal lacks float atomic-CAS); kernels `pic.ngp/cic/tsc` |
 | Construction | `tensor((i,j) -> expr, m, n)` — built on the GPU in one kernel; the body may gather captured tensors (`T[i,j]`) |
 | Loops | `iterate(step, x0, n)`, `scan(step, x0, n)` |
 | Lambdas | bind a lambda/function and apply it: `f = x -> x*x; f(A)` (inlined; no recursion) |
@@ -1454,7 +1455,7 @@ Tensor/tensor operations require matching shapes (no broadcasting yet). Computat
 is performed in `f32` on the device and converted back to `f64` on download, so
 expect roughly 7 significant digits compared to a CPU result; precision-sensitive
 workloads (chaotic maps, long symplectic integrations) will diverge from the f64
-CPU result — see `docs/CONSIDERATIONS.md` §7. Still to come from that design:
-df64/Tier-2 precision and PIC scatter/gather. (Spectral operators run on the GPU
-via a radix-2 Stockham FFT — see `src/gpu/fft.wgsl` — for power-of-two grids;
-complex tensors and `forms.*`/field operators are now first-class GPU values.)
+CPU result — see `docs/CONSIDERATIONS.md` §7. The remaining design item is
+df64/Tier-2 precision. (Spectral operators run on the GPU via a radix-2 Stockham
+FFT — see `src/gpu/fft.wgsl` — for power-of-two grids; complex tensors,
+`forms.*`/field operators, and PIC gather/scatter are now GPU values.)

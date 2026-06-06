@@ -1929,6 +1929,21 @@ else
     run "gpu.field.arith"    "T=tensor((i,j)->1.0*(i+j),6,6); f=field(T,(0,0),(1,1),forms.periodic); round(sum(abs(GPU{f+f*2}-(f+f*2))),3)" "0"
     run_err "gpu.field.noconstruct" "GPU { forms.vector([1,2;3,4], (0,0), (1,1), forms.periodic) }"
     run_err "gpu.field.noreduce" "f=field([1,2,3,4],(0),(1),forms.periodic); GPU { sum(f) }"
+
+    # ── PIC (particle↔grid): gather/gathergrad GPU-native, scatter host-deposit ──
+    # CPU-vs-GPU parity (rounded to 3 dp). PP = 2-D particle positions, on a 16×16 grid.
+    PP='P=tensor((i,j)->1.0*(2.3+i*1.7)*(j==0)+(3.6+i*1.1)*(j==1), 20, 2);'
+    FF='F=field(tensor((i,j)->sin(i*0.4)*cos(j*0.3),16,16),(0,0),(16,16),forms.periodic);'
+    TT='tmpl=field(zeros(16,16),(0,0),(16,16),forms.periodic); W=tensor(i->1.0+0.1*i, 20);'
+    run "gpu.pic.gather.cic"   "$FF $PP round(sum(abs(GPU{pic.gather(F,P)}-pic.gather(F,P))),3)" "0"
+    run "gpu.pic.gather.ngp"   "$FF $PP round(sum(abs(GPU{pic.gather(F,P,pic.ngp)}-pic.gather(F,P,pic.ngp))),3)" "0"
+    run "gpu.pic.gather.tsc"   "$FF $PP round(sum(abs(GPU{pic.gather(F,P,pic.tsc)}-pic.gather(F,P,pic.tsc))),3)" "0"
+    run "gpu.pic.gather.1d.neumann" "F=field(tensor(i->1.0*i*i,16),(0),(16),forms.neumann); P=tensor(i->0.5+i*1.3, 10); round(sum(abs(GPU{pic.gather(F,P)}-pic.gather(F,P))),3)" "0"
+    run "gpu.pic.gathergrad.cic" "$FF $PP round(sum(abs(GPU{pic.gathergrad(F,P)}-pic.gathergrad(F,P))),3)" "0"
+    run "gpu.pic.gathergrad.tsc" "$FF $PP round(sum(abs(GPU{pic.gathergrad(F,P,pic.tsc)}-pic.gathergrad(F,P,pic.tsc))),3)" "0"
+    run "gpu.pic.scatter.cic"  "$TT $PP round(sum(abs(GPU{pic.scatter(P,W,tmpl)}-pic.scatter(P,W,tmpl))),3)" "0"
+    run "gpu.pic.scatter.tsc"  "$TT $PP round(sum(abs(GPU{pic.scatter(P,W,tmpl,pic.tsc)}-pic.scatter(P,W,tmpl,pic.tsc))),3)" "0"
+    run "gpu.pic.composed"     "$TT $PP round(sum(abs(GPU{pic.gather(pic.scatter(P,W,tmpl),P)}-pic.gather(pic.scatter(P,W,tmpl),P))),3)" "0"
 fi
 
 # ── print summary ─────────────────────────────────────────────────────────────

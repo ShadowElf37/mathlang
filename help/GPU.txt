@@ -42,6 +42,11 @@ Supported inside a block:
                   derivative), hodge, wedge, raise, lower, codiff, laplace,
                   contract. (Construct fields on the CPU, then capture them; the
                   field constructors are not available inside a block.)
+  - pic:          particle↔grid coupling. pic.gather(field, pos[,kernel]) and
+                  pic.gathergrad(scalarfield, pos[,kernel]) sample at particles
+                  one GPU thread per particle; pic.scatter(pos, w, template
+                  [,kernel]) deposits (on the host — Metal has no float atomic CAS)
+                  and uploads the field. kernels pic.ngp/cic/tsc.
   - construct:    tensor((i,j) -> expr, m, n)   — built on the GPU in one kernel;
                   the body may gather from captured tensors, e.g. T[i,j]
   - loops:        iterate(step, x0, n)   scan(step, x0, n)
