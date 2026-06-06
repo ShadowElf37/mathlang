@@ -706,6 +706,138 @@ fn run_c2r<R: Runtime, E: Float + CubeElement>(client: ComputeClient<R>, op: u32
     out
 }
 
+// ── stencils (roll / shift / ops.lap / ops.grad), 1-D & 2-D, on device ───────────
+
+/// Model a shape as r×c (1-D [N] → (N, 1)). Stencils support rank 1 and 2.
+fn rc_of(shape: &[usize]) -> Result<(usize, usize), String> {
+    match shape {
+        [n] => Ok((*n, 1)),
+        [r, c] => Ok((*r, *c)),
+        _ => Err("stencils support 1-D and 2-D tensors only".into()),
+    }
+}
+
+fn stencil_unsupported_df64() -> String {
+    "stencils are f32/f64 only (df64 stencils staged); use !prec f32 or f64".into()
+}
+
+/// Periodic roll along `axis` by `n` (n may be negative).
+pub fn roll(target: Target, a: &TensorVal, n: i64, axis: usize) -> Result<TensorVal, String> {
+    if target.prec == Prec::Df64 {
+        return Err(stencil_unsupported_df64());
+    }
+    let (r, c) = rc_of(&a.shape)?;
+    let (add_r, add_c) = roll_offsets(n, axis, r, c)?;
+    let handle = match target.prec {
+        Prec::F32 => cdispatch!(target.backend, run_roll::<f32>(&a.handle, a.len, r, c, add_r, add_c)),
+        Prec::F64 => cdispatch!(target.backend, run_roll::<f64>(&a.handle, a.len, r, c, add_r, add_c)),
+        Prec::Df64 => unreachable!(),
+    }?;
+    Ok(TensorVal { backend: target.backend, prec: target.prec, shape: a.shape.clone(), len: a.len, handle: Rc::new(handle) })
+}
+
+fn roll_offsets(n: i64, axis: usize, r: usize, c: usize) -> Result<(usize, usize), String> {
+    let off = |len: usize| -> usize {
+        let l = len as i64;
+        let nm = ((n % l) + l) % l; // roll amount in 0..l
+        (((l - nm) % l) as usize).min(len.saturating_sub(1).max(0))
+    };
+    match axis {
+        0 => Ok((off(r), 0)),
+        1 if c > 1 => Ok((0, off(c))),
+        _ => Err(format!("roll: axis {axis} out of range for this tensor")),
+    }
+}
+
+/// Edge-clamped (Neumann) shift along `axis` by `n`.
+pub fn shift(target: Target, a: &TensorVal, n: i64, axis: usize) -> Result<TensorVal, String> {
+    if target.prec == Prec::Df64 {
+        return Err(stencil_unsupported_df64());
+    }
+    let (r, c) = rc_of(&a.shape)?;
+    let (nr, nc) = match axis {
+        0 => (n as i32, 0i32),
+        1 if c > 1 => (0i32, n as i32),
+        _ => return Err(format!("shift: axis {axis} out of range for this tensor")),
+    };
+    let handle = match target.prec {
+        Prec::F32 => cdispatch!(target.backend, run_shift::<f32>(&a.handle, a.len, r, c, nr, nc)),
+        Prec::F64 => cdispatch!(target.backend, run_shift::<f64>(&a.handle, a.len, r, c, nr, nc)),
+        Prec::Df64 => unreachable!(),
+    }?;
+    Ok(TensorVal { backend: target.backend, prec: target.prec, shape: a.shape.clone(), len: a.len, handle: Rc::new(handle) })
+}
+
+/// Laplacian (periodic if `periodic`, else Neumann). `dx` is the grid spacing.
+pub fn lap(target: Target, a: &TensorVal, dx: f64, periodic: u32) -> Result<TensorVal, String> {
+    stencil_scaled(target, a, 1.0 / (dx * dx), periodic, StencilKind::Lap, 0)
+}
+
+/// Central-difference gradient along `axis`. `dx` is the grid spacing.
+pub fn grad(target: Target, a: &TensorVal, dx: f64, axis: usize, periodic: u32) -> Result<TensorVal, String> {
+    let (_, c) = rc_of(&a.shape)?;
+    if axis > 1 || (axis == 1 && c == 1) {
+        return Err(format!("grad: axis {axis} out of range for this tensor"));
+    }
+    stencil_scaled(target, a, 1.0 / (2.0 * dx), periodic, StencilKind::Grad, axis as u32)
+}
+
+enum StencilKind {
+    Lap,
+    Grad,
+}
+
+fn stencil_scaled(target: Target, a: &TensorVal, scale_val: f64, periodic: u32, kind: StencilKind, axis: u32) -> Result<TensorVal, String> {
+    if target.prec == Prec::Df64 {
+        return Err(stencil_unsupported_df64());
+    }
+    let (r, c) = rc_of(&a.shape)?;
+    let scale = upload(target, &[scale_val], vec![1])?;
+    let handle = match (&kind, target.prec) {
+        (StencilKind::Lap, Prec::F32) => cdispatch!(target.backend, run_lap::<f32>(&a.handle, &scale.handle, a.len, r, c, periodic)),
+        (StencilKind::Lap, Prec::F64) => cdispatch!(target.backend, run_lap::<f64>(&a.handle, &scale.handle, a.len, r, c, periodic)),
+        (StencilKind::Grad, Prec::F32) => cdispatch!(target.backend, run_grad::<f32>(&a.handle, &scale.handle, a.len, r, c, axis, periodic)),
+        (StencilKind::Grad, Prec::F64) => cdispatch!(target.backend, run_grad::<f64>(&a.handle, &scale.handle, a.len, r, c, axis, periodic)),
+        (_, Prec::Df64) => unreachable!(),
+    }?;
+    Ok(TensorVal { backend: target.backend, prec: target.prec, shape: a.shape.clone(), len: a.len, handle: Rc::new(handle) })
+}
+
+fn run_roll<R: Runtime, E: Float + CubeElement>(client: ComputeClient<R>, a: &Rc<Handle>, len: usize, r: usize, c: usize, add_r: usize, add_c: usize) -> Handle {
+    let out = client.empty(len * core::mem::size_of::<E>());
+    let grid = len.div_ceil(256).max(1) as u32;
+    kernels::roll2d::launch::<E, R>(&client, CubeCount::Static(grid, 1, 1), CubeDim::new_1d(256),
+        unsafe { ArrayArg::from_raw_parts((**a).clone(), len) },
+        unsafe { ArrayArg::from_raw_parts(out.clone(), len) }, r, c, add_r, add_c);
+    out
+}
+fn run_shift<R: Runtime, E: Float + CubeElement>(client: ComputeClient<R>, a: &Rc<Handle>, len: usize, r: usize, c: usize, nr: i32, nc: i32) -> Handle {
+    let out = client.empty(len * core::mem::size_of::<E>());
+    let grid = len.div_ceil(256).max(1) as u32;
+    kernels::shift2d::launch::<E, R>(&client, CubeCount::Static(grid, 1, 1), CubeDim::new_1d(256),
+        unsafe { ArrayArg::from_raw_parts((**a).clone(), len) },
+        unsafe { ArrayArg::from_raw_parts(out.clone(), len) }, r, c, nr, nc);
+    out
+}
+fn run_lap<R: Runtime, E: Float + CubeElement>(client: ComputeClient<R>, u: &Rc<Handle>, scale: &Rc<Handle>, len: usize, r: usize, c: usize, periodic: u32) -> Handle {
+    let out = client.empty(len * core::mem::size_of::<E>());
+    let grid = len.div_ceil(256).max(1) as u32;
+    kernels::lap2d::launch::<E, R>(&client, CubeCount::Static(grid, 1, 1), CubeDim::new_1d(256),
+        unsafe { ArrayArg::from_raw_parts((**u).clone(), len) },
+        unsafe { ArrayArg::from_raw_parts((**scale).clone(), 1) },
+        unsafe { ArrayArg::from_raw_parts(out.clone(), len) }, r, c, periodic);
+    out
+}
+fn run_grad<R: Runtime, E: Float + CubeElement>(client: ComputeClient<R>, u: &Rc<Handle>, scale: &Rc<Handle>, len: usize, r: usize, c: usize, axis: u32, periodic: u32) -> Handle {
+    let out = client.empty(len * core::mem::size_of::<E>());
+    let grid = len.div_ceil(256).max(1) as u32;
+    kernels::grad2d::launch::<E, R>(&client, CubeCount::Static(grid, 1, 1), CubeDim::new_1d(256),
+        unsafe { ArrayArg::from_raw_parts((**u).clone(), len) },
+        unsafe { ArrayArg::from_raw_parts((**scale).clone(), 1) },
+        unsafe { ArrayArg::from_raw_parts(out.clone(), len) }, r, c, axis, periodic);
+    out
+}
+
 fn host_identity(op: u32) -> f64 {
     match op {
         RED_PROD => 1.0,

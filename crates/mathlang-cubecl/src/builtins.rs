@@ -232,6 +232,65 @@ pub fn eval_builtin(name: &str, args: Vec<Val>, env: &Env) -> Result<Val, String
             Err(format!("{name}: expected a tensor, got {}", fmt_val(&v)))
         }
 
+        // ── stencils ────────────────────────────────────────────────────────────
+        "shift" | "roll" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(format!("{name}(T, n[, axis]) expects 2 or 3 args"));
+            }
+            let t = real_tensor_on(&args[0], env, name)?;
+            let n = args[1].clone().num(name)? as i64;
+            let axis = match args.get(2) { Some(v) => v.clone().num(name)? as usize, None => 0 };
+            if name == "roll" { compute::roll(env.target, &t, n, axis) } else { compute::shift(env.target, &t, n, axis) }.map(Val::Tensor)
+        }
+        "ops.lap" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err("ops.lap(T, dx[, bc]) expects 2 or 3 args".into());
+            }
+            let t = real_tensor_on(&args[0], env, "ops.lap")?;
+            let dx = args[1].clone().num("ops.lap")?;
+            // bc marker: ops.neumann (1) → Neumann, else periodic
+            let neumann = matches!(args.get(2), Some(v) if v.clone().num("ops.lap").unwrap_or(0.0) != 0.0);
+            compute::lap(env.target, &t, dx, if neumann { 0 } else { 1 }).map(Val::Tensor)
+        }
+        "ops.grad" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err("ops.grad(T, dx[, axis]) expects 2 or 3 args".into());
+            }
+            let t = real_tensor_on(&args[0], env, "ops.grad")?;
+            let dx = args[1].clone().num("ops.grad")?;
+            let axis = match args.get(2) { Some(v) => v.clone().num("ops.grad")? as usize, None => 0 };
+            compute::grad(env.target, &t, dx, axis, 1).map(Val::Tensor)
+        }
+
+        // ── dense linear algebra (host-side; eig is staged) ─────────────────────
+        "det" => {
+            let (mut m, n, c) = real_square(&one(args, name)?, "det")?;
+            let _ = c;
+            Ok(Val::Num(host_det(&mut m, n)))
+        }
+        "inv" => {
+            let (m, n, _) = real_square(&one(args, name)?, "inv")?;
+            let data = host_inv(m, n)?;
+            compute::upload(env.target, &data, vec![n, n]).map(Val::Tensor)
+        }
+        "solve" => {
+            let (a, b) = two(args, name)?;
+            let (m, n, _) = real_square(&a, "solve")?;
+            let bv = match &b {
+                Val::Tensor(t) if t.shape.len() == 1 => compute::download(t)?,
+                Val::Tuple(items) => items.iter().map(|v| v.clone().num("solve")).collect::<Result<Vec<_>, _>>()?,
+                other => return Err(format!("solve: b must be a 1-D tensor or tuple, got {}", fmt_val(other))),
+            };
+            if bv.len() != n {
+                return Err(format!("solve: A is {n}×{n} but b has length {}", bv.len()));
+            }
+            let x = host_solve(m, bv, n)?;
+            compute::upload(env.target, &x, vec![n]).map(Val::Tensor)
+        }
+        "eig" | "eigvals" => Err(format!(
+            "{name} is staged (a robust real eigensolver is pending); det/inv/solve are available"
+        )),
+
         _ => {
             // Help the user: many names exist in the real `m` but await later phases.
             Err(format!("`{name}` is not available in the prototype yet (later phase)"))
@@ -457,6 +516,133 @@ fn matmul_vals(a: Val, b: Val, env: &Env) -> Result<Val, String> {
         }
         (ash, bsh) => Err(format!("matmul: unsupported shapes {ash:?} @ {bsh:?}")),
     }
+}
+
+/// Coerce a value to a real tensor on the active target.
+fn real_tensor_on(v: &Val, env: &Env, name: &str) -> Result<TensorVal, String> {
+    match v {
+        Val::Tensor(t) => ensure_on(t.clone(), env.target),
+        other => Err(format!("{name}: expected a real tensor, got {}", fmt_val(other))),
+    }
+}
+
+/// Download a real square matrix to host (data, n, n).
+fn real_square(v: &Val, name: &str) -> Result<(Vec<f64>, usize, usize), String> {
+    match v {
+        Val::Tensor(t) if t.shape.len() == 2 && t.shape[0] == t.shape[1] => {
+            Ok((compute::download(t)?, t.shape[0], t.shape[1]))
+        }
+        Val::Tensor(t) => Err(format!("{name}: expected a square matrix, got shape {:?}", t.shape)),
+        other => Err(format!("{name}: expected a real matrix, got {}", fmt_val(other))),
+    }
+}
+
+/// Determinant via Gaussian elimination with partial pivoting.
+fn host_det(m: &mut [f64], n: usize) -> f64 {
+    let mut det = 1.0;
+    for col in 0..n {
+        let mut piv = col;
+        for r in (col + 1)..n {
+            if m[r * n + col].abs() > m[piv * n + col].abs() {
+                piv = r;
+            }
+        }
+        if m[piv * n + col] == 0.0 {
+            return 0.0;
+        }
+        if piv != col {
+            for cc in 0..n {
+                m.swap(piv * n + cc, col * n + cc);
+            }
+            det = -det;
+        }
+        det *= m[col * n + col];
+        for r in (col + 1)..n {
+            let f = m[r * n + col] / m[col * n + col];
+            for cc in col..n {
+                m[r * n + cc] -= f * m[col * n + cc];
+            }
+        }
+    }
+    det
+}
+
+/// Matrix inverse via Gauss–Jordan elimination.
+fn host_inv(mut m: Vec<f64>, n: usize) -> Result<Vec<f64>, String> {
+    let mut inv = vec![0.0; n * n];
+    for i in 0..n {
+        inv[i * n + i] = 1.0;
+    }
+    for col in 0..n {
+        let mut piv = col;
+        for r in (col + 1)..n {
+            if m[r * n + col].abs() > m[piv * n + col].abs() {
+                piv = r;
+            }
+        }
+        if m[piv * n + col].abs() == 0.0 {
+            return Err("inv: matrix is singular".into());
+        }
+        if piv != col {
+            for cc in 0..n {
+                m.swap(piv * n + cc, col * n + cc);
+                inv.swap(piv * n + cc, col * n + cc);
+            }
+        }
+        let d = m[col * n + col];
+        for cc in 0..n {
+            m[col * n + cc] /= d;
+            inv[col * n + cc] /= d;
+        }
+        for r in 0..n {
+            if r == col {
+                continue;
+            }
+            let f = m[r * n + col];
+            for cc in 0..n {
+                m[r * n + cc] -= f * m[col * n + cc];
+                inv[r * n + cc] -= f * inv[col * n + cc];
+            }
+        }
+    }
+    Ok(inv)
+}
+
+/// Solve Ax = b via Gaussian elimination with back-substitution.
+fn host_solve(mut a: Vec<f64>, mut b: Vec<f64>, n: usize) -> Result<Vec<f64>, String> {
+    for col in 0..n {
+        let mut piv = col;
+        for r in (col + 1)..n {
+            if a[r * n + col].abs() > a[piv * n + col].abs() {
+                piv = r;
+            }
+        }
+        if a[piv * n + col].abs() == 0.0 {
+            return Err("solve: matrix is singular".into());
+        }
+        if piv != col {
+            for cc in 0..n {
+                a.swap(piv * n + cc, col * n + cc);
+            }
+            b.swap(piv, col);
+        }
+        for r in (col + 1)..n {
+            let f = a[r * n + col] / a[col * n + col];
+            for cc in col..n {
+                a[r * n + cc] -= f * a[col * n + cc];
+            }
+            b[r] -= f * b[col];
+        }
+    }
+    let mut x = vec![0.0; n];
+    for col in (0..n).rev() {
+        let mut s = b[col];
+        for cc in (col + 1)..n {
+            s -= a[col * n + cc] * x[cc];
+        }
+        x[col] = s / a[col * n + col];
+    }
+    Ok(x)
 }
 
 /// Population standard deviation of a tensor: sqrt(mean((x − mean)²)) — all on device.

@@ -28,8 +28,12 @@ with scalar↔tensor broadcasting; unary math (`sin`/`exp`/`sqrt`/...); `shape`/
 `rows`/`cols`/`len`. **Linear algebra & reductions on device:** `@`/`matmul`
 (2D×2D, mat·vec, vec·mat, dot), and `sum`/`prod`/`mean`/`min`/`max`/`norm`/`std`
 (parallel reduction, Neumaier-compensated sum; df64 reduces via host fallback).
-Every tensor op runs on the selected backend/precision — **no `GPU {}` block
-needed** (an improvement over the original, which was f32-only and block-scoped).
+**Stencils on device:** `shift`/`roll`, and the `ops` namespace `ops.lap(T,dx[,bc])`
+and `ops.grad(T,dx[,axis])` (periodic or `ops.neumann`) — enough to run the heat
+equation under `iterate` fully resident. **Dense linalg (host-side):** `det`/`inv`/
+`solve` (Gaussian elimination); `eig`/`eigvals` are staged. Every tensor op runs on
+the selected backend/precision — **no `GPU {}` block needed** (an improvement over
+the original, which was f32-only and block-scoped).
 
 **Precision (`!prec f32|df64|f64`, `!backend cpu|wgpu|cuda|hip`):**
 * `f64` — native on cpu/cuda/hip. `[1.0]+[1e-10]` → `[1.0000000001]`.

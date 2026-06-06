@@ -336,7 +336,10 @@ Commands:
   !version           version
   !q / !quit         quit
 
-Not yet present (later phases): tensor indexing/slicing, det/inv/solve/eig,
-stencils (ops.lap/grad), fft, fields/forms, pic, calculus, file I/O, animation."
+Linalg: det/inv/solve (eig staged). Stencils: shift/roll, ops.lap/grad
+(ops.periodic/ops.neumann).
+
+Not yet present (later phases): tensor indexing/slicing, eig, spectral
+(fft/ops.poisson), fields/forms, pic, calculus, file I/O, animation."
     );
 }

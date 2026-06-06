@@ -80,6 +80,20 @@ check 'exp([0+0i, 0+3.141592653589793i])' '[1, -1]'           # display collapse
 check 'sum([1+2i, 3+4i, 5+6i])' '9 + 12i'
 check_repl $'!type [1+2i, 3]'   'complex tensor'
 
+# ── stencils + dense linalg (Phase 3.x) ─────────────────────────────────────────
+check 'roll([1,2,3,4], 1, 0)'   '[4, 1, 2, 3]'
+check 'roll([1,2,3,4], -1, 0)'  '[2, 3, 4, 1]'
+check 'shift([1,2,3,4], 1, 0)'  '[1, 1, 2, 3]'
+check 'ops.lap([0,0,1,0,0], 1)' '[0, 1, -2, 1, 0]'
+check 'ops.grad([1,4,9,16,25], 1, 0)' '[-10.5, 4, 6, 8, -7.5]'
+check 'det((1,2;3,4))'          '-2'
+check 'det((2,0,0;0,3,0;0,0,4))' '24'
+check 'solve((2,1;1,3),(5,10))' '[1, 3]'
+check 'solve((2,1;1,3),[5,10])' '[1, 3]'
+# heat equation: total heat conserved under Neumann (≈ 9)
+check 'round(sum(iterate(u -> u + 0.2*ops.lap(u,1,ops.neumann), (0,0,0;0,9,0;0,0,0), 10)))' '9'
+check_repl $'eigvals((2,0;0,3))' 'staged'
+
 # ── resident loops: iterate / scan (Phase 4) ───────────────────────────────────
 check 'iterate(x -> 2*x, 1, 10)'        '1024'                    # scalar
 check 'iterate(u -> u*0.5, [1,2,3,4], 3)' '[0.125, 0.25, 0.375, 0.5]'  # tensor, resident

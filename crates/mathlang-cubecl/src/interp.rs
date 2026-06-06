@@ -39,6 +39,13 @@ impl Env {
         for name in BUILTINS {
             vars.insert((*name).into(), Val::Builtin((*name).into()));
         }
+        // The `ops` namespace: finite-difference operators + boundary-condition markers.
+        let mut ops = HashMap::new();
+        ops.insert("lap".to_string(), Val::Builtin("ops.lap".into()));
+        ops.insert("grad".to_string(), Val::Builtin("ops.grad".into()));
+        ops.insert("periodic".to_string(), Val::Num(0.0));
+        ops.insert("neumann".to_string(), Val::Num(1.0));
+        vars.insert("ops".into(), Val::Namespace(Arc::new(ops)));
         Self { vars: Arc::new(vars), target: Target::default_target() }
     }
 }
@@ -63,11 +70,13 @@ pub const BUILTINS: &[&str] = &[
     // tensor constructors / shape (the compute path)
     "zeros", "ones", "eye", "linspace", "range", "shape", "rows", "cols",
     // linear algebra + reductions
-    "matmul", "norm", "mean", "std",
+    "matmul", "norm", "mean", "std", "det", "inv", "solve", "eig", "eigvals",
+    // stencils
+    "shift", "roll",
 ];
 
 pub fn is_protected(name: &str) -> bool {
-    matches!(name, "pi" | "e" | "phi" | "inf" | "i") || BUILTINS.contains(&name)
+    matches!(name, "pi" | "e" | "phi" | "inf" | "i" | "ops") || BUILTINS.contains(&name)
 }
 
 // ── Evaluator ───────────────────────────────────────────────────────────────────

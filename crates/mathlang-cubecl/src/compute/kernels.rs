@@ -135,6 +135,104 @@ pub fn ew_unary<F: Float>(x: &Array<F>, out: &mut Array<F>, #[comptime] op: u32)
     }
 }
 
+// ── stencils (1-D and 2-D, modelled as r×c; 1-D [N] = (N,1)) ────────────────────
+// Periodic (roll) and edge-clamp (shift/Neumann) neighbour access. `scale` is a
+// length-1 array carrying 1/dx² (lap) or 1/(2dx) (grad), avoiding a scalar arg.
+
+/// roll along one axis: a periodic gather. `add_r`/`add_c` = (L − n mod L) mod L,
+/// precomputed host-side (only one is nonzero for a single-axis roll).
+#[cube(launch)]
+pub fn roll2d<F: Float>(input: &Array<F>, out: &mut Array<F>, #[comptime] r: usize, #[comptime] c: usize, #[comptime] add_r: usize, #[comptime] add_c: usize) {
+    let idx = ABSOLUTE_POS;
+    if idx < r * c {
+        let row = idx / c;
+        let col = idx % c;
+        out[idx] = input[((row + add_r) % r) * c + (col + add_c) % c];
+    }
+}
+
+/// shift along one axis: edge-clamped (Neumann) gather. `nr`/`nc` = shift amount
+/// (one nonzero), as comptime i32 so the clamp branches resolve per shape.
+#[cube(launch)]
+pub fn shift2d<F: Float>(input: &Array<F>, out: &mut Array<F>, #[comptime] r: usize, #[comptime] c: usize, #[comptime] nr: i32, #[comptime] nc: i32) {
+    let idx = ABSOLUTE_POS;
+    if idx < r * c {
+        let row = idx / c;
+        let col = idx % c;
+        let sr = clamp_idx(row, nr, r);
+        let sc = clamp_idx(col, nc, c);
+        out[idx] = input[sr * c + sc];
+    }
+}
+
+#[cube]
+fn clamp_idx(i: usize, n: i32, len: usize) -> usize {
+    let p = i32::cast_from(i) - n;
+    let mut s = p;
+    if p < 0i32 {
+        s = 0i32;
+    } else if p >= i32::cast_from(len) {
+        s = i32::cast_from(len) - 1i32;
+    }
+    usize::cast_from(s)
+}
+
+/// Index one step off `i` along an axis of length `len`, periodic or clamped.
+#[cube]
+fn nb(i: usize, up: bool, len: usize, #[comptime] periodic: u32) -> usize {
+    let mut out = i;
+    if up {
+        if comptime![periodic == 1] {
+            out = (i + 1) % len;
+        } else if i + 1 < len {
+            out = i + 1;
+        }
+    } else if comptime![periodic == 1] {
+        out = (i + len - 1) % len;
+    } else if i > 0 {
+        out = i - 1;
+    }
+    out
+}
+
+/// 2-D (and 1-D, via c=1) Laplacian. `scale[0]` = 1/dx². For 1-D the column term
+/// vanishes (c=1 ⇒ both column neighbours are the centre).
+#[cube(launch)]
+pub fn lap2d<F: Float>(u: &Array<F>, scale: &Array<F>, out: &mut Array<F>, #[comptime] r: usize, #[comptime] c: usize, #[comptime] periodic: u32) {
+    let idx = ABSOLUTE_POS;
+    if idx < r * c {
+        let row = idx / c;
+        let col = idx % c;
+        let up = nb(row, true, r, periodic);
+        let dn = nb(row, false, r, periodic);
+        let lf = nb(col, false, c, periodic);
+        let rt = nb(col, true, c, periodic);
+        let center = u[row * c + col];
+        let sum = u[up * c + col] + u[dn * c + col] + u[row * c + lf] + u[row * c + rt];
+        out[idx] = (sum - F::new(4.0) * center) * scale[0];
+    }
+}
+
+/// Central-difference gradient along one axis. `scale[0]` = 1/(2·dx).
+#[cube(launch)]
+pub fn grad2d<F: Float>(u: &Array<F>, scale: &Array<F>, out: &mut Array<F>, #[comptime] r: usize, #[comptime] c: usize, #[comptime] axis: u32, #[comptime] periodic: u32) {
+    let idx = ABSOLUTE_POS;
+    if idx < r * c {
+        let row = idx / c;
+        let col = idx % c;
+        let mut hi = u[idx];
+        let mut lo = u[idx];
+        if comptime![axis == 0] {
+            hi = u[nb(row, true, r, periodic) * c + col];
+            lo = u[nb(row, false, r, periodic) * c + col];
+        } else {
+            hi = u[row * c + nb(col, true, c, periodic)];
+            lo = u[row * c + nb(col, false, c, periodic)];
+        }
+        out[idx] = (hi - lo) * scale[0];
+    }
+}
+
 // ── complex kernels (interleaved [re, im], generic f32/f64) ─────────────────────
 // A complex tensor of n logical elements is 2n values: data[2i]=re, data[2i+1]=im.
 // cbinop reuses the real OP_* codes (+ - * /); unary ops have their own codes.
