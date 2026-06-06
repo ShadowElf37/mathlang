@@ -316,7 +316,8 @@ reductions). Precision: f32, f64
 (cpu/cuda/hip), or df64 double-single (+ - * / & compares on cpu/cuda/hip;
 gated on wgpu; pow/transcendentals staged).
 Other builtins: min/max/pow/hypot/gcd/lcm/ncr, lt/leq/gt/geq/eq/neq,
-map/filter/reduce/compose/partial, iterate, cell/get/set.
+map/filter/reduce/compose/partial, iterate/scan (resident loops over
+scalar/tensor/tuple state), cell/get/set.
 
 Commands:
   !help              this text

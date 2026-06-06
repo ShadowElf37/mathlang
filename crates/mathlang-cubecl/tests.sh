@@ -68,6 +68,15 @@ check 'std([2,4,4,4,5,5,7,9])'  '2'
 check 'sum(ones(100,100))'      '10000'
 check_repl $'!prec df64\n(1,2;3,4) @ (5,6;7,8)' 'df64 matmul is staged'
 
+# ── resident loops: iterate / scan (Phase 4) ───────────────────────────────────
+check 'iterate(x -> 2*x, 1, 10)'        '1024'                    # scalar
+check 'iterate(u -> u*0.5, [1,2,3,4], 3)' '[0.125, 0.25, 0.375, 0.5]'  # tensor, resident
+check 'iterate((u,v) -> (v, u), ([1,2],[3,4]), 1)' '([3, 4], [1, 2])'  # tuple of tensors
+check 'scan(x -> 2*x, 1, 4)'            '[1, 2, 4, 8, 16]'        # scalar → 1-D
+check 'scan(x -> x+1, 0, 3)'            '[0, 1, 2, 3]'
+check 'shape(scan(u -> u*0.5, [1,2,3], 5))' '[6, 3]'             # tensor → [n+1, d]
+check 'shape(scan(v -> (v[1], -v[0]), (1,0), 4))' '[5, 2]'      # flat tuple → [n+1, k]
+
 # ── precision: f64 on cpu; wgpu downgrades to f32; df64 arithmetic on cpu ───────
 check '[1.0] + [1e-10]'         '[1.0000000001]'                  # cpu f64
 check_repl $'!backend wgpu\n[1.0] + [1e-10]' '[1]'                # wgpu f32 loses 1e-10

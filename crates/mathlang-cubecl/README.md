@@ -54,10 +54,36 @@ REPL commands: `!help !backend !prec !type !defs !clear !print !spike !version !
 Deferred to later phases: tensor indexing/slicing, matmul/linalg, on-device
 reductions, fft, fields/forms, pic, calculus, file I/O, animation.
 
+## Loops & residency (`iterate` / `scan`)
+
+`iterate(f, x0, n)` and `scan(f, x0, n)` are the **one** loop mechanism — the
+interpreter drives the loop and each step runs compute ops. Because a tensor value
+*is* a device handle and every op produces another device handle, **tensor/tuple
+state stays resident on the device across all `n` steps** — x0 is uploaded once, the
+result downloaded once, no per-step transfer. This single path replaces both the old
+bytecode-VM loop and the WGSL GPU-resident loop.
+
+```
+iterate(u -> u*0.5, [1,2,3,4], 3)          → [0.125, 0.25, 0.375, 0.5]   (resident)
+iterate((u,v) -> (v, u), ([1,2],[3,4]), 1) → ([3, 4], [1, 2])            (tuple of tensors)
+scan(x -> 2*x, 1, 4)                        → [1, 2, 4, 8, 16]            (scalar → 1-D)
+scan(v -> (v[1], -v[0]), (1,0), 100)        → [101, 2] trajectory
+```
+
+`scan` stacks with time as the leading axis (scalar→`[n+1]`, tensor→`[n+1,…shape]`,
+flat tuple→`[n+1,k]`, structured tuple→a tuple of per-field stacks).
+
+Caveat — the loop is *data-resident but host-driven*: the host issues one kernel
+launch per step, so millions of tiny steps pay launch overhead (fine for the usual
+hundreds/thousands of steps on real grids). Fusing the whole loop body into one
+on-device kernel (the README's "loop inside the kernel") is a later optimization
+built on the runtime-AST→IR codegen proven in Phase 0.
+
 ## Tests
 
 `bash crates/mathlang-cubecl/tests.sh` — scalar/complex/tuple core, tensor
-elementwise/unary/constructors, and the cross-backend precision behaviour.
+elementwise/unary/constructors, linear algebra + reductions, resident loops, and
+the cross-backend precision behaviour.
 
 ## Why
 

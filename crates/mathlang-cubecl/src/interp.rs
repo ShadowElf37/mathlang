@@ -58,7 +58,7 @@ pub const BUILTINS: &[&str] = &[
     "lt", "leq", "gt", "geq", "eq", "neq",
     // higher-order + containers
     "map", "filter", "reduce", "compose", "partial",
-    "sum", "prod", "iterate", "if",
+    "sum", "prod", "iterate", "scan", "if",
     "len", "length", "cell", "get", "set",
     // tensor constructors / shape (the compute path)
     "zeros", "ones", "eye", "linspace", "range", "shape", "rows", "cols",
@@ -221,6 +221,7 @@ fn eval_apply(f_expr: &Expr, arg_exprs: &[Expr], env: &Env) -> Result<Val, Strin
             "sum" => return eval_agg(arg_exprs, env, false),
             "prod" => return eval_agg(arg_exprs, env, true),
             "iterate" => return eval_iterate(arg_exprs, env),
+            "scan" => return eval_scan(arg_exprs, env),
             "map" => return eval_map(arg_exprs, env),
             "filter" => return eval_filter(arg_exprs, env),
             "reduce" => return eval_reduce(arg_exprs, env),
@@ -626,7 +627,96 @@ fn state_is_finite(v: &Val) -> bool {
         Val::Num(x) => x.is_finite(),
         Val::Complex(a, b) => a.is_finite() && b.is_finite(),
         Val::Tuple(items) => items.iter().all(state_is_finite),
+        // Tensors are device-resident; checking would force a per-step download and
+        // break loop residency, so we don't (matches the original GPU path).
         _ => true,
+    }
+}
+
+/// `scan(f, x0, n)` — the orbit `[x0, f(x0), …, fⁿ(x0)]`, stacked with time as the
+/// leading axis. Same resident, host-driven loop as `iterate`; only the final
+/// stacking assembles the result. Scalar states → 1-D `[n+1]`; tensor states →
+/// `[n+1, …shape]`; a flat numeric tuple → `[n+1, k]`; a structured tuple → a tuple
+/// of per-field stacks (matching the original's semantics).
+fn eval_scan(args: &[Expr], env: &Env) -> Result<Val, String> {
+    if args.len() != 3 {
+        return Err("scan(f, x0, n) expects 3 args".into());
+    }
+    let f = eval(&args[0], env)?;
+    let x0 = eval(&args[1], env)?;
+    let n = eval(&args[2], env)?.num("scan")? as i64;
+    if n < 0 {
+        return Err(format!("scan: count must be non-negative, got {n}"));
+    }
+    let mut states = Vec::with_capacity((n + 1) as usize);
+    states.push(x0.clone());
+    let mut s = x0;
+    for step in 0..n {
+        s = apply_val(f.clone(), vec![s], env)?;
+        if !state_is_finite(&s) {
+            return Err(format!("scan: non-finite value (NaN/Inf) at step {}", step + 1));
+        }
+        states.push(s.clone());
+    }
+    stack_states(states, env)
+}
+
+/// Stack a list of states (one per time step) into a leading-time-axis result.
+fn stack_states(states: Vec<Val>, env: &Env) -> Result<Val, String> {
+    let rows = states.len();
+    let first = states.first().ok_or("scan: empty orbit")?;
+    match first {
+        Val::Num(_) => {
+            let data: Result<Vec<f64>, _> = states.iter().map(|v| v.clone().num("scan")).collect();
+            compute::upload(env.target, &data?, vec![rows]).map(Val::Tensor)
+        }
+        Val::Tensor(t0) => {
+            let shape0 = t0.shape.clone();
+            let mut data = Vec::with_capacity(rows * t0.len);
+            for v in &states {
+                match v {
+                    Val::Tensor(t) if t.shape == shape0 => data.extend(compute::download(t)?),
+                    Val::Tensor(_) => return Err("scan: tensor shape changed across steps".into()),
+                    other => return Err(format!("scan: mixed state types, got {}", fmt_val(other))),
+                }
+            }
+            let mut out_shape = vec![rows];
+            out_shape.extend(shape0);
+            compute::upload(env.target, &data, out_shape).map(Val::Tensor)
+        }
+        Val::Tuple(first_items) => {
+            let k = first_items.len();
+            // A flat numeric tuple (a, b, …) row-packs into [rows, k].
+            let all_flat = states.iter().all(|v| {
+                matches!(v, Val::Tuple(items) if items.len() == k && items.iter().all(|x| matches!(x, Val::Num(_))))
+            });
+            if all_flat {
+                let mut data = Vec::with_capacity(rows * k);
+                for v in &states {
+                    if let Val::Tuple(items) = v {
+                        for it in items {
+                            data.push(it.clone().num("scan")?);
+                        }
+                    }
+                }
+                return compute::upload(env.target, &data, vec![rows, k]).map(Val::Tensor);
+            }
+            // Structured tuple → a tuple of per-field stacks.
+            let mut fields: Vec<Vec<Val>> = (0..k).map(|_| Vec::with_capacity(rows)).collect();
+            for v in &states {
+                match v {
+                    Val::Tuple(items) if items.len() == k => {
+                        for (j, it) in items.iter().enumerate() {
+                            fields[j].push(it.clone());
+                        }
+                    }
+                    _ => return Err("scan: tuple structure changed across steps".into()),
+                }
+            }
+            let stacked: Result<Vec<Val>, _> = fields.into_iter().map(|f| stack_states(f, env)).collect();
+            Ok(Val::Tuple(stacked?))
+        }
+        other => Err(format!("scan: cannot stack states of type {}", fmt_val(other))),
     }
 }
 
