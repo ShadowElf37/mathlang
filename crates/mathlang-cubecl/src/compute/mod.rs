@@ -523,6 +523,189 @@ fn run_reduce<R: Runtime, E: Float + CubeElement>(
     partials
 }
 
+// ── complex tensors (interleaved [re, im], f32/f64) ──────────────────────────────
+
+pub use kernels::{CR_ABS, CR_ARG, CR_IM, CR_RE, CU_CONJ, CU_COS, CU_EXP, CU_LN, CU_NEG, CU_SIN, CU_SQRT};
+
+/// A device-resident complex tensor: `2*len` interleaved (re, im) values of the
+/// element type. Same backend/precision model as `TensorVal` (df64 not supported
+/// for complex — use f32/f64).
+#[derive(Clone)]
+pub struct CTensor {
+    pub backend: Backend,
+    pub prec: Prec,
+    pub shape: Vec<usize>,
+    pub len: usize,
+    handle: Rc<Handle>,
+}
+
+fn no_complex_df64() -> String {
+    "complex tensors are f32/f64 only (df64 complex not supported); use !prec f32 or f64".into()
+}
+
+/// Upload host (re, im) as a complex tensor at `target`.
+pub fn upload_complex(target: Target, re: &[f64], im: &[f64], shape: Vec<usize>) -> Result<CTensor, String> {
+    if target.prec == Prec::Df64 {
+        return Err(no_complex_df64());
+    }
+    let n = re.len();
+    let bytes = match target.prec {
+        Prec::F32 => {
+            let mut v: Vec<f32> = Vec::with_capacity(2 * n);
+            for i in 0..n { v.push(re[i] as f32); v.push(im[i] as f32); }
+            f32::as_bytes(&v).to_vec()
+        }
+        Prec::F64 => {
+            let mut v: Vec<f64> = Vec::with_capacity(2 * n);
+            for i in 0..n { v.push(re[i]); v.push(im[i]); }
+            f64::as_bytes(&v).to_vec()
+        }
+        Prec::Df64 => unreachable!(),
+    };
+    let handle = create_on(target.backend, &bytes)?;
+    Ok(CTensor { backend: target.backend, prec: target.prec, shape, len: n, handle: Rc::new(handle) })
+}
+
+/// Download a complex tensor to host (re, im) f64 vectors.
+pub fn download_complex(ct: &CTensor) -> Result<(Vec<f64>, Vec<f64>), String> {
+    let bytes = read_from(ct.backend, (*ct.handle).clone())?;
+    let flat: Vec<f64> = match ct.prec {
+        Prec::F32 => f32::from_bytes(&bytes).iter().map(|&x| x as f64).collect(),
+        Prec::F64 => f64::from_bytes(&bytes).to_vec(),
+        Prec::Df64 => return Err(no_complex_df64()),
+    };
+    let mut re = Vec::with_capacity(ct.len);
+    let mut im = Vec::with_capacity(ct.len);
+    for i in 0..ct.len { re.push(flat[2 * i]); im.push(flat[2 * i + 1]); }
+    Ok((re, im))
+}
+
+/// Promote a real tensor to a complex tensor (im = 0) on the device.
+pub fn promote_real(target: Target, t: &TensorVal) -> Result<CTensor, String> {
+    if target.prec == Prec::Df64 {
+        return Err(no_complex_df64());
+    }
+    let handle = match target.prec {
+        Prec::F32 => cdispatch_r2c::<f32>(target.backend, &t.handle, t.len)?,
+        Prec::F64 => cdispatch_r2c::<f64>(target.backend, &t.handle, t.len)?,
+        Prec::Df64 => unreachable!(),
+    };
+    Ok(CTensor { backend: target.backend, prec: target.prec, shape: t.shape.clone(), len: t.len, handle: Rc::new(handle) })
+}
+
+/// Ensure a complex tensor lives on `target` (re-materialise if backend/prec differ).
+pub fn ensure_complex_on(ct: CTensor, target: Target) -> Result<CTensor, String> {
+    if ct.backend == target.backend && ct.prec == target.prec {
+        Ok(ct)
+    } else {
+        let (re, im) = download_complex(&ct)?;
+        upload_complex(target, &re, &im, ct.shape.clone())
+    }
+}
+
+pub fn cbinop(target: Target, op: u32, a: &CTensor, b: &CTensor) -> Result<CTensor, String> {
+    let out_len = a.len.max(b.len);
+    let shape = if a.len >= b.len { a.shape.clone() } else { b.shape.clone() };
+    let handle = match target.prec {
+        Prec::F32 => cdispatch_binop::<f32>(target.backend, op, &a.handle, a.len, &b.handle, b.len, out_len)?,
+        Prec::F64 => cdispatch_binop::<f64>(target.backend, op, &a.handle, a.len, &b.handle, b.len, out_len)?,
+        Prec::Df64 => return Err(no_complex_df64()),
+    };
+    Ok(CTensor { backend: target.backend, prec: target.prec, shape, len: out_len, handle: Rc::new(handle) })
+}
+
+/// complex → complex unary (neg/conj/exp/ln/sqrt/sin/cos).
+pub fn cunary_c2c(target: Target, op: u32, a: &CTensor) -> Result<CTensor, String> {
+    let handle = match target.prec {
+        Prec::F32 => cdispatch_c2c::<f32>(target.backend, op, &a.handle, a.len)?,
+        Prec::F64 => cdispatch_c2c::<f64>(target.backend, op, &a.handle, a.len)?,
+        Prec::Df64 => return Err(no_complex_df64()),
+    };
+    Ok(CTensor { backend: target.backend, prec: target.prec, shape: a.shape.clone(), len: a.len, handle: Rc::new(handle) })
+}
+
+/// complex → real unary (re/im/abs/arg).
+pub fn cunary_c2r(target: Target, op: u32, a: &CTensor) -> Result<TensorVal, String> {
+    let handle = match target.prec {
+        Prec::F32 => cdispatch_c2r::<f32>(target.backend, op, &a.handle, a.len)?,
+        Prec::F64 => cdispatch_c2r::<f64>(target.backend, op, &a.handle, a.len)?,
+        Prec::Df64 => return Err(no_complex_df64()),
+    };
+    Ok(TensorVal { backend: target.backend, prec: target.prec, shape: a.shape.clone(), len: a.len, handle: Rc::new(handle) })
+}
+
+/// Complex whole-tensor sum (host: download + accumulate). mean = sum/n on the caller.
+pub fn creduce_sum(ct: &CTensor) -> Result<(f64, f64), String> {
+    let (re, im) = download_complex(ct)?;
+    Ok((re.iter().sum(), im.iter().sum()))
+}
+
+// per-op complex dispatch (backend → run::<R, E>); E is f32/f64 (df64 excluded above).
+// The per-backend match is inlined (a closure can't be generic over the runtime).
+macro_rules! cdispatch {
+    ($backend:expr, $run:ident :: <$e:ty> ( $($arg:expr),* )) => {
+        match $backend {
+            #[cfg(feature = "cpu")]
+            Backend::Cpu => Ok($run::<cubecl::cpu::CpuRuntime, $e>(cpu_client(), $($arg),*)),
+            #[cfg(feature = "wgpu")]
+            Backend::Wgpu => Ok($run::<cubecl::wgpu::WgpuRuntime, $e>(wgpu_client(), $($arg),*)),
+            #[cfg(feature = "cuda")]
+            Backend::Cuda => Ok($run::<cubecl::cuda::CudaRuntime, $e>(cuda_client(), $($arg),*)),
+            #[cfg(feature = "hip")]
+            Backend::Hip => Ok($run::<cubecl::hip::HipRuntime, $e>(hip_client(), $($arg),*)),
+            #[allow(unreachable_patterns)]
+            _ => Err(format!("backend {} is not compiled in", $backend.name())),
+        }
+    };
+}
+
+fn cdispatch_r2c<E: Float + CubeElement>(backend: Backend, x: &Rc<Handle>, len: usize) -> Result<Handle, String> {
+    cdispatch!(backend, run_r2c::<E>(x, len))
+}
+fn cdispatch_binop<E: Float + CubeElement>(backend: Backend, op: u32, a: &Rc<Handle>, al: usize, b: &Rc<Handle>, bl: usize, out_len: usize) -> Result<Handle, String> {
+    cdispatch!(backend, run_cbinop::<E>(op, a, al, b, bl, out_len))
+}
+fn cdispatch_c2c<E: Float + CubeElement>(backend: Backend, op: u32, a: &Rc<Handle>, len: usize) -> Result<Handle, String> {
+    cdispatch!(backend, run_c2c::<E>(op, a, len))
+}
+fn cdispatch_c2r<E: Float + CubeElement>(backend: Backend, op: u32, a: &Rc<Handle>, len: usize) -> Result<Handle, String> {
+    cdispatch!(backend, run_c2r::<E>(op, a, len))
+}
+
+fn run_r2c<R: Runtime, E: Float + CubeElement>(client: ComputeClient<R>, x: &Rc<Handle>, len: usize) -> Handle {
+    let out = client.empty(len * 2 * core::mem::size_of::<E>());
+    let grid = len.div_ceil(256).max(1) as u32;
+    kernels::real_to_complex::launch::<E, R>(&client, CubeCount::Static(grid, 1, 1), CubeDim::new_1d(256),
+        unsafe { ArrayArg::from_raw_parts((**x).clone(), len) },
+        unsafe { ArrayArg::from_raw_parts(out.clone(), len * 2) });
+    out
+}
+fn run_cbinop<R: Runtime, E: Float + CubeElement>(client: ComputeClient<R>, op: u32, a: &Rc<Handle>, al: usize, b: &Rc<Handle>, bl: usize, out_len: usize) -> Handle {
+    let out = client.empty(out_len * 2 * core::mem::size_of::<E>());
+    let grid = out_len.div_ceil(256).max(1) as u32;
+    kernels::cbinop::launch::<E, R>(&client, CubeCount::Static(grid, 1, 1), CubeDim::new_1d(256),
+        unsafe { ArrayArg::from_raw_parts((**a).clone(), al * 2) },
+        unsafe { ArrayArg::from_raw_parts((**b).clone(), bl * 2) },
+        unsafe { ArrayArg::from_raw_parts(out.clone(), out_len * 2) }, op);
+    out
+}
+fn run_c2c<R: Runtime, E: Float + CubeElement>(client: ComputeClient<R>, op: u32, a: &Rc<Handle>, len: usize) -> Handle {
+    let out = client.empty(len * 2 * core::mem::size_of::<E>());
+    let grid = len.div_ceil(256).max(1) as u32;
+    kernels::cunary_c2c::launch::<E, R>(&client, CubeCount::Static(grid, 1, 1), CubeDim::new_1d(256),
+        unsafe { ArrayArg::from_raw_parts((**a).clone(), len * 2) },
+        unsafe { ArrayArg::from_raw_parts(out.clone(), len * 2) }, op);
+    out
+}
+fn run_c2r<R: Runtime, E: Float + CubeElement>(client: ComputeClient<R>, op: u32, a: &Rc<Handle>, len: usize) -> Handle {
+    let out = client.empty(len * core::mem::size_of::<E>());
+    let grid = len.div_ceil(256).max(1) as u32;
+    kernels::cunary_c2r::launch::<E, R>(&client, CubeCount::Static(grid, 1, 1), CubeDim::new_1d(256),
+        unsafe { ArrayArg::from_raw_parts((**a).clone(), len * 2) },
+        unsafe { ArrayArg::from_raw_parts(out.clone(), len) }, op);
+    out
+}
+
 fn host_identity(op: u32) -> f64 {
     match op {
         RED_PROD => 1.0,

@@ -68,6 +68,18 @@ check 'std([2,4,4,4,5,5,7,9])'  '2'
 check 'sum(ones(100,100))'      '10000'
 check_repl $'!prec df64\n(1,2;3,4) @ (5,6;7,8)' 'df64 matmul is staged'
 
+# ── complex tensors (Phase 5) ───────────────────────────────────────────────────
+check '[1+2i, 3+4i]'            '[1 + 2i, 3 + 4i]'
+check '[1, 2, 3] + 2i'          '[1 + 2i, 2 + 2i, 3 + 2i]'   # real tensor + complex scalar
+check '[1+1i] * [1+1i]'         '[2i]'
+check 'abs([3+4i, 5+12i])'      '[5, 13]'
+check 're([1+2i, 3+4i])'        '[1, 3]'
+check 'conj([1+2i, 3-4i])'      '[1 - 2i, 3 + 4i]'
+check 'sqrt([3+4i])'            '[2 + i]'
+check 'exp([0+0i, 0+3.141592653589793i])' '[1, -1]'           # display collapses tiny im
+check 'sum([1+2i, 3+4i, 5+6i])' '9 + 12i'
+check_repl $'!type [1+2i, 3]'   'complex tensor'
+
 # ── resident loops: iterate / scan (Phase 4) ───────────────────────────────────
 check 'iterate(x -> 2*x, 1, 10)'        '1024'                    # scalar
 check 'iterate(u -> u*0.5, [1,2,3,4], 3)' '[0.125, 0.25, 0.375, 0.5]'  # tensor, resident

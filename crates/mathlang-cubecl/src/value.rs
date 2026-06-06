@@ -11,7 +11,7 @@
 //! `fmt_f`/`fmt_val`, etc.
 
 use crate::ast::{Expr, TypeHint};
-use crate::compute::{self, TensorVal};
+use crate::compute::{self, CTensor, TensorVal};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -38,9 +38,10 @@ pub enum Val {
         sig: Arc<FnSig>,
     },
     Builtin(String),
-    /// A device-resident real tensor (the CubeCL compute path). Complex tensors
-    /// arrive in Phase 5.
+    /// A device-resident real tensor (the CubeCL compute path).
     Tensor(TensorVal),
+    /// A device-resident complex tensor (interleaved re/im).
+    ComplexTensor(CTensor),
     /// A tuple tree — heterogeneous leaves; ops broadcast over it.
     Tuple(Vec<Val>),
     /// Shared mutable container (identity semantics on clone).
@@ -67,6 +68,7 @@ impl Val {
             Val::Fn { .. } => Err(format!("{ctx}: expected a number, got a function")),
             Val::Builtin(n) => Err(format!("{ctx}: expected a number, got builtin '{n}'")),
             Val::Tensor(..) => Err(format!("{ctx}: expected a number, got a tensor")),
+            Val::ComplexTensor(..) => Err(format!("{ctx}: expected a number, got a complex tensor")),
             Val::Tuple(..) => Err(format!("{ctx}: expected a number, got a tuple")),
             Val::Cell(..) => Err(format!("{ctx}: expected a number, got a cell (use get())")),
             Val::Namespace(..) => Err(format!("{ctx}: expected a number, got a namespace")),
@@ -150,6 +152,50 @@ pub fn fmt_val(v: &Val) -> String {
             format!("({})", items.iter().map(fmt_val).collect::<Vec<_>>().join(", "))
         }
         Val::Tensor(t) => fmt_tensor(t),
+        Val::ComplexTensor(t) => fmt_complex_tensor(t),
+    }
+}
+
+/// Format one complex element (real if im == 0), matching the original.
+fn fmt_complex_elem(r: f64, i: f64) -> String {
+    if i == 0.0 {
+        return fmt_f(r);
+    }
+    let babs = i.abs();
+    let im = if babs == 1.0 { String::new() } else { fmt_f(babs) };
+    if r == 0.0 {
+        if i < 0.0 { format!("-{im}i") } else { format!("{im}i") }
+    } else if i < 0.0 {
+        format!("{} - {im}i", fmt_f(r))
+    } else {
+        format!("{} + {im}i", fmt_f(r))
+    }
+}
+
+fn fmt_complex_tensor(t: &CTensor) -> String {
+    let (re, im) = match compute::download_complex(t) {
+        Ok(d) => d,
+        Err(e) => return format!("<complex tensor read error: {e}>"),
+    };
+    // Collapse negligible re/im at display time (matches the original's make_complex
+    // rule) without forcing a per-op download that would break loop residency.
+    let cell = |k: usize| {
+        let (mut r, mut i) = (re[k], im[k]);
+        let scale = (r.abs() + i.abs()).max(1.0) * 1e-10;
+        if i.abs() < scale { i = 0.0; }
+        if r.abs() < scale { r = 0.0; }
+        fmt_complex_elem(r, i)
+    };
+    match t.shape.as_slice() {
+        [] | [_] => format!("[{}]", (0..t.len).map(cell).collect::<Vec<_>>().join(", ")),
+        [r, c] => {
+            let cells: Vec<Vec<String>> = (0..*r).map(|i| (0..*c).map(|j| cell(i * c + j)).collect()).collect();
+            fmt_mat_cells(cells)
+        }
+        shape => {
+            let dims = shape.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("×");
+            format!("complex tensor[{dims}] [{}]", (0..t.len).map(cell).collect::<Vec<_>>().join(", "))
+        }
     }
 }
 
@@ -175,6 +221,13 @@ fn fmt_tensor(t: &TensorVal) -> String {
 fn fmt_mat(data: &[f64], r: usize, c: usize) -> String {
     let cells: Vec<Vec<String>> =
         (0..r).map(|i| (0..c).map(|j| fmt_f(data[i * c + j])).collect()).collect();
+    fmt_mat_cells(cells)
+}
+
+/// Box a grid of pre-formatted cell strings (shared by real and complex matrices).
+fn fmt_mat_cells(cells: Vec<Vec<String>>) -> String {
+    let r = cells.len();
+    let c = cells.first().map(|row| row.len()).unwrap_or(0);
     let widths: Vec<usize> =
         (0..c).map(|j| cells.iter().map(|row| row[j].chars().count()).max().unwrap_or(0)).collect();
     cells
@@ -187,14 +240,12 @@ fn fmt_mat(data: &[f64], r: usize, c: usize) -> String {
                 .map(|(s, &w)| format!("{}{}", " ".repeat(w - s.chars().count()), s))
                 .collect::<Vec<_>>()
                 .join("  ");
-            let (l, rr) = if r == 1 {
-                ('\u{23A1}', '\u{23A4}') // single row uses top brackets
-            } else if i == 0 {
-                ('\u{23A1}', '\u{23A4}')
+            let (l, rr) = if r == 1 || i == 0 {
+                ('\u{23A1}', '\u{23A4}') // ⎡ ⎤
             } else if i == r - 1 {
-                ('\u{23A3}', '\u{23A6}')
+                ('\u{23A3}', '\u{23A6}') // ⎣ ⎦
             } else {
-                ('\u{23A2}', '\u{23A5}')
+                ('\u{23A2}', '\u{23A5}') // ⎢ ⎥
             };
             format!("{l} {content} {rr}")
         })

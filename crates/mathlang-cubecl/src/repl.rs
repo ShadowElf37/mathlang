@@ -283,6 +283,10 @@ fn type_of(v: &Val) -> String {
             let dims = t.shape.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("×");
             format!("real tensor [{dims}] ({})", t.prec.name())
         }
+        Val::ComplexTensor(t) => {
+            let dims = t.shape.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("×");
+            format!("complex tensor [{dims}] ({})", t.prec.name())
+        }
         Val::Tuple(_) => "tuple".into(),
         Val::Cell(_) => "cell".into(),
         Val::Namespace(_) => "namespace".into(),
@@ -312,7 +316,8 @@ Tensors run on the compute path: [a,b,c], matrices (1,2; 3,4), a..b,
 zeros/ones/eye/linspace/range; elementwise + - * / ^ and comparisons,
 broadcasting a scalar against a tensor; unary math (sin/exp/sqrt/...);
 shape/rows/cols/len; @ / matmul; sum/prod/mean/min/max/norm/std (device
-reductions). Precision: f32, f64
+reductions). Complex tensors: [1+2i,…], promotion, re/im/abs/arg/conj,
+exp/ln/sqrt/sin/cos, complex sum/mean. Precision: f32, f64
 (cpu/cuda/hip), or df64 double-single (+ - * / & compares on cpu/cuda/hip;
 gated on wgpu; pow/transcendentals staged).
 Other builtins: min/max/pow/hypot/gcd/lcm/ncr, lt/leq/gt/geq/eq/neq,

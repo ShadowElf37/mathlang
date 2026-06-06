@@ -14,6 +14,37 @@ pub fn eval_builtin(name: &str, args: Vec<Val>, env: &Env) -> Result<Val, String
     // Tensor fast-paths: a unary math builtin applied to a tensor runs on the
     // compute path. Constructors build tensors on the active target.
     if args.len() == 1 {
+        if let Val::ComplexTensor(ct) = &args[0] {
+            // complex → real
+            let c2r = match name {
+                "re" => Some(compute::CR_RE),
+                "im" => Some(compute::CR_IM),
+                "abs" => Some(compute::CR_ABS),
+                "arg" => Some(compute::CR_ARG),
+                _ => None,
+            };
+            if let Some(code) = c2r {
+                return compute::cunary_c2r(env.target, code, ct).map(Val::Tensor);
+            }
+            // complex → complex
+            let c2c = match name {
+                "conj" => Some(compute::CU_CONJ),
+                "exp" => Some(compute::CU_EXP),
+                "ln" => Some(compute::CU_LN),
+                "sqrt" => Some(compute::CU_SQRT),
+                "sin" => Some(compute::CU_SIN),
+                "cos" => Some(compute::CU_COS),
+                _ => None,
+            };
+            if let Some(code) = c2c {
+                return compute::cunary_c2c(env.target, code, ct).map(Val::ComplexTensor);
+            }
+            if name == "mean" {
+                let (r, i) = compute::creduce_sum(ct)?;
+                let n = ct.len.max(1) as f64;
+                return Ok(make_complex(r / n, i / n));
+            }
+        }
         if let Val::Tensor(t) = &args[0] {
             if let Some(code) = unary_tensor_code(name) {
                 return compute::unary(env.target, code, t).map(Val::Tensor);

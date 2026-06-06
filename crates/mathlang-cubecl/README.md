@@ -54,6 +54,23 @@ REPL commands: `!help !backend !prec !type !defs !clear !print !spike !version !
 Deferred to later phases: tensor indexing/slicing, matmul/linalg, on-device
 reductions, fft, fields/forms, pic, calculus, file I/O, animation.
 
+## Complex tensors
+
+First-class device-resident complex tensors (interleaved `[re, im]`, f32/f64; df64
+complex is not supported). A complex literal anywhere in `[…]` or a matrix makes the
+result complex, and a real tensor meeting a complex scalar/tensor promotes:
+
+```
+[1, 2, 3] + 2i        → [1 + 2i, 2 + 2i, 3 + 2i]
+[1+1i] * [1+1i]       → [2i]
+sqrt([3+4i])          → [2 + i]          exp([0, πi]) → [1, -1]
+abs([3+4i, 5+12i])    → [5, 13]          conj/re/im/arg, sin/cos/ln, sum/mean
+```
+
+Arithmetic `+ − × ÷`, `re`/`im`/`abs`/`arg`/`conj`, `exp`/`ln`/`sqrt`/`sin`/`cos`,
+and `sum`/`mean` all run on device. Display collapses negligible imaginary parts
+(so `exp(πi)` shows `-1`) without forcing a per-op download.
+
 ## Loops & residency (`iterate` / `scan`)
 
 `iterate(f, x0, n)` and `scan(f, x0, n)` are the **one** loop mechanism — the

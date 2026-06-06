@@ -135,6 +135,120 @@ pub fn ew_unary<F: Float>(x: &Array<F>, out: &mut Array<F>, #[comptime] op: u32)
     }
 }
 
+// ── complex kernels (interleaved [re, im], generic f32/f64) ─────────────────────
+// A complex tensor of n logical elements is 2n values: data[2i]=re, data[2i+1]=im.
+// cbinop reuses the real OP_* codes (+ - * /); unary ops have their own codes.
+
+/// Promote a real array to interleaved complex (im = 0).
+#[cube(launch)]
+pub fn real_to_complex<F: Float>(x: &Array<F>, out: &mut Array<F>) {
+    let i = ABSOLUTE_POS;
+    if i < x.len() {
+        out[i * 2] = x[i];
+        out[i * 2 + 1] = F::new(0.0);
+    }
+}
+
+#[cube(launch)]
+pub fn cbinop<F: Float>(a: &Array<F>, b: &Array<F>, out: &mut Array<F>, #[comptime] op: u32) {
+    let i = ABSOLUTE_POS;
+    let n = out.len() / 2;
+    if i < n {
+        let na = a.len() / 2;
+        let nb = b.len() / 2;
+        let ia = (i % na) * 2;
+        let ib = (i % nb) * 2;
+        let ar = a[ia];
+        let ai = a[ia + 1];
+        let br = b[ib];
+        let bi = b[ib + 1];
+        let mut rr = ar + br;
+        let mut ri = ai + bi;
+        if comptime![op == OP_SUB] {
+            rr = ar - br;
+            ri = ai - bi;
+        } else if comptime![op == OP_MUL] {
+            rr = ar * br - ai * bi;
+            ri = ar * bi + ai * br;
+        } else if comptime![op == OP_DIV] {
+            let d = br * br + bi * bi;
+            rr = (ar * br + ai * bi) / d;
+            ri = (ai * br - ar * bi) / d;
+        }
+        out[i * 2] = rr;
+        out[i * 2 + 1] = ri;
+    }
+}
+
+// complex → complex unary
+pub const CU_NEG: u32 = 0;
+pub const CU_CONJ: u32 = 1;
+pub const CU_EXP: u32 = 2;
+pub const CU_LN: u32 = 3;
+pub const CU_SQRT: u32 = 4;
+pub const CU_SIN: u32 = 5;
+pub const CU_COS: u32 = 6;
+
+#[cube(launch)]
+pub fn cunary_c2c<F: Float>(x: &Array<F>, out: &mut Array<F>, #[comptime] op: u32) {
+    let i = ABSOLUTE_POS;
+    let n = out.len() / 2;
+    if i < n {
+        let xr = x[i * 2];
+        let xi = x[i * 2 + 1];
+        let mut rr = -xr;
+        let mut ri = -xi;
+        if comptime![op == CU_CONJ] {
+            rr = xr;
+            ri = -xi;
+        } else if comptime![op == CU_EXP] {
+            let m = F::exp(xr);
+            rr = m * F::cos(xi);
+            ri = m * F::sin(xi);
+        } else if comptime![op == CU_LN] {
+            rr = F::ln(F::sqrt(xr * xr + xi * xi));
+            ri = F::atan2(xi, xr);
+        } else if comptime![op == CU_SQRT] {
+            let r = F::sqrt(F::sqrt(xr * xr + xi * xi));
+            let th = F::atan2(xi, xr) * F::new(0.5);
+            rr = r * F::cos(th);
+            ri = r * F::sin(th);
+        } else if comptime![op == CU_SIN] {
+            rr = F::sin(xr) * F::cosh(xi);
+            ri = F::cos(xr) * F::sinh(xi);
+        } else if comptime![op == CU_COS] {
+            rr = F::cos(xr) * F::cosh(xi);
+            ri = -(F::sin(xr) * F::sinh(xi));
+        }
+        out[i * 2] = rr;
+        out[i * 2 + 1] = ri;
+    }
+}
+
+// complex → real unary
+pub const CR_RE: u32 = 0;
+pub const CR_IM: u32 = 1;
+pub const CR_ABS: u32 = 2;
+pub const CR_ARG: u32 = 3;
+
+#[cube(launch)]
+pub fn cunary_c2r<F: Float>(x: &Array<F>, out: &mut Array<F>, #[comptime] op: u32) {
+    let i = ABSOLUTE_POS;
+    if i < out.len() {
+        let xr = x[i * 2];
+        let xi = x[i * 2 + 1];
+        let mut r = xr;
+        if comptime![op == CR_IM] {
+            r = xi;
+        } else if comptime![op == CR_ABS] {
+            r = F::sqrt(xr * xr + xi * xi);
+        } else if comptime![op == CR_ARG] {
+            r = F::atan2(xi, xr);
+        }
+        out[i] = r;
+    }
+}
+
 // ── df64 (double-single) kernels ────────────────────────────────────────────────
 //
 // Each logical element is two f32 `(hi, lo)` stored interleaved: `data[2i]=hi`,

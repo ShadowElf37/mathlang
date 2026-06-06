@@ -10,7 +10,7 @@
 
 use crate::ast::{BlockStmt, Def, Expr, Op};
 use crate::builtins::eval_builtin;
-use crate::compute::{self, Target, TensorVal};
+use crate::compute::{self, CTensor, Target, TensorVal};
 use crate::value::{fmt_val, int, make_complex, to_complex, FnSig, Val};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -120,17 +120,23 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
         }
         Expr::Apply(f_expr, arg_exprs) => eval_apply(f_expr, arg_exprs, env),
         Expr::Array(exprs) => {
-            // [a, b, c] — a 1-D real tensor, uploaded to the active target.
-            let mut data = Vec::with_capacity(exprs.len());
+            // [a, b, c] — a 1-D tensor; promotes to complex if any element is complex.
+            let mut re = Vec::with_capacity(exprs.len());
+            let mut im = Vec::with_capacity(exprs.len());
+            let mut has_complex = false;
             for e in exprs {
                 match eval(e, env)? {
-                    Val::Num(x) => data.push(x),
-                    Val::Complex(..) => return Err("complex tensors are Phase 5; [] needs real elements".into()),
+                    Val::Num(x) => { re.push(x); im.push(0.0); }
+                    Val::Complex(a, b) => { re.push(a); im.push(b); has_complex = true; }
                     other => return Err(format!("[] requires numeric elements, got {}", fmt_val(&other))),
                 }
             }
-            let n = data.len();
-            compute::upload(env.target, &data, vec![n]).map(Val::Tensor)
+            let n = re.len();
+            if has_complex {
+                compute::upload_complex(env.target, &re, &im, vec![n]).map(Val::ComplexTensor)
+            } else {
+                compute::upload(env.target, &re, vec![n]).map(Val::Tensor)
+            }
         }
         Expr::TensorLit(rows) => {
             // (1,2; 3,4) — a 2-D real tensor (row-major).
@@ -138,16 +144,26 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                 return compute::upload(env.target, &[], vec![0, 0]).map(Val::Tensor);
             }
             let (r, c) = (rows.len(), rows[0].len());
-            let mut data = Vec::with_capacity(r * c);
+            let mut re = Vec::with_capacity(r * c);
+            let mut im = Vec::with_capacity(r * c);
+            let mut has_complex = false;
             for (ri, row) in rows.iter().enumerate() {
                 if row.len() != c {
                     return Err(format!("matrix row {ri} has {} elements, expected {c}", row.len()));
                 }
                 for e in row {
-                    data.push(eval(e, env)?.num("matrix literal")?);
+                    match eval(e, env)? {
+                        Val::Num(x) => { re.push(x); im.push(0.0); }
+                        Val::Complex(a, b) => { re.push(a); im.push(b); has_complex = true; }
+                        other => return Err(format!("matrix literal: expected a number, got {}", fmt_val(&other))),
+                    }
                 }
             }
-            compute::upload(env.target, &data, vec![r, c]).map(Val::Tensor)
+            if has_complex {
+                compute::upload_complex(env.target, &re, &im, vec![r, c]).map(Val::ComplexTensor)
+            } else {
+                compute::upload(env.target, &re, vec![r, c]).map(Val::Tensor)
+            }
         }
         Expr::Range(start, end) => {
             // `a..b` — inclusive integer range as a 1-D tensor (matches the original).
@@ -296,7 +312,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
             }
             Err("tuple apply: expected a single index".into())
         }
-        Val::Tensor(..) => Err("tensors are not callable".into()),
+        Val::Tensor(..) | Val::ComplexTensor(..) => Err("tensors are not callable".into()),
         Val::Cell(..) => Err("cells are not callable (use get/set)".into()),
         Val::Namespace(..) => Err("namespaces are not callable (use ns.member)".into()),
     }
@@ -315,7 +331,7 @@ fn apply_num(s: f64, args: Vec<Val>) -> Result<Val, String> {
                     other => other,
                 }).collect(),
             )),
-            Val::Tensor(..) => Err("scale a tensor with `*` (e.g. 2 * T), not juxtaposition".into()),
+            Val::Tensor(..) | Val::ComplexTensor(..) => Err("scale a tensor with `*` (e.g. 2 * T), not juxtaposition".into()),
             Val::Builtin(_) => Err("cannot scale a builtin function".into()),
             Val::Cell(..) => Err("cannot scale a cell (use get/set)".into()),
             Val::Namespace(..) => Err("cannot scale a namespace".into()),
@@ -374,10 +390,53 @@ pub fn binop_val(lv: Val, op: &Op, rv: Val, target: Target) -> Result<Val, Strin
         }
         return binop_tuple(lv, op, rv, target);
     }
+    if is_complex_combo(&lv, &rv) {
+        return complex_binop(lv, op, rv, target);
+    }
     if matches!((&lv, &rv), (Val::Tensor(_), _) | (_, Val::Tensor(_))) {
         return tensor_binop(lv, op, rv, target);
     }
     scalar_binop(lv, op, rv)
+}
+
+/// A binop yields a complex *tensor* when either side is one, or when a real tensor
+/// meets a complex scalar.
+fn is_complex_combo(l: &Val, r: &Val) -> bool {
+    matches!(
+        (l, r),
+        (Val::ComplexTensor(_), _)
+            | (_, Val::ComplexTensor(_))
+            | (Val::Tensor(_), Val::Complex(..))
+            | (Val::Complex(..), Val::Tensor(_))
+    )
+}
+
+/// Coerce any operand to a complex tensor on `target` (scalars → length-1 broadcast;
+/// real tensors promote with im = 0).
+fn to_ctensor_on(v: Val, target: Target) -> Result<CTensor, String> {
+    match v {
+        Val::ComplexTensor(ct) => compute::ensure_complex_on(ct, target),
+        Val::Complex(a, b) => compute::upload_complex(target, &[a], &[b], vec![1]),
+        Val::Num(x) => compute::upload_complex(target, &[x], &[0.0], vec![1]),
+        Val::Tensor(t) => {
+            let t = ensure_on(t, target)?;
+            compute::promote_real(target, &t)
+        }
+        other => Err(format!("cannot combine {} with a complex tensor", fmt_val(&other))),
+    }
+}
+
+fn complex_binop(lv: Val, op: &Op, rv: Val, target: Target) -> Result<Val, String> {
+    let code = match op {
+        Op::Add => compute::OP_ADD,
+        Op::Sub => compute::OP_SUB,
+        Op::Mul => compute::OP_MUL,
+        Op::Div => compute::OP_DIV,
+        _ => return Err(format!("operator `{op:?}` is not defined on complex tensors (only + - * /)")),
+    };
+    let a = to_ctensor_on(lv, target)?;
+    let b = to_ctensor_on(rv, target)?;
+    compute::cbinop(target, code, &a, &b).map(Val::ComplexTensor)
 }
 
 fn binop_tuple(lv: Val, op: &Op, rv: Val, target: Target) -> Result<Val, String> {
@@ -515,6 +574,7 @@ pub fn neg_val(v: Val, target: Target) -> Result<Val, String> {
             Ok(Val::Tuple(items.into_iter().map(|x| neg_val(x, target)).collect::<Result<Vec<_>, _>>()?))
         }
         Val::Tensor(t) => compute::unary(target, compute::UN_NEG, &t).map(Val::Tensor),
+        Val::ComplexTensor(ct) => compute::cunary_c2c(target, compute::CU_NEG, &ct).map(Val::ComplexTensor),
         other => Err(format!("unary minus: expected a number, got {}", fmt_val(&other))),
     }
 }
@@ -560,6 +620,13 @@ fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> {
             Val::Tensor(t) => {
                 let op = if product { compute::RED_PROD } else { compute::RED_SUM };
                 Ok(Val::Num(compute::reduce(env.target, op, &t)?))
+            }
+            Val::ComplexTensor(ct) => {
+                if product {
+                    return Err("complex prod reduction is staged; use sum".into());
+                }
+                let (r, i) = compute::creduce_sum(&ct)?;
+                Ok(make_complex(r, i))
             }
             Val::Tuple(items) => {
                 let (mut acc_re, mut acc_im) = if product { (1.0, 0.0) } else { (0.0, 0.0) };
