@@ -347,8 +347,12 @@ Linalg: det/inv/solve/trace/diag/eig/eigvals. Stencils: shift/roll, ops.lap/grad
 and gradients too). Spectral: fft/ifft, ops.specgrad/poisson/invlap.
 Fields & forms: field(...), forms.d/hodge/wedge/raise/lower/codiff/laplace/
 contract; tensor(field) extracts.
+PIC (particle/grid): pic.scatter(pos, w, template [, kernel]) deposits particles
+onto a field; pic.gather(field, pos [, kernel]) interpolates; pic.gathergrad(field,
+pos [, kernel]) returns the gradient of the shape function (variational force).
+Kernels: pic.ngp (nearest), pic.cic (linear, default), pic.tsc (quadratic).
 
-Not yet present (later phases): pic, file I/O, animation; field-polymorphic
+Not yet present (later phases): file I/O, animation; field-polymorphic
 ops.*(field)."
     );
 }

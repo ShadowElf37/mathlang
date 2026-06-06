@@ -18,6 +18,10 @@ pub fn eval_builtin(name: &str, args: Vec<Val>, env: &Env) -> Result<Val, String
     if name == "field" {
         return crate::field::field_ctor(args, env);
     }
+    // pic.* — host-side particle/grid coupling.
+    if let Some(member) = name.strip_prefix("pic.") {
+        return crate::pic::dispatch(member, args, env);
+    }
     // Any other builtin "decays" a field to its data tensor (uploaded to device),
     // matching the original — so abs/sum/etc. work on a field's samples.
     if args.iter().any(|a| matches!(a, Val::Field(_))) {

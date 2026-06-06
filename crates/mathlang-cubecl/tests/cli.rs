@@ -676,31 +676,115 @@ fn df64_mul() {
     check_repl!("!prec df64\n[0.1] * [0.1]", "0.0100000000000000");
 }
 
-// wgpu tests require GPU hardware — skipped by default, run with `cargo test -- --ignored`
-
 #[test]
-#[ignore = "requires wgpu hardware"]
 fn wgpu_f32_loses_precision() {
     check_repl!("!backend wgpu\n[1.0] + [1e-10]", "[1]");
 }
 
 #[test]
-#[ignore = "requires wgpu hardware"]
 fn wgpu_rejects_f64() {
     check_repl!("!backend wgpu\n!prec f64", "no native f64");
 }
 
 #[test]
-#[ignore = "requires wgpu hardware"]
 fn wgpu_df64_storage_roundtrip() {
     check_repl!("!backend wgpu\n!prec df64\n[0.5, 0.25]", "[0.5, 0.25]");
 }
 
 #[test]
-#[ignore = "requires wgpu hardware"]
 fn wgpu_df64_warns_unreliable() {
     check_repl!(
         "!backend wgpu\n!prec df64\n[1.0] + [1.0]",
         "unreliable on wgpu"
+    );
+}
+
+// ── PIC: particle/grid coupling (scatter / gather / gathergrad) ───────────────
+
+#[test]
+fn pic_scatter_cic() {
+    // Weight 1.0 at x=2.5 on a 5-node Neumann grid [0,4] (spacing=1).
+    // CIC splits between nodes 2 and 3 with weights 0.5 each.
+    check!(
+        "tensor(pic.scatter([2.5], [1.0], field(zeros(5), 0, 4, forms.neumann)))",
+        "[0, 0, 0.5, 0.5, 0]"
+    );
+}
+
+#[test]
+fn pic_scatter_ngp() {
+    // Nearest node to x=2.4 is node 2 (round(2.4)=2).
+    check!(
+        "tensor(pic.scatter([2.4], [1.0], field(zeros(5), 0, 4, forms.neumann), pic.ngp))",
+        "[0, 0, 1, 0, 0]"
+    );
+}
+
+#[test]
+fn pic_scatter_conservation() {
+    // CIC partitions unity, so sum of deposited mass == sum of input weights = 1.5.
+    check!(
+        "sum(tensor(pic.scatter([1.3,7.8,4.2], [2.0,-1.0,0.5], field(zeros(10), 0, 9, forms.periodic))))",
+        "1.5"
+    );
+}
+
+#[test]
+fn pic_gather_linear_exact() {
+    // CIC interpolation of f(x)=x is exact at any interior point.
+    check!("pic.gather(field([0,1,2,3,4], 0, 4, forms.neumann), [2.5])", "[2.5]");
+}
+
+#[test]
+fn pic_adjoint() {
+    // Adjointness: <gather(f,X), w> == <f, scatter(X,w)>  (same kernel ⇒ transposes).
+    check_repl!(
+        "f=field((x)->sin(x), 0, 6, 12, forms.periodic)\nX=[1.3,3.7,5.1]\nw=[2.0,-1.0,0.5]\nabs(sum(pic.gather(f,X)*w) - sum(tensor(f)*tensor(pic.scatter(X,w,f)))) < 1e-12",
+        "1"
+    );
+}
+
+#[test]
+fn pic_gather_vector_shape() {
+    // Vector-field gather returns [P, ncomp] — here P=1, ncomp=2.
+    check!(
+        "shape(pic.gather(forms.vector(tensor((i,j,c)->i+j+c, 3,3,2), (0,0),(2,2),forms.periodic), [0.5,0.5]))",
+        "[1, 2]"
+    );
+}
+
+#[test]
+fn pic_scatter_arity_error() {
+    check!(
+        "pic.scatter([2.5], [1.0])",
+        "error: pic.scatter(positions, weights, template [, kernel]) expects 3 or 4 args"
+    );
+}
+
+#[test]
+fn pic_gathergrad_linear_exact() {
+    // Gradient of CIC interpolation of f(x)=x is 1 everywhere.
+    check!(
+        "pic.gathergrad(field([0,1,2,3,4], 0, 4, forms.neumann), [2.5])",
+        "[1]"
+    );
+}
+
+#[test]
+fn pic_gathergrad_shape_2d() {
+    // Output shape [P, ndim] for a 2-D field with P=2 particles.
+    check!(
+        "shape(pic.gathergrad(field((x,y)->x*y, 0, 4, (5,5), forms.neumann), tensor((p,c)->if(c==0,1.5,2.5),2,2)))",
+        "[2, 2]"
+    );
+}
+
+#[test]
+fn pic_gathergrad_matches_fd() {
+    // gathergrad (analytic kernel gradient) matches finite-difference of gather
+    // to well within 1e-4 on a smooth periodic 2-D field.
+    check_repl!(
+        "f=field((x,y)->sin(x)*cos(y), 0, 2*pi, (32,32), forms.periodic)\nmk=(a,b)->tensor((p,c)->if(c==0,a,b),1,2)\nh=1e-4\ng=pic.gathergrad(f,mk(1.3,0.7))\ngx=(pic.gather(f,mk(1.3+h,0.7))-pic.gather(f,mk(1.3-h,0.7)))/(2*h)\nabs(g[0,0]-gx[0]) < 1e-4",
+        "1"
     );
 }

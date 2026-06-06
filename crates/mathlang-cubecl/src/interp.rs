@@ -57,6 +57,9 @@ impl Env {
         forms.insert("periodic".to_string(), Val::Num(0.0));
         forms.insert("neumann".to_string(), Val::Num(1.0));
         vars.insert("forms".into(), Val::Namespace(Arc::new(forms)));
+        // The `pic` namespace: particle-in-cell scatter/gather + kernel sentinels.
+        let pic = crate::pic::members();
+        vars.insert("pic".into(), Val::Namespace(Arc::new(pic)));
         Self { vars: Arc::new(vars), target: Target::default_target() }
     }
 }
@@ -98,7 +101,7 @@ pub const BUILTINS: &[&str] = &[
 ];
 
 pub fn is_protected(name: &str) -> bool {
-    matches!(name, "pi" | "e" | "phi" | "inf" | "i" | "ops" | "forms") || BUILTINS.contains(&name)
+    matches!(name, "pi" | "e" | "phi" | "inf" | "i" | "ops" | "forms" | "pic") || BUILTINS.contains(&name)
 }
 
 // ── Evaluator ───────────────────────────────────────────────────────────────────

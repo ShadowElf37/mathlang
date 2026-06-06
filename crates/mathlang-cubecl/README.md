@@ -162,16 +162,40 @@ in the field algebra; any other builtin decays a field to its tensor; `tensor(f)
 extracts the grid data. Host-side (matching the original's CPU semantics); fields are
 a host geometric object that bridge to device tensors via `field(…)`/`tensor(…)`.
 
+## PIC (particle/grid coupling)
+
+`pic.scatter`, `pic.gather`, and `pic.gathergrad` implement particle-in-cell
+deposition and interpolation on any field geometry. Three shape functions:
+nearest-grid-point (`pic.ngp`), cloud-in-cell (`pic.cic`, linear, the default),
+triangular-shaped-cloud (`pic.tsc`, quadratic). Boundary conditions follow the
+field's per-axis BC (periodic/Neumann); n-D grids use tensor-product stencils.
+
+```
+# Deposit weight 1 at x=2.5 on a 5-node Neumann [0,4] grid (CIC)
+tensor(pic.scatter([2.5],[1.0], field(zeros(5),0,4,forms.neumann)))  → [0,0,0.5,0.5,0]
+
+# Interpolate f(x)=x — CIC is exact for piecewise-linear fields
+pic.gather(field([0,1,2,3,4], 0, 4, forms.neumann), [2.5])           → [2.5]
+
+# Gradient of the shape function — the variational force for energies of ρ
+pic.gathergrad(field([0,1,2,3,4], 0, 4, forms.neumann), [2.5])       → [1]
+```
+
+Adjointness holds by construction: `⟨gather(f,X), w⟩ == ⟨f, scatter(X,w)⟩`
+(verified < 1e-12). `gathergrad` is the exact transpose of scatter's positional
+derivative — a Verlet stepper using it conserves the Hamiltonian exactly for
+self-gravitating or barotropic particle-mesh gases (no grid-scale heating).
+
 ## Tests
 
 ```sh
-cargo test -p mathlang-cubecl          # 109 tests; 4 wgpu-hardware tests ignored
-cargo test -p mathlang-cubecl -- --ignored  # also run the wgpu hardware tests
+cargo test -p mathlang-cubecl
 ```
 
-Covers scalar/complex/tuple core, tensor ops, linear algebra, resident loops,
-fields & forms, spectral operators, calculus, and cross-backend precision.
-`tests.sh` is retained as a legacy reference but `cargo test` is canonical.
+123 `#[test]` functions covering scalar/complex/tuple core, tensor ops, linear
+algebra, resident loops, fields & forms, spectral operators, calculus, PIC, and
+cross-backend precision (including wgpu/Metal). `tests.sh` is retained as a
+legacy reference; `cargo test` is canonical.
 
 ## Why
 
