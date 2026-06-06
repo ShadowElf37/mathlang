@@ -66,6 +66,8 @@ pub const BUILTINS: &[&str] = &[
     // higher-order + containers
     "map", "filter", "reduce", "compose", "partial",
     "sum", "prod", "iterate", "scan", "if",
+    // calculus
+    "integral", "deriv",
     "len", "length", "cell", "get", "set",
     // tensor constructors / shape (the compute path)
     "zeros", "ones", "eye", "linspace", "range", "shape", "rows", "cols",

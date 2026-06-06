@@ -323,6 +323,66 @@ pub fn eval_builtin(name: &str, args: Vec<Val>, env: &Env) -> Result<Val, String
             Ok(Val::Tuple(vec![Val::Tensor(lam), Val::Tensor(vecs)]))
         }
 
+        // ── calculus ────────────────────────────────────────────────────────────
+        "deriv" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err("deriv(f, x[, dx]) or deriv(f, point[, axis])".into());
+            }
+            let f = args[0].clone();
+            match &args[1] {
+                // scalar: 5-point stencil (3rd arg = dx)
+                Val::Num(x) => {
+                    let x = *x;
+                    let dx = match args.get(2) { Some(v) => v.clone().num("dx")?, None => 1e-5 };
+                    Ok(Val::Num(deriv_scalar(&f, x, dx, env)?))
+                }
+                // multivariate: partial along an axis, or the full gradient
+                _ => {
+                    let p = flatten_point(&args[1], "deriv")?;
+                    let dx = 1e-5;
+                    match args.get(2) {
+                        Some(axv) => {
+                            let axis = axv.clone().num("axis")? as usize;
+                            if axis >= p.len() {
+                                return Err(format!("deriv: axis {axis} out of range for a {}-vector", p.len()));
+                            }
+                            Ok(Val::Num(grad_partial(&f, &p, axis, dx, env)?))
+                        }
+                        None => {
+                            let g: Vec<f64> = (0..p.len()).map(|i| grad_partial(&f, &p, i, dx, env)).collect::<Result<_, _>>()?;
+                            let n = g.len();
+                            compute::upload(env.target, &g, vec![n]).map(Val::Tensor)
+                        }
+                    }
+                }
+            }
+        }
+        "integral" => {
+            if args.len() < 3 || args.len() > 4 {
+                return Err("integral(f, a, b[, n]) or integral(f, lo, hi[, n]) for a box".into());
+            }
+            let f = args[0].clone();
+            match &args[1] {
+                // scalar: composite Simpson (default n=1000)
+                Val::Num(a) => {
+                    let a = *a;
+                    let b = args[2].clone().num("b")?;
+                    let n = match args.get(3) { Some(v) => v.clone().num("n")? as usize, None => 1000 };
+                    Ok(Val::Num(integ_scalar(&f, a, b, n, env)?))
+                }
+                // multidim: tensor-product Simpson over a box (default n=64 per axis)
+                _ => {
+                    let lo = flatten_point(&args[1], "integral")?;
+                    let hi = flatten_point(&args[2], "integral")?;
+                    if lo.len() != hi.len() {
+                        return Err("integral: lo and hi must have the same length".into());
+                    }
+                    let n = match args.get(3) { Some(v) => v.clone().num("n")? as usize, None => 64 };
+                    Ok(Val::Num(integ_nd(&f, &lo, &hi, n, env)?))
+                }
+            }
+        }
+
         // ── elementwise select (where): cond ? a : b, via masking ───────────────
         "select" => {
             if args.len() != 3 {
@@ -1043,6 +1103,75 @@ fn host_cat_2d(parts: Vec<(Vec<f64>, usize, usize)>, axis: usize) -> Result<(Vec
     } else {
         Err("cat: axis must be 0 or 1 for 2-D tensors".into())
     }
+}
+
+// ── calculus helpers (host; functions are evaluated pointwise) ──────────────────
+
+/// Flatten an integration/derivative point (scalar, numeric tuple, or 1-D tensor).
+fn flatten_point(v: &Val, name: &str) -> Result<Vec<f64>, String> {
+    match v {
+        Val::Num(x) => Ok(vec![*x]),
+        Val::Tuple(items) => items.iter().map(|x| x.clone().num(name)).collect(),
+        Val::Tensor(t) if t.shape.len() == 1 => compute::download(t),
+        other => Err(format!("{name}: expected a scalar, vector, or tuple point, got {}", fmt_val(other))),
+    }
+}
+
+/// 5-point central-difference derivative of a 1-arg function.
+fn deriv_scalar(f: &Val, x: f64, dx: f64, env: &Env) -> Result<f64, String> {
+    let at = |t: f64| apply_val(f.clone(), vec![Val::Num(t)], env)?.num("deriv f");
+    Ok((-at(x + 2.0 * dx)? + 8.0 * at(x + dx)? - 8.0 * at(x - dx)? + at(x - 2.0 * dx)?) / (12.0 * dx))
+}
+
+/// Partial ∂f/∂xᵢ at `p` (5-point). The point is passed to `f` as a tuple, which
+/// destructures into multiple params or is indexed as a vector — either calling style.
+fn grad_partial(f: &Val, p: &[f64], i: usize, dx: f64, env: &Env) -> Result<f64, String> {
+    let at = |d: f64| -> Result<f64, String> {
+        let mut q: Vec<Val> = p.iter().map(|&x| Val::Num(x)).collect();
+        q[i] = Val::Num(p[i] + d);
+        apply_val(f.clone(), vec![Val::Tuple(q)], env)?.num("deriv f")
+    };
+    Ok((-at(2.0 * dx)? + 8.0 * at(dx)? - 8.0 * at(-dx)? + at(-2.0 * dx)?) / (12.0 * dx))
+}
+
+/// Composite Simpson's rule for a 1-arg function over [a, b].
+fn integ_scalar(f: &Val, a: f64, b: f64, n: usize, env: &Env) -> Result<f64, String> {
+    let n = n + n % 2;
+    let h = (b - a) / n as f64;
+    let at = |t: f64| apply_val(f.clone(), vec![Val::Num(t)], env)?.num("integral f");
+    let mut s = at(a)? + at(b)?;
+    for i in 1..n {
+        s += at(a + i as f64 * h)? * if i % 2 == 1 { 4.0 } else { 2.0 };
+    }
+    Ok(s * h / 3.0)
+}
+
+fn simpson_w(i: usize, n: usize) -> f64 {
+    if i == 0 || i == n { 1.0 } else if i % 2 == 1 { 4.0 } else { 2.0 }
+}
+
+/// Tensor-product Simpson over the box ∏[loₐ, hiₐ] with `n` steps per axis.
+fn integ_nd(f: &Val, lo: &[f64], hi: &[f64], n: usize, env: &Env) -> Result<f64, String> {
+    let n = n + n % 2;
+    let ndim = lo.len();
+    let h: Vec<f64> = (0..ndim).map(|a| (hi[a] - lo[a]) / n as f64).collect();
+    let pts = n + 1;
+    let total = pts.pow(ndim as u32);
+    let mut sum = 0.0;
+    for flat in 0..total {
+        let mut idx = flat;
+        let mut w = 1.0;
+        let mut coords = Vec::with_capacity(ndim);
+        for a in 0..ndim {
+            let i = idx % pts;
+            idx /= pts;
+            coords.push(Val::Num(lo[a] + i as f64 * h[a]));
+            w *= simpson_w(i, n);
+        }
+        sum += w * apply_val(f.clone(), vec![Val::Tuple(coords)], env)?.num("integral f")?;
+    }
+    let factor: f64 = h.iter().map(|hh| hh / 3.0).product();
+    Ok(sum * factor)
 }
 
 /// Population standard deviation of a tensor: sqrt(mean((x − mean)²)) — all on device.

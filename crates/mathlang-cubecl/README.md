@@ -105,6 +105,23 @@ hundreds/thousands of steps on real grids). Fusing the whole loop body into one
 on-device kernel (the README's "loop inside the kernel") is a later optimization
 built on the runtime-AST→IR codegen proven in Phase 0.
 
+## Calculus
+
+`integral` and `deriv` (host-side, functions evaluated pointwise):
+
+```
+integral(x -> x^2, 0, 1)              → 0.3333…        deriv(x -> x^3, 2) → 12
+integral((x,y) -> x*y, [0,0], [1,1])  → 0.25           # tensor-product Simpson
+deriv((x,y) -> x^2*y, (3,5))          → [30, 9]        # full gradient (5-point)
+deriv((x,y) -> x^2*y, (3,5), 0)       → 30             # partial ∂/∂x
+```
+
+Scalar forms match the original (composite Simpson, 5-point stencil). The
+**gradients and multidimensional integrals are an improvement** — the README of the
+original describes them but the binary errors on them; here they work, which is what
+Newton/optimization and quadrature need (e.g. `iterate(x -> x - (x^2-2)/deriv(t ->
+t^2-2, x), 1.0, 5)` → √2).
+
 ## Tests
 
 `bash crates/mathlang-cubecl/tests.sh` — scalar/complex/tuple core, tensor

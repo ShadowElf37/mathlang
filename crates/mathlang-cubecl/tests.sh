@@ -80,6 +80,15 @@ check 'exp([0+0i, 0+3.141592653589793i])' '[1, -1]'           # display collapse
 check 'sum([1+2i, 3+4i, 5+6i])' '9 + 12i'
 check_repl $'!type [1+2i, 3]'   'complex tensor'
 
+# ── calculus (Phase: integral/deriv, scalar + multidim) ─────────────────────────
+check 'integral(x -> x^2, 0, 1)'        '0.33333333333333315'    # scalar Simpson (== m)
+check 'deriv(x -> x^3, 2)'              '12.000000000182233'     # 5-point stencil (== m)
+check 'round(deriv((x,y) -> x^2*y, (3,5), 0))' '30'             # partial ∂/∂x
+check 'round(sum(deriv((x,y) -> x^2*y, (3,5))))' '39'          # gradient [30, 9]
+check 'integral((x,y) -> x*y, [0,0], [1,1])' '0.25'            # double integral
+check 'integral((x,y,z) -> 1, [0,0,0], [2,3,4])' '24'         # box volume
+check 'iterate(x -> x - (x^2-2)/deriv(t -> t^2-2, x), 1.0, 5)' '1.4142135623730951'  # Newton → √2
+
 # ── indexing/slicing, constructors, assembly, branching, axis reductions ────────
 check 'A=(1,2,3;4,5,6;7,8,9); A[1,2]'    '6'
 check 'A=(1,2,3;4,5,6;7,8,9); A[0, ..]'  '[1, 2, 3]'
