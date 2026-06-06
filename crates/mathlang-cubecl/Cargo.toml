@@ -1,0 +1,23 @@
+[package]
+name = "mathlang-cubecl"
+version = "0.1.0"
+edition = "2024"
+description = "CubeCL-based prototype port of mathlang (single compute path, native f64)"
+
+[[bin]]
+name = "mc"
+path = "src/main.rs"
+
+[dependencies]
+# Pinned: CubeCL is alpha and breaks between minors. All CubeCL types are confined
+# to the `compute` module so a version bump touches one place.
+cubecl = { version = "=0.10.0", default-features = false, features = ["std"] }
+
+[features]
+# Runnable on macOS: cpu (native f64) + wgpu (Metal, f32). cuda/hip compile-check
+# here but need NVIDIA/AMD hardware to exercise.
+default = ["cpu", "wgpu"]
+cpu  = ["cubecl/cpu"]
+wgpu = ["cubecl/wgpu"]
+cuda = ["cubecl/cuda"]
+hip  = ["cubecl/hip"]

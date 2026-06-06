@@ -1,3 +1,9 @@
+# Workspace root. The existing `mathlang` crate (binary `m`) is the root package;
+# the CubeCL prototype lives in a member crate so `m` stays independently buildable.
+[workspace]
+members = ["crates/mathlang-cubecl"]
+resolver = "2"
+
 [package]
 name = "mathlang"
 version = "0.38.1"
