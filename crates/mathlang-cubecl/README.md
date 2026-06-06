@@ -58,10 +58,10 @@ the original, which was f32-only and block-scoped).
 
 Switching to wgpu auto-downgrades f64→f32; `!prec f64` on wgpu is rejected.
 
-REPL commands: `!help !backend !prec !type !defs !clear !print !spike !version !q`
-plus I/O: `!savenpy !loadnpy !savetensor !loadtensor !savehdf5 !loadhdf5`.
+REPL commands: `!help !backend !prec !type !defs !clear !print !spike !version !q`,
+I/O `!savenpy !loadnpy !savetensor !loadtensor !savehdf5 !loadhdf5`, and `!include`.
 
-Deferred to later phases: animation/plotting.
+Deferred to later phases: `!graph` 1-D plotting.
 
 ## Complex tensors
 
@@ -213,6 +213,50 @@ the original `m` REPL there are also bang-command aliases — `!savenpy`/`!loadn
 `--append`, `--overwrite`, `--gzip N`, `--list`) — which operate on a named
 variable.
 
+## Animation
+
+`animate2D` streams 2-D tensor frames to the standalone
+[`wgpu_animator`](../../animator) GUI (colormaps, colorbar, normalization) over
+the **MXFR** wire format — the same viewer and protocol as the original `m`. Each
+frame is downloaded from the device, transposed to row-major, and written; the
+animator is discovered via `$WGPU_ANIMATOR`, a local `animator/` build, or `PATH`.
+
+```
+animate2D(T)                  # T: 3-D movie [n_frames, nx, ny]
+animate2D(f, n)               # f: t -> 2-D tensor [nx, ny]; frames t = 0..n-1
+animate2D(f, t0, t1, n)       # f sampled over linspace(t0, t1, n)
+animate2D(movie, 30)          # trailing fps (default 30)
+animate2Dforever(f)           # stream f(0), f(1), … until the window closes
+animate2D_raw(movie)          # write MXFR frames to stdout (pipe / test, no GUI)
+```
+
+It pairs directly with `scan`: evolve a state and stream every frame with
+`animate2D(scan(step, u0, n))`. For a tuple state, `scan` returns a tuple of
+per-field movies, so `animate2D(scan(step, U0, n)[0])` animates the first field.
+
+Build the animator once (`cd animator && cargo build --release`) or set
+`WGPU_ANIMATOR`. (`!graph` 1-D plotting is not yet ported.)
+
+## Running program files
+
+`mc path.mc` (or `!include path.mc` in the REPL) runs a multi-line program file.
+Statements are newline-separated; an open `{`/`(`/`[` continues a statement across
+lines, so a lambda body can span lines (separate its inner statements with `;`).
+Assignments are silent; a bare expression prints its value.
+
+[`examples/euler2d_riemann.mc`](examples/euler2d_riemann.mc) is a worked example:
+the 2-D compressible **Euler equations** as a four-quadrant Riemann problem
+(Schulz-Rinne configuration 3), integrated with a Lax-Friedrichs finite-volume
+scheme (the 4-component state `(ρ, ρu, ρv, E)` stays device-resident across all
+steps via `scan`), and the density animated:
+
+```sh
+cd animator && cargo build --release && cd ..      # one-time: build the viewer
+mc crates/mathlang-cubecl/examples/euler2d_riemann.mc
+```
+
+Mass is conserved to machine precision and density stays positive across the run.
+
 ## Tests
 
 ```sh
@@ -220,10 +264,11 @@ cargo test -p mathlang-cubecl                      # .npy + .mlt I/O included
 cargo test -p mathlang-cubecl --features hdf5      # also exercises HDF5
 ```
 
-135 `#[test]` functions covering scalar/complex/tuple core, tensor ops, linear
+140 `#[test]` functions covering scalar/complex/tuple core, tensor ops, linear
 algebra, resident loops, fields & forms, spectral operators, calculus, PIC, file
-I/O, and cross-backend precision (including wgpu/Metal). `tests.sh` is retained as
-a legacy reference; `cargo test` is canonical.
+I/O, animation (MXFR frame streaming), and cross-backend precision (including
+wgpu/Metal). `tests.sh` is retained as a legacy reference; `cargo test` is
+canonical.
 
 ## Why
 

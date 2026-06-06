@@ -310,6 +310,11 @@ pub fn eval_builtin(name: &str, args: Vec<Val>, env: &Env) -> Result<Val, String
             crate::io::load_value(&path, env.target, dataset.as_deref())
         }
 
+        // ── animation (stream 2-D frames to wgpu_animator via MXFR) ─────────────
+        "animate2D" => crate::animate::animate2d(args, env),
+        "animate2D_raw" => crate::animate::animate2d_raw(args, env),
+        "animate2Dforever" => crate::animate::animate2d_forever(args, env),
+
         // ── linear algebra (the @ operator routes here) ─────────────────────────
         "matmul" => {
             let (a, b) = two(args, name)?;

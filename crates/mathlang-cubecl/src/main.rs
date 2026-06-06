@@ -21,6 +21,7 @@ mod lexer;
 #[allow(dead_code)]
 mod parser;
 
+mod animate;
 mod builtins;
 mod compute;
 mod field;
@@ -43,6 +44,10 @@ fn main() {
 
     if args.is_empty() {
         Repl::new().run();
+    } else if args.len() == 1 && std::path::Path::new(&args[0]).is_file() {
+        // Program-file mode: `mc path.mc` runs the file like `!include`.
+        let mut repl = Repl::new();
+        repl.run_file(&args[0]);
     } else {
         // One-liner mode: the joined args are a statement sequence; print the last.
         let line = args.join(" ");

@@ -87,6 +87,8 @@ pub const BUILTINS: &[&str] = &[
     "len", "length", "cell", "get", "set",
     // file I/O (.npy / .mlt / .h5)
     "save", "load",
+    // animation (stream 2-D frames to wgpu_animator via MXFR)
+    "animate2D", "animate2D_raw", "animate2Dforever",
     // tensor constructors / shape (the compute path)
     "zeros", "ones", "eye", "linspace", "range", "shape", "rows", "cols",
     "tensor", "matrix", "lingrid", "diag",

@@ -25,6 +25,15 @@ fn run(expr: &str) -> String {
     combined.trim_end_matches('\n').to_string()
 }
 
+/// Run `mc <expr>` and return raw stdout bytes (for binary output like MXFR frames).
+fn run_bytes(expr: &str) -> Vec<u8> {
+    Command::new(mc_bin())
+        .arg(expr)
+        .output()
+        .expect("failed to run mc")
+        .stdout
+}
+
 /// Run `mc` in REPL mode with `input` piped to stdin, return combined output.
 fn run_repl(input: &str) -> String {
     let mut child = Command::new(mc_bin())
@@ -867,4 +876,59 @@ fn io_bang_npy_roundtrip() {
     let out = run_repl(&format!("A = [7,8,9]\n!savenpy A {p}\n!loadnpy B {p}\nB"));
     assert!(out.contains("saved A"), "got: {out}");
     assert!(out.contains("[7, 8, 9]"), "got: {out}");
+}
+
+// ── animation: MXFR frame streaming (animate2D_raw, GUI-free) ──────────────────
+
+/// Parse the header of the first MXFR frame: (magic_ok, width, height, channels).
+fn mxfr_header(bytes: &[u8]) -> (bool, u32, u32, u32) {
+    assert!(bytes.len() >= 24, "MXFR frame too short: {} bytes", bytes.len());
+    let magic = &bytes[0..4] == b"MXFR";
+    let w = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+    let h = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+    let c = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+    (magic, w, h, c)
+}
+
+#[test]
+fn anim_raw_function_form_header() {
+    // f(t) -> 3×2 tensor; 2 frames. First frame header = MXFR, 3×2, scalar.
+    let bytes = run_bytes("animate2D_raw(t -> tensor((x,y) -> t, 3, 2), 2)");
+    let (magic, w, h, c) = mxfr_header(&bytes);
+    assert!(magic, "missing MXFR magic");
+    assert_eq!((w, h, c), (3, 2, 1));
+}
+
+#[test]
+fn anim_raw_two_frames_emitted() {
+    // Each 3×2 scalar frame is 24 (header) + 3*2*4 (pixels) = 48 bytes; two frames
+    // = 96 bytes, then the trailing frame-count print. Check the 2nd frame's magic.
+    let bytes = run_bytes("animate2D_raw(t -> tensor((x,y) -> t, 3, 2), 2)");
+    assert_eq!(&bytes[0..4], b"MXFR");
+    assert_eq!(&bytes[48..52], b"MXFR", "second frame should start at byte 48");
+}
+
+#[test]
+fn anim_raw_movie_tensor_form() {
+    // A 3-D tensor [n_frames, nx, ny] is a prebuilt movie; scan stacks time first.
+    // scan(.., 2) → 3 frames of a 2×2 grid.
+    let bytes = run_bytes("animate2D_raw(scan(u -> u*0.5, ones(2,2), 2))");
+    let (magic, w, h, c) = mxfr_header(&bytes);
+    assert!(magic);
+    assert_eq!((w, h, c), (2, 2, 1));
+}
+
+#[test]
+fn anim_returns_frame_count() {
+    // The trailing stdout value is the frame count (printed after the binary).
+    let bytes = run_bytes("animate2D_raw(t -> tensor((x,y) -> t, 3, 2), 5)");
+    let tail = String::from_utf8_lossy(&bytes);
+    assert!(tail.trim_end().ends_with('5'), "expected frame count 5 at end");
+}
+
+#[test]
+fn anim_bad_frame_shape_errors() {
+    // f(t) returning a 3-D tensor is not a valid frame.
+    let out = run("animate2D_raw(t -> ones(2,2,2), 2)");
+    assert!(out.contains("must return a 1-D or 2-D tensor"), "got: {out}");
 }

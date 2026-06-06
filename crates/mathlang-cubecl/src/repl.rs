@@ -125,6 +125,7 @@ impl Repl {
             "!loadtensor" => self.cmd_load(rest, "loadtensor", "mlt"),
             "!savehdf5" => self.cmd_save_hdf5(rest),
             "!loadhdf5" => self.cmd_load_hdf5(rest),
+            "!include" | "!run" => self.cmd_include(rest),
             other => eprintln!("unknown command: {other} (try !help)"),
         }
         false
@@ -388,6 +389,84 @@ impl Repl {
             Err(e) => eprintln!("loadhdf5: {e}"),
         }
     }
+
+    /// `!include <file>` (alias `!run`) — evaluate a multi-line program file.
+    /// Statements are newline-separated; a `{`/`(`/`[` keeps a statement open
+    /// across lines (so a lambda body may span lines). Bare expressions print
+    /// their value (one-liner framing); assignments are silent.
+    fn cmd_include(&mut self, rest: &str) {
+        let path = io_expand(rest.trim());
+        if path.is_empty() {
+            eprintln!("usage: !include <file>");
+            return;
+        }
+        let n = self.run_file(&path);
+        if n >= 0 {
+            eprintln!("included {n} statement(s) from {path}");
+        }
+    }
+
+    /// Evaluate every statement in a program file. Returns the statement count, or
+    /// -1 if the file could not be read.
+    pub fn run_file(&mut self, path: &str) -> i64 {
+        let src = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => { eprintln!("include {path}: {e}"); return -1; }
+        };
+        let stmts = split_program(&src);
+        for stmt in &stmts {
+            self.eval_line(stmt, false);
+        }
+        stmts.len() as i64
+    }
+}
+
+/// `~/` expansion shared with the I/O layer.
+fn io_expand(p: &str) -> String {
+    crate::io::expand_path(p)
+}
+
+/// Split a program file into complete statements. Newlines separate statements at
+/// bracket depth 0; inside `{}`/`()`/`[]` a newline continues the statement (joined
+/// with a space). `#` starts a comment to end-of-line, except inside a `"…"` string.
+fn split_program(src: &str) -> Vec<String> {
+    let mut stmts = Vec::new();
+    let mut cur = String::new();
+    let mut depth: i32 = 0;
+    let mut in_str = false;
+    let mut esc = false;
+    let mut in_comment = false;
+    for ch in src.chars() {
+        if in_comment {
+            if ch == '\n' { in_comment = false; } else { continue; }
+        }
+        if in_str {
+            cur.push(ch);
+            if esc { esc = false; }
+            else if ch == '\\' { esc = true; }
+            else if ch == '"' { in_str = false; }
+            continue;
+        }
+        match ch {
+            '#' => in_comment = true,
+            '"' => { in_str = true; cur.push(ch); }
+            '{' | '(' | '[' => { depth += 1; cur.push(ch); }
+            '}' | ')' | ']' => { depth -= 1; cur.push(ch); }
+            '\n' => {
+                if depth <= 0 {
+                    let s = cur.trim().to_string();
+                    if !s.is_empty() { stmts.push(s); }
+                    cur.clear();
+                } else {
+                    cur.push(' ');
+                }
+            }
+            _ => cur.push(ch),
+        }
+    }
+    let s = cur.trim().to_string();
+    if !s.is_empty() { stmts.push(s); }
+    stmts
 }
 
 /// Short human description of a value for I/O status lines.
@@ -479,6 +558,7 @@ Commands:
   !savenpy/!loadnpy <var> <file>     NumPy .npy I/O
   !savetensor/!loadtensor <var> <file>   native .mlt I/O
   !savehdf5/!loadhdf5 <var> <file> [/ds] [opts]   HDF5 (build --features hdf5)
+  !include <file>    run a program file (also: mc <file>)
   !version           version
   !q / !quit         quit
 
@@ -494,7 +574,12 @@ Kernels: pic.ngp (nearest), pic.cic (linear, default), pic.tsc (quadratic).
 File I/O: save(value, \"path\" [, \"/dataset\"]) writes and returns value;
 load(\"path\" [, \"/dataset\"]) reads a tensor. Format from extension: .npy
 (NumPy), .mlt (native), .h5/.hdf5 (HDF5, --features hdf5). Real + complex f64.
+Animation: animate2D(T) streams a 3-D movie [n,nx,ny]; animate2D(f, n) calls
+f(t)->[nx,ny] for t=0..n-1; animate2D(f, t0, t1, n) over a range; optional fps.
+animate2Dforever(f) streams until the window closes; animate2D_raw(...) writes
+MXFR to stdout. Needs the wgpu_animator GUI (build animator/ or set
+WGPU_ANIMATOR). Pairs with scan: animate2D(scan(step, u0, n)).
 
-Not yet present (later phases): animation; field-polymorphic ops.*(field)."
+Not yet present (later phases): field-polymorphic ops.*(field); !graph plotting."
     );
 }
