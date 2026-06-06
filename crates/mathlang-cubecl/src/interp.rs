@@ -62,6 +62,8 @@ pub const BUILTINS: &[&str] = &[
     "len", "length", "cell", "get", "set",
     // tensor constructors / shape (the compute path)
     "zeros", "ones", "eye", "linspace", "range", "shape", "rows", "cols",
+    // linear algebra + reductions
+    "matmul", "norm", "mean", "std",
 ];
 
 pub fn is_protected(name: &str) -> bool {
@@ -553,12 +555,10 @@ fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> {
     // 1-arg: sum(tuple) or sum(tensor)
     if args.len() == 1 {
         return match eval(&args[0], env)? {
-            // Interim: pull the tensor to the host and reduce in f64. A device
-            // reduction (compensated) lands in Phase 3.
+            // Device reduction (Neumaier sum); df64 falls back to host inside compute.
             Val::Tensor(t) => {
-                let data = compute::download(&t)?;
-                let acc = if product { data.iter().product::<f64>() } else { data.iter().sum::<f64>() };
-                Ok(Val::Num(acc))
+                let op = if product { compute::RED_PROD } else { compute::RED_SUM };
+                Ok(Val::Num(compute::reduce(env.target, op, &t)?))
             }
             Val::Tuple(items) => {
                 let (mut acc_re, mut acc_im) = if product { (1.0, 0.0) } else { (0.0, 0.0) };

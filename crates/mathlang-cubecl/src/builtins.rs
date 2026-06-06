@@ -3,8 +3,8 @@
 //! builtins are deferred to later phases.
 
 use crate::ast::Op;
-use crate::compute;
-use crate::interp::{binop_val, Env};
+use crate::compute::{self, TensorVal};
+use crate::interp::{binop_val, ensure_on, Env};
 use crate::value::{fmt_val, make_complex, to_complex, Val};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -17,6 +17,24 @@ pub fn eval_builtin(name: &str, args: Vec<Val>, env: &Env) -> Result<Val, String
         if let Val::Tensor(t) = &args[0] {
             if let Some(code) = unary_tensor_code(name) {
                 return compute::unary(env.target, code, t).map(Val::Tensor);
+            }
+            // whole-tensor reductions (device; df64 falls back to host in compute)
+            match name {
+                "sum" => return compute::reduce(env.target, compute::RED_SUM, t).map(Val::Num),
+                "prod" => return compute::reduce(env.target, compute::RED_PROD, t).map(Val::Num),
+                "min" => return compute::reduce(env.target, compute::RED_MIN, t).map(Val::Num),
+                "max" => return compute::reduce(env.target, compute::RED_MAX, t).map(Val::Num),
+                "mean" => {
+                    let s = compute::reduce(env.target, compute::RED_SUM, t)?;
+                    return Ok(Val::Num(s / t.len.max(1) as f64));
+                }
+                "norm" => {
+                    let sq = compute::binop(env.target, compute::OP_MUL, t, t)?;
+                    let s = compute::reduce(env.target, compute::RED_SUM, &sq)?;
+                    return Ok(Val::Num(s.sqrt()));
+                }
+                "std" => return tensor_std(env, t),
+                _ => {}
             }
         }
     }
@@ -170,6 +188,17 @@ pub fn eval_builtin(name: &str, args: Vec<Val>, env: &Env) -> Result<Val, String
                 Val::Cell(cell) => { *cell.borrow_mut() = v.clone(); Ok(v) }
                 other => Err(format!("set: first arg must be a cell, got {}", fmt_val(&other))),
             }
+        }
+
+        // ── linear algebra (the @ operator routes here) ─────────────────────────
+        "matmul" => {
+            let (a, b) = two(args, name)?;
+            matmul_vals(a, b, env)
+        }
+        // reductions reach here only for non-tensor args (tensors handled above)
+        "mean" | "norm" | "std" => {
+            let v = one(args, name)?;
+            Err(format!("{name}: expected a tensor, got {}", fmt_val(&v)))
         }
 
         _ => {
@@ -362,4 +391,50 @@ fn gcd(mut a: u64, mut b: u64) -> u64 {
 
 fn lcm(a: u64, b: u64) -> u64 {
     if a == 0 || b == 0 { 0 } else { a / gcd(a, b) * b }
+}
+
+/// `A @ B` / `matmul(A, B)`: 2D×2D, 2D×1D (mat·vec), 1D×2D (vec·mat), 1D×1D (dot).
+fn matmul_vals(a: Val, b: Val, env: &Env) -> Result<Val, String> {
+    let (ta, tb) = match (a, b) {
+        (Val::Tensor(x), Val::Tensor(y)) => (x, y),
+        (x, y) => return Err(format!("matmul (@): both operands must be tensors, got {} and {}", fmt_val(&x), fmt_val(&y))),
+    };
+    let ta = ensure_on(ta, env.target)?;
+    let tb = ensure_on(tb, env.target)?;
+    let bad = |k: usize, k2: usize| format!("matmul: inner dimensions differ ({k} vs {k2})");
+    match (ta.shape.as_slice(), tb.shape.as_slice()) {
+        ([m, k], [k2, n]) => {
+            if k != k2 { return Err(bad(*k, *k2)); }
+            compute::matmul(env.target, &ta, &tb, *m, *k, *n).map(Val::Tensor)
+        }
+        ([m, k], [k2]) => {
+            if k != k2 { return Err(bad(*k, *k2)); }
+            let mut out = compute::matmul(env.target, &ta, &tb, *m, *k, 1)?;
+            out.shape = vec![*m];
+            Ok(Val::Tensor(out))
+        }
+        ([k], [k2, n]) => {
+            if k != k2 { return Err(bad(*k, *k2)); }
+            let mut out = compute::matmul(env.target, &ta, &tb, 1, *k, *n)?;
+            out.shape = vec![*n];
+            Ok(Val::Tensor(out))
+        }
+        ([k], [k2]) => {
+            if k != k2 { return Err(bad(*k, *k2)); }
+            let out = compute::matmul(env.target, &ta, &tb, 1, *k, 1)?;
+            Ok(Val::Num(compute::download(&out)?[0]))
+        }
+        (ash, bsh) => Err(format!("matmul: unsupported shapes {ash:?} @ {bsh:?}")),
+    }
+}
+
+/// Population standard deviation of a tensor: sqrt(mean((x − mean)²)) — all on device.
+fn tensor_std(env: &Env, t: &TensorVal) -> Result<Val, String> {
+    let n = t.len.max(1) as f64;
+    let m = compute::reduce(env.target, compute::RED_SUM, t)? / n;
+    let mean_t = compute::upload(env.target, &[m], vec![1])?;
+    let dev = compute::binop(env.target, compute::OP_SUB, t, &mean_t)?;
+    let sq = compute::binop(env.target, compute::OP_MUL, &dev, &dev)?;
+    let var = compute::reduce(env.target, compute::RED_SUM, &sq)? / n;
+    Ok(Val::Num(var.sqrt()))
 }

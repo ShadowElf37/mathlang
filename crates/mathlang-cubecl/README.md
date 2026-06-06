@@ -25,9 +25,11 @@ functions/lambdas/closures/recursion, `if`, comparisons, `sum`/`prod`/`map`/
 **Tensors (the compute path):** `[a,b,c]`, matrices `(1,2; 3,4)`, `a..b`,
 `zeros`/`ones`/`eye`/`linspace`/`range`; elementwise `+ - * / ^` and comparisons
 with scalar↔tensor broadcasting; unary math (`sin`/`exp`/`sqrt`/...); `shape`/
-`rows`/`cols`/`len`; `sum`/`prod` (host reduce for now). Every tensor op runs on
-the selected backend/precision — **no `GPU {}` block needed** (an improvement over
-the original, which was f32-only and block-scoped).
+`rows`/`cols`/`len`. **Linear algebra & reductions on device:** `@`/`matmul`
+(2D×2D, mat·vec, vec·mat, dot), and `sum`/`prod`/`mean`/`min`/`max`/`norm`/`std`
+(parallel reduction, Neumaier-compensated sum; df64 reduces via host fallback).
+Every tensor op runs on the selected backend/precision — **no `GPU {}` block
+needed** (an improvement over the original, which was f32-only and block-scoped).
 
 **Precision (`!prec f32|df64|f64`, `!backend cpu|wgpu|cuda|hip`):**
 * `f64` — native on cpu/cuda/hip. `[1.0]+[1e-10]` → `[1.0000000001]`.

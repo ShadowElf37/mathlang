@@ -266,6 +266,82 @@ pub fn df64_binop(lhs: &Array<f32>, rhs: &Array<f32>, out: &mut Array<f32>, #[co
     }
 }
 
+// ── matmul (naive one-thread-per-output, generic f32/f64) ───────────────────────
+// `a` is m×k row-major, `b` is k×n row-major, `out` is m×n. k and n are comptime so
+// the kernel specializes per shape (cached per (k, n, element type)).
+#[cube(launch)]
+pub fn matmul_kernel<F: Float>(
+    a: &Array<F>,
+    b: &Array<F>,
+    out: &mut Array<F>,
+    #[comptime] k: usize,
+    #[comptime] n: usize,
+) {
+    let idx = ABSOLUTE_POS;
+    if idx < out.len() {
+        let row = idx / n;
+        let col = idx % n;
+        let mut acc = F::new(0.0);
+        for p in 0..k {
+            acc += a[row * k + p] * b[p * n + col];
+        }
+        out[idx] = acc;
+    }
+}
+
+// ── whole-tensor reduction ──────────────────────────────────────────────────────
+// `nt` threads (= partials.len()) each grid-stride reduce their slice; the host
+// combines the `nt` partials. Sum uses Neumaier compensation. Assumes n ≥ 1.
+pub const RED_SUM: u32 = 0;
+pub const RED_PROD: u32 = 1;
+pub const RED_MIN: u32 = 2;
+pub const RED_MAX: u32 = 3;
+
+#[cube(launch)]
+pub fn reduce_kernel<F: Float>(input: &Array<F>, partials: &mut Array<F>, #[comptime] op: u32) {
+    let t = ABSOLUTE_POS;
+    let nt = partials.len();
+    let n = input.len();
+    if t < nt {
+        // identity: sum→0, prod→1, min/max→input[0] (a real element, harmless to re-include)
+        let mut acc = F::new(0.0);
+        if comptime![op == RED_PROD] {
+            acc = F::new(1.0);
+        } else if comptime![op == RED_MIN] {
+            acc = input[0];
+        } else if comptime![op == RED_MAX] {
+            acc = input[0];
+        }
+        let mut comp = F::new(0.0); // Neumaier compensation (sum only)
+        let num_blocks = (n + nt - 1) / nt;
+        for blk in 0..num_blocks {
+            let idx = blk * nt + t;
+            if idx < n {
+                let x = input[idx];
+                if comptime![op == RED_SUM] {
+                    let s = acc + x;
+                    if F::abs(acc) >= F::abs(x) {
+                        comp += (acc - s) + x;
+                    } else {
+                        comp += (x - s) + acc;
+                    }
+                    acc = s;
+                } else if comptime![op == RED_PROD] {
+                    acc *= x;
+                } else if comptime![op == RED_MIN] {
+                    acc = F::min(acc, x);
+                } else if comptime![op == RED_MAX] {
+                    acc = F::max(acc, x);
+                }
+            }
+        }
+        if comptime![op == RED_SUM] {
+            acc += comp;
+        }
+        partials[t] = acc;
+    }
+}
+
 #[cube(launch)]
 pub fn df64_unary(x: &Array<f32>, out: &mut Array<f32>, #[comptime] op: u32) {
     let i = ABSOLUTE_POS;

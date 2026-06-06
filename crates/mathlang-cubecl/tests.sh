@@ -54,6 +54,20 @@ check 'sum([1,2,3,4])'          '10'
 check 'len(linspace(0,1,10))'   '10'
 check '-[1,2,3]'                '[-1, -2, -3]'
 
+# ── linear algebra + reductions (Phase 3, on device) ───────────────────────────
+check '(1,2;3,4) @ [1,1]'       '[3, 7]'           # mat·vec
+check '[1,1] @ (1,2;3,4)'       '[4, 6]'           # vec·mat
+check '[1,2,3] @ [4,5,6]'       '32'               # dot → scalar
+check 'sum([1,2,3,4,5])'        '15'
+check 'prod([1,2,3,4])'         '24'
+check 'mean([1,2,3,4])'         '2.5'
+check 'min([3,1,4,1,5])'        '1'
+check 'max([3,1,4,1,5])'        '5'
+check 'norm([3,4])'             '5'
+check 'std([2,4,4,4,5,5,7,9])'  '2'
+check 'sum(ones(100,100))'      '10000'
+check_repl $'!prec df64\n(1,2;3,4) @ (5,6;7,8)' 'df64 matmul is staged'
+
 # ── precision: f64 on cpu; wgpu downgrades to f32; df64 arithmetic on cpu ───────
 check '[1.0] + [1e-10]'         '[1.0000000001]'                  # cpu f64
 check_repl $'!backend wgpu\n[1.0] + [1e-10]' '[1]'                # wgpu f32 loses 1e-10

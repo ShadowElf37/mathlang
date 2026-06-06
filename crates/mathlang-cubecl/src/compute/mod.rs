@@ -161,6 +161,7 @@ pub fn download(tv: &TensorVal) -> Result<Vec<f64>, String> {
 // ── elementwise dispatch ─────────────────────────────────────────────────────────
 
 pub use kernels::{OP_ADD, OP_DIV, OP_EQ, OP_GE, OP_GT, OP_LE, OP_LT, OP_MUL, OP_NE, OP_POW, OP_SUB};
+pub use kernels::{RED_MAX, RED_MIN, RED_PROD, RED_SUM};
 // OP_MIN / OP_MAX kernels exist but the host min/max builtins reduce on the host
 // for now; they'll be wired to the device elementwise form in Phase 3.
 pub use kernels::{
@@ -388,4 +389,168 @@ fn run_df64_unary<R: Runtime>(client: ComputeClient<R>, op: u32, a: &Rc<Handle>,
         op,
     );
     out
+}
+
+// ── matmul ───────────────────────────────────────────────────────────────────────
+// `a` m×k, `b` k×n → `out` m×n (row-major). The interpreter computes m/k/n and
+// reshapes vector cases (mat·vec, vec·mat, dot) before calling.
+pub fn matmul(target: Target, a: &TensorVal, b: &TensorVal, m: usize, k: usize, n: usize) -> Result<TensorVal, String> {
+    let out_len = m * n;
+    let handle = match target.prec {
+        Prec::F32 => dispatch_matmul::<f32>(target.backend, &a.handle, a.len, &b.handle, b.len, k, n, out_len)?,
+        Prec::F64 => dispatch_matmul::<f64>(target.backend, &a.handle, a.len, &b.handle, b.len, k, n, out_len)?,
+        Prec::Df64 => return Err("df64 matmul is staged; use !prec f64/f32 for matmul".into()),
+    };
+    Ok(TensorVal { backend: target.backend, prec: target.prec, shape: vec![m, n], len: out_len, handle: Rc::new(handle) })
+}
+
+fn dispatch_matmul<E: Float + CubeElement>(
+    backend: Backend,
+    a: &Rc<Handle>,
+    al: usize,
+    b: &Rc<Handle>,
+    bl: usize,
+    k: usize,
+    n: usize,
+    out_len: usize,
+) -> Result<Handle, String> {
+    match backend {
+        #[cfg(feature = "cpu")]
+        Backend::Cpu => Ok(run_matmul::<cubecl::cpu::CpuRuntime, E>(cpu_client(), a, al, b, bl, k, n, out_len)),
+        #[cfg(feature = "wgpu")]
+        Backend::Wgpu => Ok(run_matmul::<cubecl::wgpu::WgpuRuntime, E>(wgpu_client(), a, al, b, bl, k, n, out_len)),
+        #[cfg(feature = "cuda")]
+        Backend::Cuda => Ok(run_matmul::<cubecl::cuda::CudaRuntime, E>(cuda_client(), a, al, b, bl, k, n, out_len)),
+        #[cfg(feature = "hip")]
+        Backend::Hip => Ok(run_matmul::<cubecl::hip::HipRuntime, E>(hip_client(), a, al, b, bl, k, n, out_len)),
+        #[allow(unreachable_patterns)]
+        _ => Err(format!("backend {} is not compiled in", backend.name())),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_matmul<R: Runtime, E: Float + CubeElement>(
+    client: ComputeClient<R>,
+    a: &Rc<Handle>,
+    al: usize,
+    b: &Rc<Handle>,
+    bl: usize,
+    k: usize,
+    n: usize,
+    out_len: usize,
+) -> Handle {
+    let out = client.empty(out_len * core::mem::size_of::<E>());
+    let grid = out_len.div_ceil(256).max(1) as u32;
+    kernels::matmul_kernel::launch::<E, R>(
+        &client,
+        CubeCount::Static(grid, 1, 1),
+        CubeDim::new_1d(256),
+        unsafe { ArrayArg::from_raw_parts((**a).clone(), al) },
+        unsafe { ArrayArg::from_raw_parts((**b).clone(), bl) },
+        unsafe { ArrayArg::from_raw_parts(out.clone(), out_len) },
+        k,
+        n,
+    );
+    out
+}
+
+// ── whole-tensor reduction → host scalar ─────────────────────────────────────────
+
+const REDUCE_THREADS: usize = 256;
+
+/// Reduce a tensor to a single f64. f32/f64 reduce on device (256 partials + host
+/// combine, Neumaier sum); df64 falls back to host (download recombines the pairs).
+pub fn reduce(target: Target, op: u32, a: &TensorVal) -> Result<f64, String> {
+    if a.len == 0 {
+        return Ok(host_identity(op));
+    }
+    if target.prec == Prec::Df64 {
+        let host = download(a)?;
+        return Ok(host_combine(op, &host));
+    }
+    let nt = REDUCE_THREADS.min(a.len.max(1));
+    let partials_handle = match target.prec {
+        Prec::F32 => dispatch_reduce::<f32>(target.backend, op, &a.handle, a.len, nt)?,
+        Prec::F64 => dispatch_reduce::<f64>(target.backend, op, &a.handle, a.len, nt)?,
+        Prec::Df64 => unreachable!(),
+    };
+    let bytes = read_from(target.backend, partials_handle)?;
+    let partials: Vec<f64> = match target.prec {
+        Prec::F32 => f32::from_bytes(&bytes)[..nt].iter().map(|&x| x as f64).collect(),
+        Prec::F64 => f64::from_bytes(&bytes)[..nt].to_vec(),
+        Prec::Df64 => unreachable!(),
+    };
+    Ok(host_combine(op, &partials))
+}
+
+fn dispatch_reduce<E: Float + CubeElement>(
+    backend: Backend,
+    op: u32,
+    a: &Rc<Handle>,
+    len: usize,
+    nt: usize,
+) -> Result<Handle, String> {
+    match backend {
+        #[cfg(feature = "cpu")]
+        Backend::Cpu => Ok(run_reduce::<cubecl::cpu::CpuRuntime, E>(cpu_client(), op, a, len, nt)),
+        #[cfg(feature = "wgpu")]
+        Backend::Wgpu => Ok(run_reduce::<cubecl::wgpu::WgpuRuntime, E>(wgpu_client(), op, a, len, nt)),
+        #[cfg(feature = "cuda")]
+        Backend::Cuda => Ok(run_reduce::<cubecl::cuda::CudaRuntime, E>(cuda_client(), op, a, len, nt)),
+        #[cfg(feature = "hip")]
+        Backend::Hip => Ok(run_reduce::<cubecl::hip::HipRuntime, E>(hip_client(), op, a, len, nt)),
+        #[allow(unreachable_patterns)]
+        _ => Err(format!("backend {} is not compiled in", backend.name())),
+    }
+}
+
+fn run_reduce<R: Runtime, E: Float + CubeElement>(
+    client: ComputeClient<R>,
+    op: u32,
+    a: &Rc<Handle>,
+    len: usize,
+    nt: usize,
+) -> Handle {
+    let partials = client.empty(nt * core::mem::size_of::<E>());
+    kernels::reduce_kernel::launch::<E, R>(
+        &client,
+        CubeCount::Static(1, 1, 1),
+        CubeDim::new_1d(nt as u32),
+        unsafe { ArrayArg::from_raw_parts((**a).clone(), len) },
+        unsafe { ArrayArg::from_raw_parts(partials.clone(), nt) },
+        op,
+    );
+    partials
+}
+
+fn host_identity(op: u32) -> f64 {
+    match op {
+        RED_PROD => 1.0,
+        RED_MIN => f64::INFINITY,
+        RED_MAX => f64::NEG_INFINITY,
+        _ => 0.0,
+    }
+}
+
+fn host_combine(op: u32, parts: &[f64]) -> f64 {
+    match op {
+        RED_PROD => parts.iter().product(),
+        RED_MIN => parts.iter().cloned().fold(f64::INFINITY, f64::min),
+        RED_MAX => parts.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+        _ => {
+            // Neumaier sum across partials
+            let mut sum = 0.0;
+            let mut c = 0.0;
+            for &x in parts {
+                let t = sum + x;
+                if sum.abs() >= x.abs() {
+                    c += (sum - t) + x;
+                } else {
+                    c += (x - t) + sum;
+                }
+                sum = t;
+            }
+            sum + c
+        }
+    }
 }
