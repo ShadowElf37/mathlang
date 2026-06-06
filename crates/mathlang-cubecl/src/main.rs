@@ -4,12 +4,16 @@
 //! work, one backend-generic CubeCL compute path for array work (cpu/wgpu/cuda/hip),
 //! native f64 where the hardware allows. No bytecode VM, no `GPU {}` syntax.
 //!
-//! Build state: Phase 0 spike done (see [spike]); Phase 1 frontend ported. The
-//! interpreter, value types, and REPL land next.
+//! Build state: Phase 0 spike + Phase 1b host interpreter (scalars/complex/tuples/
+//! lambdas) and REPL. Tensors on the compute path arrive in Phase 2.
+//!
+//! Usage:
+//!   mc                 interactive REPL
+//!   mc 'expr'          evaluate a one-liner and print the result
+//!   mc --spike         run the f64-vs-f32 backend precision demo
 
-// Ported frontend (shared, unchanged semantics; `GpuBlock` removed — backend is
-// runtime config, not syntax). `dead_code` is allowed until the interpreter and
-// REPL consume the full surface in the next step.
+// Ported frontend (unchanged semantics; `GpuBlock` removed). Kept as a library
+// surface, so some items are unused here.
 #[allow(dead_code)]
 mod ast;
 #[allow(dead_code)]
@@ -17,27 +21,28 @@ mod lexer;
 #[allow(dead_code)]
 mod parser;
 
+mod builtins;
+mod interp;
+mod repl;
 mod spike;
+mod value;
 
-use lexer::Lexer;
-use parser::Parser;
+use repl::Repl;
 
 fn main() {
-    println!("mc: mathlang-cubecl prototype — Phase 1 (frontend ported)\n");
-    spike::run();
-    println!();
-    frontend_smoke();
-}
+    let args: Vec<String> = std::env::args().skip(1).collect();
 
-/// Prove the ported lexer+parser compile and parse inside the new crate. Replaced
-/// by the real REPL once the interpreter lands.
-fn frontend_smoke() {
-    println!("frontend smoke — lex + parse (no evaluation yet):");
-    for src in ["2pi", "f(x) = x^2 + 1", "A = (1,2; 3,4)", "iterate(x -> 2*x, 1, 10)"] {
-        let toks = Lexer::new(src).tokenize();
-        match Parser::new(toks).parse_repl() {
-            Ok(stmts) => println!("  ok  {src:<28} -> {} statement(s)", stmts.len()),
-            Err(e) => println!("  ERR {src:<28} -> {e}"),
-        }
+    if args.len() == 1 && args[0] == "--spike" {
+        spike::run();
+        return;
+    }
+
+    if args.is_empty() {
+        Repl::new().run();
+    } else {
+        // One-liner mode: the joined args are a statement sequence; print the last.
+        let line = args.join(" ");
+        let mut repl = Repl::new();
+        repl.eval_line(&line, false);
     }
 }

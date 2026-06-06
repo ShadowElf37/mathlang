@@ -5,7 +5,27 @@ A clean-port prototype of [mathlang](../../README.md) on top of
 execution paths (tree-walk eval, bytecode VM loops, WGSL `GPU {}` block) into **one
 backend-generic compute path** with **native f64** where the hardware allows it.
 
-Status: **Phase 0 (spike) complete.** See [the plan](../../) for the full roadmap.
+Status: **Phase 1b complete** — host interpreter + REPL over the scalar/complex/
+tuple/lambda core; Phase 0 spike proven. Tensors (the CubeCL compute path) are
+Phase 2.
+
+## What works now
+
+```sh
+mc                 # REPL
+mc 'pi * 2^2'      # one-liner
+mc --spike         # f64-vs-f32 backend precision demo
+```
+
+Scalars, complex (`i^2`, `exp(i*pi)`, `sqrt(-1)`, `ln(-1)`, `abs/conj/...`), tuple
+trees with broadcasting, functions/lambdas/closures/recursion, `if`, comparisons,
+`sum`/`prod`/`map`/`filter`/`reduce`/`iterate`, `compose`/`partial`, `cell`/`get`/
+`set`, and the scalar math builtins — all evaluated **host-side in f64** (instant,
+no kernel: the low-latency invariant). REPL commands: `!help !backend !type !defs
+!clear !print !spike !version !q`.
+
+Tensor-producing syntax (`[...]`, matrix literals, `range`) and tensor/linalg/fft/
+field/pic/calculus builtins error with a clear "later phase" message until Phase 2.
 
 ## Why
 

@@ -1,0 +1,576 @@
+//! The single host interpreter: a tree-walk over the AST. It owns scoping,
+//! closures, namespaces, control flow, and dynamic dispatch; scalar and complex
+//! values are computed directly in host f64 so the REPL stays instant (the
+//! low-latency invariant). Array/tensor work will delegate to `compute::*` in
+//! Phase 2 — there is no bytecode VM and no `GPU {}` path.
+//!
+//! Behaviour mirrors `src/eval.rs`. Tensor-producing constructs (`[...]`, matrix
+//! literals, `range`, tensor builtins) error with a clear "Phase 2" message until
+//! the compute path lands.
+
+use crate::ast::{BlockStmt, Def, Expr, Op};
+use crate::builtins::eval_builtin;
+use crate::value::{fmt_val, int, make_complex, to_complex, FnSig, Val};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+#[derive(Clone)]
+pub struct Env {
+    pub vars: Arc<HashMap<String, Val>>,
+}
+
+impl Env {
+    #[inline]
+    pub fn define(&mut self, k: String, v: Val) {
+        Arc::make_mut(&mut self.vars).insert(k, v);
+    }
+
+    pub fn new() -> Self {
+        let mut vars = HashMap::new();
+        vars.insert("pi".into(), Val::Num(std::f64::consts::PI));
+        vars.insert("e".into(), Val::Num(std::f64::consts::E));
+        vars.insert("phi".into(), Val::Num(1.618033988749895));
+        vars.insert("inf".into(), Val::Num(f64::INFINITY));
+        vars.insert("i".into(), Val::Complex(0.0, 1.0));
+        for name in BUILTINS {
+            vars.insert((*name).into(), Val::Builtin((*name).into()));
+        }
+        Self { vars: Arc::new(vars) }
+    }
+}
+
+/// Builtins implemented in the Phase 1b host core. Tensor/linalg/fft/field
+/// builtins are intentionally absent until the compute path lands.
+pub const BUILTINS: &[&str] = &[
+    // scalar/complex unary
+    "abs", "re", "im", "arg", "conj", "sqrt", "cbrt", "exp", "expm1", "ln",
+    "log10", "log2", "sin", "cos", "tan", "asin", "acos", "atan",
+    "sinh", "cosh", "tanh", "sec", "csc", "cot",
+    "floor", "ceil", "round", "trunc", "frac", "sign", "signum", "heaviside",
+    "deg", "rad", "id", "fact", "factorial",
+    // binary scalar
+    "log", "pow", "atan2", "min", "max", "hypot", "gcd", "lcm", "ncr",
+    // comparison fns
+    "lt", "leq", "gt", "geq", "eq", "neq",
+    // higher-order + containers
+    "map", "filter", "reduce", "compose", "partial",
+    "sum", "prod", "iterate", "if",
+    "len", "length", "cell", "get", "set",
+];
+
+pub fn is_protected(name: &str) -> bool {
+    matches!(name, "pi" | "e" | "phi" | "inf" | "i") || BUILTINS.contains(&name)
+}
+
+// ── Evaluator ───────────────────────────────────────────────────────────────────
+
+pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
+    match expr {
+        Expr::Num(n) => Ok(Val::Num(*n)),
+        Expr::ImagLit(n) => Ok(if *n == 0.0 { Val::Num(0.0) } else { Val::Complex(0.0, *n) }),
+        Expr::Var(n) => env.vars.get(n).cloned().ok_or_else(|| format!("undefined: {n}")),
+        Expr::Lambda(params, ret_hint, body) => {
+            let names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+            let sig = FnSig {
+                params: params.iter().map(|p| p.hint.clone()).collect(),
+                ret: ret_hint.clone(),
+            };
+            Ok(Val::make_fn_with_sig(names, sig, (**body).clone(), Arc::clone(&env.vars)))
+        }
+        Expr::Tuple(exprs) => {
+            let vals = exprs.iter().map(|e| eval(e, env)).collect::<Result<Vec<_>, _>>()?;
+            Ok(Val::Tuple(vals))
+        }
+        Expr::Neg(e) => neg_val(eval(e, env)?),
+        Expr::Not(e) => not_val(eval(e, env)?),
+        Expr::BinOp(l, op, r) => {
+            let lv = eval(l, env)?;
+            let rv = eval(r, env)?;
+            binop_val(lv, op, rv)
+        }
+        Expr::Block(stmts) => eval_block(stmts, env),
+        Expr::Member(base, field) => {
+            let base_val = eval(base, env)?;
+            match base_val {
+                Val::Namespace(map) => map.get(field).cloned().ok_or_else(|| {
+                    let ns = match base.as_ref() { Expr::Var(n) => n.as_str(), _ => "namespace" };
+                    format!("{ns} has no member '{field}'")
+                }),
+                other => Err(format!("'.{field}': expected a namespace, got {}", fmt_val(&other))),
+            }
+        }
+        Expr::Index(base, idx) => {
+            let v = eval(base, env)?;
+            match v {
+                Val::Tuple(items) => {
+                    let i = eval(idx, env)?.num("index")? as i64;
+                    let i = norm_index(i, items.len(), "tuple")?;
+                    items.into_iter().nth(i).ok_or_else(|| "index out of range".into())
+                }
+                _ => Err("indexing requires a tuple (tensors land in Phase 2)".into()),
+            }
+        }
+        Expr::Apply(f_expr, arg_exprs) => eval_apply(f_expr, arg_exprs, env),
+        // Tensor-producing constructs — deferred to Phase 2 (the compute path).
+        Expr::Array(_) | Expr::TensorLit(_) | Expr::Range(..) => {
+            Err("tensors are not in the prototype yet (Phase 2: the CubeCL compute path)".into())
+        }
+        Expr::Slice(..) => Err("slice expression can only appear inside T[…]".into()),
+    }
+}
+
+fn eval_block(stmts: &[BlockStmt], env: &Env) -> Result<Val, String> {
+    let mut child = env.clone();
+    let mut last = Val::Tuple(vec![]);
+    for stmt in stmts {
+        match stmt {
+            BlockStmt::Def(def) => define_into(&mut child, def)?,
+            BlockStmt::Expr(e) => last = eval(e, &child)?,
+        }
+    }
+    Ok(last)
+}
+
+/// Install a definition into `env`, with self-capture so functions can recurse.
+pub fn define_into(env: &mut Env, def: &Def) -> Result<(), String> {
+    match def {
+        Def::Var(name, expr) => {
+            if is_protected(name) {
+                return Err(format!("cannot redefine built-in '{name}'"));
+            }
+            let v = eval(expr, env)?;
+            env.define(name.clone(), v);
+        }
+        Def::Func(name, params, ret_hint, body) => {
+            if is_protected(name) {
+                return Err(format!("cannot redefine built-in '{name}'"));
+            }
+            let names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+            let sig = FnSig {
+                params: params.iter().map(|p| p.hint.clone()).collect(),
+                ret: ret_hint.clone(),
+            };
+            // Capture the current scope plus the function itself (for recursion).
+            let mut captured = (*env.vars).clone();
+            let provisional = Val::make_fn_with_sig(names.clone(), sig.clone(), body.clone(), Arc::new(captured.clone()));
+            captured.insert(name.clone(), provisional);
+            env.define(name.clone(), Val::make_fn_with_sig(names, sig, body.clone(), Arc::new(captured)));
+        }
+    }
+    Ok(())
+}
+
+// ── Application (special forms first, then generic) ───────────────────────────────
+
+fn eval_apply(f_expr: &Expr, arg_exprs: &[Expr], env: &Env) -> Result<Val, String> {
+    if let Expr::Var(name) = f_expr {
+        match name.as_str() {
+            "if" => {
+                if arg_exprs.len() != 3 {
+                    return Err("if(cond, a, b) expects 3 args".into());
+                }
+                let cond = eval(&arg_exprs[0], env)?.num("if")?;
+                return if cond != 0.0 { eval(&arg_exprs[1], env) } else { eval(&arg_exprs[2], env) };
+            }
+            "sum" => return eval_agg(arg_exprs, env, false),
+            "prod" => return eval_agg(arg_exprs, env, true),
+            "iterate" => return eval_iterate(arg_exprs, env),
+            "map" => return eval_map(arg_exprs, env),
+            "filter" => return eval_filter(arg_exprs, env),
+            "reduce" => return eval_reduce(arg_exprs, env),
+            _ => {}
+        }
+    }
+    let f_val = eval(f_expr, env)?;
+    let args = arg_exprs.iter().map(|a| eval(a, env)).collect::<Result<Vec<_>, _>>()?;
+    apply_val(f_val, args, env)
+}
+
+pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
+    match f {
+        Val::Builtin(ref name) => eval_builtin(name, args, env),
+        Val::Fn { ref params, ref body, ref captured, ref sig } => {
+            let n = params.len();
+            let k = args.len();
+            if k == 0 && n > 0 {
+                return Err(format!("function expects {n} arg(s), got 0"));
+            }
+            if k == 1 {
+                if let Val::Fn { .. } = &args[0] {
+                    let g = args.into_iter().next().unwrap();
+                    return Ok(compose_fns(f, g));
+                }
+                if let Val::Tuple(items) = &args[0] {
+                    if items.len() == n {
+                        return apply_fn_direct(params, sig, body, captured, items.clone(), env);
+                    }
+                }
+                if n == 1 {
+                    return apply_fn_direct(params, sig, body, captured, args, env);
+                }
+                return Err(format!("function expects {n} args, got 1"));
+            }
+            if k == n {
+                return apply_fn_direct(params, sig, body, captured, args, env);
+            }
+            // k args, all n-tuples → map with destructuring.
+            let all_n_seqs = k > 0 && args.iter().all(|a| matches!(a, Val::Tuple(v) if v.len() == n));
+            if all_n_seqs {
+                let res: Result<Vec<Val>, _> = args
+                    .into_iter()
+                    .map(|a| match a {
+                        Val::Tuple(v) => apply_fn_direct(params, sig, body, captured, v, env),
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                return Ok(Val::Tuple(res?));
+            }
+            if n == 1 {
+                let res: Result<Vec<Val>, _> = args
+                    .into_iter()
+                    .map(|a| apply_fn_direct(params, sig, body, captured, vec![a], env))
+                    .collect();
+                return Ok(Val::Tuple(res?));
+            }
+            Err(format!("function expects {n} args, got {k}"))
+        }
+        Val::Num(s) => apply_num(s, args),
+        Val::Complex(a, b) => {
+            if args.len() == 1 {
+                let (ra, rb) = to_complex(args.into_iter().next().unwrap())?;
+                return Ok(make_complex(a * ra - b * rb, a * rb + b * ra));
+            }
+            Err("complex: apply expects 1 arg".into())
+        }
+        Val::Tuple(items) => {
+            if args.len() == 1 {
+                let i = args.into_iter().next().unwrap().num("index")? as usize;
+                return items.into_iter().nth(i).ok_or_else(|| format!("index {i} out of range"));
+            }
+            Err("tuple apply: expected a single index".into())
+        }
+        Val::Cell(..) => Err("cells are not callable (use get/set)".into()),
+        Val::Namespace(..) => Err("namespaces are not callable (use ns.member)".into()),
+    }
+}
+
+/// Scalar-as-function: multiplication / scaling, matching the original.
+fn apply_num(s: f64, args: Vec<Val>) -> Result<Val, String> {
+    if args.len() == 1 {
+        return match args.into_iter().next().unwrap() {
+            Val::Fn { .. } => Err("scaling a function value is deferred in the prototype".into()),
+            Val::Num(n) => Ok(Val::Num(s * n)),
+            Val::Complex(a, b) => Ok(make_complex(s * a, s * b)),
+            Val::Tuple(items) => Ok(Val::Tuple(
+                items.into_iter().map(|v| match v {
+                    Val::Num(n) => Val::Num(s * n),
+                    other => other,
+                }).collect(),
+            )),
+            Val::Builtin(_) => Err("cannot scale a builtin function".into()),
+            Val::Cell(..) => Err("cannot scale a cell (use get/set)".into()),
+            Val::Namespace(..) => Err("cannot scale a namespace".into()),
+        };
+    }
+    let nums: Result<Vec<f64>, _> = args.into_iter().map(|v| v.num("scalar-apply")).collect();
+    Ok(Val::Num(nums?.iter().fold(s, |acc, n| acc * n)))
+}
+
+fn apply_fn_direct(
+    params: &[String],
+    _sig: &Arc<FnSig>,
+    body: &Arc<Expr>,
+    captured: &Arc<HashMap<String, Val>>,
+    args: Vec<Val>,
+    env: &Env,
+) -> Result<Val, String> {
+    if params.len() != args.len() {
+        return Err(format!("function expects {} arg(s), got {}", params.len(), args.len()));
+    }
+    // NOTE: type-hint coercion (sig) is deferred to a later phase.
+    let mut local = make_local(env, captured);
+    for (p, a) in params.iter().zip(args) {
+        local.define(p.clone(), a);
+    }
+    eval(body, &local)
+}
+
+/// Three-layer scope: globals (forward-declared names) → closure capture → params.
+fn make_local(global: &Env, captured: &Arc<HashMap<String, Val>>) -> Env {
+    let mut vars = (*global.vars).clone();
+    vars.extend(captured.iter().map(|(k, v)| (k.clone(), v.clone())));
+    Env { vars: Arc::new(vars) }
+}
+
+fn compose_fns(f: Val, g: Val) -> Val {
+    let mut captured = HashMap::new();
+    captured.insert("__f__".into(), f);
+    captured.insert("__g__".into(), g);
+    let body = Expr::Apply(
+        Box::new(Expr::Var("__f__".into())),
+        vec![Expr::Apply(Box::new(Expr::Var("__g__".into())), vec![Expr::Var("__z__".into())])],
+    );
+    Val::make_fn(vec!["__z__".into()], body, Arc::new(captured))
+}
+
+// ── Operators ─────────────────────────────────────────────────────────────────
+
+pub fn binop_val(lv: Val, op: &Op, rv: Val) -> Result<Val, String> {
+    if matches!((&lv, &rv), (Val::Tuple(_), _) | (_, Val::Tuple(_))) {
+        if matches!(op, Op::Eq | Op::Ne) {
+            if let (Val::Tuple(ls), Val::Tuple(rs)) = (&lv, &rv) {
+                let eq = tuple_scalar_eq(ls, rs);
+                return Ok(Val::Num(if matches!(op, Op::Eq) == eq { 1.0 } else { 0.0 }));
+            }
+        }
+        return binop_tuple(lv, op, rv);
+    }
+    scalar_binop(lv, op, rv)
+}
+
+fn binop_tuple(lv: Val, op: &Op, rv: Val) -> Result<Val, String> {
+    match (lv, rv) {
+        (Val::Tuple(ls), Val::Tuple(rs)) => {
+            if ls.len() != rs.len() {
+                return Err(format!("tuple op tuple: length mismatch ({} vs {})", ls.len(), rs.len()));
+            }
+            let out: Result<Vec<Val>, _> = ls.into_iter().zip(rs).map(|(l, r)| binop_val(l, op, r)).collect();
+            Ok(Val::Tuple(out?))
+        }
+        (Val::Tuple(ls), leaf) => {
+            let out: Result<Vec<Val>, _> = ls.into_iter().map(|l| binop_val(l, op, leaf.clone())).collect();
+            Ok(Val::Tuple(out?))
+        }
+        (leaf, Val::Tuple(rs)) => {
+            let out: Result<Vec<Val>, _> = rs.into_iter().map(|r| binop_val(leaf.clone(), op, r)).collect();
+            Ok(Val::Tuple(out?))
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn tuple_scalar_eq(ls: &[Val], rs: &[Val]) -> bool {
+    ls.len() == rs.len()
+        && ls.iter().zip(rs.iter()).all(|(a, b)| matches!((a, b), (Val::Num(x), Val::Num(y)) if x == y))
+}
+
+fn scalar_binop(lv: Val, op: &Op, rv: Val) -> Result<Val, String> {
+    if let (Val::Num(la), Val::Num(ra)) = (&lv, &rv) {
+        return Ok(Val::Num(match op {
+            Op::Add => la + ra,
+            Op::Sub => la - ra,
+            Op::Mul => la * ra,
+            Op::Div => la / ra,
+            Op::FloorDiv => (*la / *ra).floor(),
+            Op::Rem => la % ra,
+            Op::Pow => la.powf(*ra),
+            Op::Lt => (la < ra) as i64 as f64,
+            Op::Gt => (la > ra) as i64 as f64,
+            Op::LtEq => (la <= ra) as i64 as f64,
+            Op::GtEq => (la >= ra) as i64 as f64,
+            Op::Eq => (la == ra) as i64 as f64,
+            Op::Ne => (la != ra) as i64 as f64,
+            Op::And => (int(*la) != 0 && int(*ra) != 0) as i64 as f64,
+            Op::Or => (int(*la) != 0 || int(*ra) != 0) as i64 as f64,
+        }));
+    }
+    let (la, lb) = to_complex(lv)?;
+    let (ra, rb) = to_complex(rv)?;
+    match op {
+        Op::Add => Ok(make_complex(la + ra, lb + rb)),
+        Op::Sub => Ok(make_complex(la - ra, lb - rb)),
+        Op::Mul => Ok(make_complex(la * ra - lb * rb, la * rb + lb * ra)),
+        Op::Div => {
+            let d = ra * ra + rb * rb;
+            if d == 0.0 {
+                return Err("division by zero".into());
+            }
+            Ok(make_complex((la * ra + lb * rb) / d, (lb * ra - la * rb) / d))
+        }
+        Op::Pow => Ok(complex_pow(la, lb, ra, rb)),
+        Op::FloorDiv | Op::Rem => Err("// and % not defined for complex numbers".into()),
+        Op::Eq => Ok(Val::Num((la == ra && lb == rb) as i64 as f64)),
+        Op::Ne => Ok(Val::Num((la != ra || lb != rb) as i64 as f64)),
+        Op::Lt | Op::Gt | Op::LtEq | Op::GtEq => Err("comparison not defined for complex numbers".into()),
+        Op::And | Op::Or => Err("& and | not defined for complex numbers".into()),
+    }
+}
+
+pub fn complex_pow(la: f64, lb: f64, ra: f64, rb: f64) -> Val {
+    if la == 0.0 && lb == 0.0 {
+        return if ra == 0.0 && rb == 0.0 { Val::Num(1.0) } else { Val::Num(0.0) };
+    }
+    let r = (la * la + lb * lb).sqrt();
+    let theta = lb.atan2(la);
+    let new_re = ra * r.ln() - rb * theta;
+    let new_im = ra * theta + rb * r.ln();
+    let mag = new_re.exp();
+    make_complex(mag * new_im.cos(), mag * new_im.sin())
+}
+
+pub fn neg_val(v: Val) -> Result<Val, String> {
+    match v {
+        Val::Num(n) => Ok(Val::Num(-n)),
+        Val::Complex(a, b) => Ok(make_complex(-a, -b)),
+        Val::Tuple(items) => Ok(Val::Tuple(items.into_iter().map(neg_val).collect::<Result<Vec<_>, _>>()?)),
+        other => Err(format!("unary minus: expected a number, got {}", fmt_val(&other))),
+    }
+}
+
+fn not_val(v: Val) -> Result<Val, String> {
+    fn lnot(x: f64) -> f64 {
+        (int(x) == 0) as i64 as f64
+    }
+    match v {
+        Val::Num(n) => Ok(Val::Num(lnot(n))),
+        Val::Tuple(items) => {
+            let r: Result<Vec<Val>, _> = items
+                .into_iter()
+                .map(|v| match v {
+                    Val::Num(n) => Ok(Val::Num(lnot(n))),
+                    other => Err(format!("~: expected a number, got {}", fmt_val(&other))),
+                })
+                .collect();
+            Ok(Val::Tuple(r?))
+        }
+        other => Err(format!("~: expected a number, got {}", fmt_val(&other))),
+    }
+}
+
+// ── index helper ────────────────────────────────────────────────────────────────
+
+pub fn norm_index(i: i64, len: usize, what: &str) -> Result<usize, String> {
+    let adj = if i < 0 { i + len as i64 } else { i };
+    if adj < 0 || adj as usize >= len {
+        return Err(format!("{what} index {i} out of range (len {len})"));
+    }
+    Ok(adj as usize)
+}
+
+// ── special forms ─────────────────────────────────────────────────────────────
+
+fn eval_agg(args: &[Expr], env: &Env, product: bool) -> Result<Val, String> {
+    let label = if product { "prod" } else { "sum" };
+    // 1-arg: sum(tuple)
+    if args.len() == 1 {
+        return match eval(&args[0], env)? {
+            Val::Tuple(items) => {
+                let (mut acc_re, mut acc_im) = if product { (1.0, 0.0) } else { (0.0, 0.0) };
+                for v in items {
+                    let (r, i) = to_complex(v)?;
+                    if product {
+                        let nr = acc_re * r - acc_im * i;
+                        let ni = acc_re * i + acc_im * r;
+                        acc_re = nr;
+                        acc_im = ni;
+                    } else {
+                        acc_re += r;
+                        acc_im += i;
+                    }
+                }
+                Ok(make_complex(acc_re, acc_im))
+            }
+            other => Err(format!("{label}: 1-arg form requires a tuple, got {}", fmt_val(&other))),
+        };
+    }
+    // 3-arg: sum(f, lo, hi) inclusive
+    if args.len() == 3 {
+        let f = eval(&args[0], env)?;
+        let lo = eval(&args[1], env)?.num(label)? as i64;
+        let hi = eval(&args[2], env)?.num(label)? as i64;
+        let (mut acc_re, mut acc_im) = if product { (1.0, 0.0) } else { (0.0, 0.0) };
+        for k in lo..=hi {
+            let (r, i) = to_complex(apply_val(f.clone(), vec![Val::Num(k as f64)], env)?)?;
+            if product {
+                let nr = acc_re * r - acc_im * i;
+                let ni = acc_re * i + acc_im * r;
+                acc_re = nr;
+                acc_im = ni;
+            } else {
+                acc_re += r;
+                acc_im += i;
+            }
+        }
+        return Ok(make_complex(acc_re, acc_im));
+    }
+    Err(format!("{label}: expected {label}(tuple) or {label}(f, lo, hi) in the prototype"))
+}
+
+fn eval_iterate(args: &[Expr], env: &Env) -> Result<Val, String> {
+    if args.len() != 3 {
+        return Err("iterate(f, x0, n) expects 3 args".into());
+    }
+    let f = eval(&args[0], env)?;
+    let mut state = eval(&args[1], env)?;
+    let n = eval(&args[2], env)?.num("iterate")? as i64;
+    if n < 0 {
+        return Err(format!("iterate: count must be non-negative, got {n}"));
+    }
+    for step in 0..n {
+        state = apply_val(f.clone(), vec![state], env)?;
+        if !state_is_finite(&state) {
+            return Err(format!("iterate: non-finite value (NaN/Inf) at step {}", step + 1));
+        }
+    }
+    Ok(state)
+}
+
+fn state_is_finite(v: &Val) -> bool {
+    match v {
+        Val::Num(x) => x.is_finite(),
+        Val::Complex(a, b) => a.is_finite() && b.is_finite(),
+        Val::Tuple(items) => items.iter().all(state_is_finite),
+        _ => true,
+    }
+}
+
+fn eval_map(args: &[Expr], env: &Env) -> Result<Val, String> {
+    if args.len() != 2 {
+        return Err("map(f, tuple) expects 2 args".into());
+    }
+    let f = eval(&args[0], env)?;
+    match eval(&args[1], env)? {
+        Val::Tuple(items) => {
+            let res: Result<Vec<Val>, _> = items.into_iter().map(|x| apply_val(f.clone(), vec![x], env)).collect();
+            Ok(Val::Tuple(res?))
+        }
+        other => Err(format!("map: second arg must be a tuple (tensors in Phase 2), got {}", fmt_val(&other))),
+    }
+}
+
+fn eval_filter(args: &[Expr], env: &Env) -> Result<Val, String> {
+    if args.len() != 2 {
+        return Err("filter(f, tuple) expects 2 args".into());
+    }
+    let f = eval(&args[0], env)?;
+    match eval(&args[1], env)? {
+        Val::Tuple(items) => {
+            let mut out = vec![];
+            for item in items {
+                if apply_val(f.clone(), vec![item.clone()], env)?.num("filter")? != 0.0 {
+                    out.push(item);
+                }
+            }
+            Ok(Val::Tuple(out))
+        }
+        other => Err(format!("filter: second arg must be a tuple (tensors in Phase 2), got {}", fmt_val(&other))),
+    }
+}
+
+fn eval_reduce(args: &[Expr], env: &Env) -> Result<Val, String> {
+    if args.len() != 2 {
+        return Err("reduce(f, tuple) expects 2 args".into());
+    }
+    let f = eval(&args[0], env)?;
+    match eval(&args[1], env)? {
+        Val::Tuple(items) => {
+            let mut it = items.into_iter();
+            let mut acc = it.next().ok_or("reduce: empty tuple")?;
+            for item in it {
+                acc = apply_val(f.clone(), vec![acc, item], env)?;
+            }
+            Ok(acc)
+        }
+        other => Err(format!("reduce: second arg must be a tuple (tensors in Phase 2), got {}", fmt_val(&other))),
+    }
+}

@@ -1,0 +1,243 @@
+//! Scalar/complex builtins for the Phase 1b host core. Unary math broadcasts over
+//! tuple trees (matching the original's leaf semantics). Tensor/linalg/fft/field
+//! builtins are deferred to later phases.
+
+use crate::ast::Op;
+use crate::interp::{binop_val, Env};
+use crate::value::{fmt_val, make_complex, to_complex, Val};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+// `_env` is unused this phase (higher-order forms live in the interpreter), but the
+// signature is fixed so later phases can dispatch tensor/compute builtins through it.
+pub fn eval_builtin(name: &str, args: Vec<Val>, _env: &Env) -> Result<Val, String> {
+    match name {
+        // ── complex-capable unary ──────────────────────────────────────────────
+        "abs" => unary(args, name, |v| {
+            let (a, b) = to_complex(v)?;
+            Ok(Val::Num(a.hypot(b)))
+        }),
+        "re" => unary(args, name, |v| { let (a, _) = to_complex(v)?; Ok(Val::Num(a)) }),
+        "im" => unary(args, name, |v| { let (_, b) = to_complex(v)?; Ok(Val::Num(b)) }),
+        "arg" => unary(args, name, |v| { let (a, b) = to_complex(v)?; Ok(Val::Num(b.atan2(a))) }),
+        "conj" => unary(args, name, |v| { let (a, b) = to_complex(v)?; Ok(make_complex(a, -b)) }),
+        "exp" => unary(args, name, |v| match v {
+            Val::Num(x) => Ok(Val::Num(x.exp())),
+            other => { let (a, b) = to_complex(other)?; let m = a.exp(); Ok(make_complex(m * b.cos(), m * b.sin())) }
+        }),
+        "ln" => unary(args, name, |v| match v {
+            Val::Num(x) if x > 0.0 => Ok(Val::Num(x.ln())),
+            other => { let (a, b) = to_complex(other)?; let r = a.hypot(b); Ok(make_complex(r.ln(), b.atan2(a))) }
+        }),
+        "sqrt" => unary(args, name, |v| match v {
+            Val::Num(x) if x >= 0.0 => Ok(Val::Num(x.sqrt())),
+            other => { let (a, b) = to_complex(other)?; Ok(crate::interp::complex_pow(a, b, 0.5, 0.0)) }
+        }),
+        "sin" => unary(args, name, |v| match v {
+            Val::Num(x) => Ok(Val::Num(x.sin())),
+            other => { let (a, b) = to_complex(other)?; Ok(make_complex(a.sin() * b.cosh(), a.cos() * b.sinh())) }
+        }),
+        "cos" => unary(args, name, |v| match v {
+            Val::Num(x) => Ok(Val::Num(x.cos())),
+            other => { let (a, b) = to_complex(other)?; Ok(make_complex(a.cos() * b.cosh(), -a.sin() * b.sinh())) }
+        }),
+
+        // ── real-only unary ────────────────────────────────────────────────────
+        "tan" => real_unary(args, name, f64::tan),
+        "asin" => real_unary(args, name, f64::asin),
+        "acos" => real_unary(args, name, f64::acos),
+        "atan" => real_unary(args, name, f64::atan),
+        "sinh" => real_unary(args, name, f64::sinh),
+        "cosh" => real_unary(args, name, f64::cosh),
+        "tanh" => real_unary(args, name, f64::tanh),
+        "sec" => real_unary(args, name, |x| 1.0 / x.cos()),
+        "csc" => real_unary(args, name, |x| 1.0 / x.sin()),
+        "cot" => real_unary(args, name, |x| 1.0 / x.tan()),
+        "cbrt" => real_unary(args, name, f64::cbrt),
+        "expm1" => real_unary(args, name, f64::exp_m1),
+        "floor" => real_unary(args, name, f64::floor),
+        "ceil" => real_unary(args, name, f64::ceil),
+        "round" => real_unary(args, name, f64::round),
+        "trunc" => real_unary(args, name, f64::trunc),
+        "frac" => real_unary(args, name, |x| x - x.trunc()),
+        "sign" | "signum" => real_unary(args, name, |x| if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 }),
+        "heaviside" => real_unary(args, name, |x| if x < 0.0 { 0.0 } else if x == 0.0 { 0.5 } else { 1.0 }),
+        "deg" => real_unary(args, name, |x| x * 180.0 / std::f64::consts::PI),
+        "rad" => real_unary(args, name, |x| x * std::f64::consts::PI / 180.0),
+        "fact" | "factorial" => real_unary(args, name, |x| {
+            let n = x as i64;
+            (1..=n.max(0)).map(|k| k as f64).product()
+        }),
+        "id" => one(args, name),
+
+        // ── logarithms (base-10 by default; log(x, base) too) ──────────────────
+        "log10" => real_unary(args, name, f64::log10),
+        "log2" => real_unary(args, name, f64::log2),
+        "log" => {
+            if args.len() == 1 {
+                real_unary(args, name, f64::log10)
+            } else if args.len() == 2 {
+                let x = args[0].clone().num(name)?;
+                let base = args[1].clone().num(name)?;
+                Ok(Val::Num(x.ln() / base.ln()))
+            } else {
+                Err("log expects log(x) or log(x, base)".into())
+            }
+        }
+
+        // ── binary numeric ─────────────────────────────────────────────────────
+        "pow" => { let (a, b) = two(args, name)?; binop_val(a, &Op::Pow, b) }
+        "atan2" => { let (y, x) = two_nums(args, name)?; Ok(Val::Num(y.atan2(x))) }
+        "hypot" => { let (a, b) = two_nums(args, name)?; Ok(Val::Num(a.hypot(b))) }
+        "gcd" => { let (a, b) = two_nums(args, name)?; Ok(Val::Num(gcd(a.abs() as u64, b.abs() as u64) as f64)) }
+        "lcm" => { let (a, b) = two_nums(args, name)?; Ok(Val::Num(lcm(a.abs() as u64, b.abs() as u64) as f64)) }
+        "ncr" => {
+            let (n, r) = two_nums(args, name)?;
+            let (n, r) = (n as i64, r as i64);
+            if r < 0 || r > n || n < 0 { return Ok(Val::Num(0.0)); }
+            let mut acc = 1.0_f64;
+            for k in 0..r { acc = acc * (n - k) as f64 / (k + 1) as f64; }
+            Ok(Val::Num(acc.round()))
+        }
+        "min" => Ok(Val::Num(num_leaves(args, name)?.into_iter().fold(f64::INFINITY, f64::min))),
+        "max" => Ok(Val::Num(num_leaves(args, name)?.into_iter().fold(f64::NEG_INFINITY, f64::max))),
+
+        // ── comparison functions (reuse the operator semantics) ────────────────
+        "lt" => cmp(args, name, Op::Lt),
+        "leq" => cmp(args, name, Op::LtEq),
+        "gt" => cmp(args, name, Op::Gt),
+        "geq" => cmp(args, name, Op::GtEq),
+        "eq" => cmp(args, name, Op::Eq),
+        "neq" => cmp(args, name, Op::Ne),
+
+        // ── higher-order combinators ───────────────────────────────────────────
+        "compose" => {
+            let (f, g) = two(args, name)?;
+            let mut cap = HashMap::new();
+            cap.insert("__f__".into(), f);
+            cap.insert("__g__".into(), g);
+            let body = crate::ast::Expr::Apply(
+                Box::new(crate::ast::Expr::Var("__f__".into())),
+                vec![crate::ast::Expr::Apply(
+                    Box::new(crate::ast::Expr::Var("__g__".into())),
+                    vec![crate::ast::Expr::Var("__z__".into())],
+                )],
+            );
+            Ok(Val::make_fn(vec!["__z__".into()], body, Arc::new(cap)))
+        }
+        "partial" => {
+            let (f, a) = two(args, name)?;
+            let mut cap = HashMap::new();
+            cap.insert("__f__".into(), f);
+            cap.insert("__a__".into(), a);
+            let body = crate::ast::Expr::Apply(
+                Box::new(crate::ast::Expr::Var("__f__".into())),
+                vec![crate::ast::Expr::Var("__a__".into()), crate::ast::Expr::Var("__x__".into())],
+            );
+            Ok(Val::make_fn(vec!["__x__".into()], body, Arc::new(cap)))
+        }
+
+        // ── containers ─────────────────────────────────────────────────────────
+        "len" | "length" => {
+            let v = one(args, name)?;
+            match v {
+                Val::Tuple(items) => Ok(Val::Num(items.len() as f64)),
+                other => Err(format!("{name}: expected a tuple (tensors in Phase 2), got {}", fmt_val(&other))),
+            }
+        }
+        "cell" => Ok(Val::Cell(Arc::new(RefCell::new(one(args, name)?)))),
+        "get" => match one(args, name)? {
+            Val::Cell(c) => Ok(c.borrow().clone()),
+            other => Err(format!("get: expected a cell, got {}", fmt_val(&other))),
+        },
+        "set" => {
+            let (c, v) = two(args, name)?;
+            match c {
+                Val::Cell(cell) => { *cell.borrow_mut() = v.clone(); Ok(v) }
+                other => Err(format!("set: first arg must be a cell, got {}", fmt_val(&other))),
+            }
+        }
+
+        _ => {
+            // Help the user: many names exist in the real `m` but await later phases.
+            Err(format!("`{name}` is not available in the prototype yet (later phase)"))
+        }
+    }
+}
+
+// ── argument helpers ──────────────────────────────────────────────────────────
+
+fn one(args: Vec<Val>, name: &str) -> Result<Val, String> {
+    if args.len() != 1 {
+        return Err(format!("{name} expects 1 arg, got {}", args.len()));
+    }
+    Ok(args.into_iter().next().unwrap())
+}
+
+fn two(args: Vec<Val>, name: &str) -> Result<(Val, Val), String> {
+    if args.len() != 2 {
+        return Err(format!("{name} expects 2 args, got {}", args.len()));
+    }
+    let mut it = args.into_iter();
+    Ok((it.next().unwrap(), it.next().unwrap()))
+}
+
+fn two_nums(args: Vec<Val>, name: &str) -> Result<(f64, f64), String> {
+    let (a, b) = two(args, name)?;
+    Ok((a.num(name)?, b.num(name)?))
+}
+
+/// Apply a leaf op across a value, broadcasting over tuple trees.
+fn map_leaves(v: Val, f: &dyn Fn(Val) -> Result<Val, String>) -> Result<Val, String> {
+    match v {
+        Val::Tuple(items) => Ok(Val::Tuple(
+            items.into_iter().map(|x| map_leaves(x, f)).collect::<Result<Vec<_>, _>>()?,
+        )),
+        leaf => f(leaf),
+    }
+}
+
+fn unary(args: Vec<Val>, name: &str, f: impl Fn(Val) -> Result<Val, String>) -> Result<Val, String> {
+    let v = one(args, name)?;
+    map_leaves(v, &f)
+}
+
+fn real_unary(args: Vec<Val>, name: &str, f: impl Fn(f64) -> f64) -> Result<Val, String> {
+    let v = one(args, name)?;
+    map_leaves(v, &|leaf| match leaf {
+        Val::Num(x) => Ok(Val::Num(f(x))),
+        other => Err(format!("{name}: expected a real number, got {}", fmt_val(&other))),
+    })
+}
+
+fn cmp(args: Vec<Val>, name: &str, op: Op) -> Result<Val, String> {
+    let (a, b) = two(args, name)?;
+    binop_val(a, &op, b)
+}
+
+/// Flatten all numeric leaves of the args (so min/max accept scalars and tuples).
+fn num_leaves(args: Vec<Val>, name: &str) -> Result<Vec<f64>, String> {
+    fn rec(v: Val, name: &str, out: &mut Vec<f64>) -> Result<(), String> {
+        match v {
+            Val::Num(x) => { out.push(x); Ok(()) }
+            Val::Tuple(items) => { for it in items { rec(it, name, out)?; } Ok(()) }
+            other => Err(format!("{name}: expected numbers, got {}", fmt_val(&other))),
+        }
+    }
+    let mut out = vec![];
+    for a in args { rec(a, name, &mut out)?; }
+    if out.is_empty() {
+        return Err(format!("{name}: no numeric arguments"));
+    }
+    Ok(out)
+}
+
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 { let t = b; b = a % b; a = t; }
+    a
+}
+
+fn lcm(a: u64, b: u64) -> u64 {
+    if a == 0 || b == 0 { 0 } else { a / gcd(a, b) * b }
+}
