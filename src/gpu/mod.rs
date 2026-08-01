@@ -133,6 +133,11 @@ fn hoist_gets(
     let rec = |x: &Expr, scope: &mut HashMap<String, GpuVal>, counter: &mut usize|
         hoist_gets(x, env, ctx, scope, counter);
     Ok(match e {
+        // Records are host-side values; the GPU backend has no field-name
+        // machinery, so reject them explicitly rather than silently dropping
+        // the names via the positional-tuple path.
+        Expr::Record(_) =>
+            return Err("GPU: record literals are not supported inside a GPU block".into()),
         Expr::Apply(f, args) => {
             if let Expr::Var(name) = &**f {
                 if name == "get" {
@@ -3635,7 +3640,7 @@ fn to_val(ctx: &GpuContext, v: &GpuVal) -> Result<Val, String> {
                 bc: bc.clone(), metric: metric.clone(), degree: *degree, variance: *variance,
             })))
         }
-        GpuVal::Tuple(elems) => Ok(Val::Tuple(
+        GpuVal::Tuple(elems) => Ok(Val::tup(
             elems.iter().map(|e| to_val(ctx, e)).collect::<Result<Vec<_>, _>>()?,
         )),
         GpuVal::Fn(_) => Err("GPU: a function cannot be returned from a GPU block".into()),

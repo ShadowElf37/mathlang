@@ -1,5 +1,5 @@
 use crate::lexer::Token;
-use crate::ast::{Expr, BlockStmt, Op, Def, TypeHint, Param};
+use crate::ast::{Expr, BlockStmt, Op, Def, TypeHint, Param, Field};
 
 pub struct Parser { toks: Vec<Token>, pos: usize }
 
@@ -252,6 +252,62 @@ impl Parser {
         Ok(Expr::Block(stmts))
     }
 
+    /// Call arguments are positional only. `f(x = 1)` is ambiguous between a
+    /// keyword argument and "call f with a 1-field record", so it stays an
+    /// error — but point at the unambiguous spelling.
+    fn check_not_kwarg(&self) -> Result<(), String> {
+        if *self.peek() == Token::Eq {
+            return Err("named arguments are not supported; \
+                        to pass a record, wrap it: f((x = 1))".into());
+        }
+        Ok(())
+    }
+
+    /// Parse one item of a paren list, which may be a named record field
+    /// (`g = 9.81`, `mag(v) = norm(v)`) or a plain positional expression.
+    fn parse_paren_item(&mut self) -> Result<Field, String> {
+        if self.is_def_start() {
+            self.parse_record_field()
+        } else {
+            Ok(Field { name: None, value: self.expr()? })
+        }
+    }
+
+    /// Parse `name = expr` or `name(params) [: ret] = body` inside a record
+    /// literal. Mirrors `parse_def`, but the value is a plain `expr()`: unlike
+    /// a top-level def we must NOT call `is_multi_lambda`, or `(f = a, b -> c)`
+    /// would greedily swallow the comma and yield a 1-field record. A bare
+    /// multi-arg lambda field needs parens: `(f = (a, b) -> a + b)`.
+    fn parse_record_field(&mut self) -> Result<Field, String> {
+        let name = match self.bump() {
+            Token::Ident(s) => s,
+            t => return Err(format!("expected field name, got {:?}", t)),
+        };
+        if *self.peek() == Token::LParen {
+            self.bump();
+            let mut params = vec![];
+            if *self.peek() != Token::RParen {
+                loop {
+                    params.push(self.parse_param()?);
+                    if *self.peek() == Token::Comma { self.bump(); } else { break; }
+                }
+            }
+            self.eat(&Token::RParen)?;
+            let ret_hint = if *self.peek() == Token::Colon {
+                self.bump();
+                Some(self.parse_type_hint()?)
+            } else {
+                None
+            };
+            self.eat(&Token::Eq)?;
+            let body = self.expr()?;
+            Ok(Field { name: Some(name), value: Expr::Lambda(params, ret_hint, body.into()) })
+        } else {
+            self.eat(&Token::Eq)?;
+            Ok(Field { name: Some(name), value: self.expr()? })
+        }
+    }
+
     fn parse_def(&mut self) -> Result<Def, String> {
         let name = match self.bump() {
             Token::Ident(s) => s,
@@ -439,6 +495,7 @@ impl Parser {
                         if *self.peek() == Token::Comma { self.bump(); } else { break; }
                     }
                 }
+                self.check_not_kwarg()?;
                 self.eat(&Token::RParen)?;
                 e = Expr::Apply(Box::new(e), args);
             } else {
@@ -509,13 +566,22 @@ impl Parser {
                         self.bump();
                         return Ok(Expr::Tuple(vec![]));
                     }
-                    let first = self.expr()?;
+                    // Items may be named record fields (`x = 1`) or positional.
+                    // `Token::Eq` was previously unreachable inside parens, so
+                    // this carves out empty grammar — no existing program can
+                    // change meaning.
+                    let first = self.parse_paren_item()?;
+                    let mut any_named = first.name.is_some();
                     // Range literal (a..b)
                     if *self.peek() == Token::DotDot {
+                        if any_named {
+                            return Err("'..' is not allowed as a record field value; \
+                                        wrap it in parens: (r = (1..3))".into());
+                        }
                         self.bump();
                         let last = self.expr()?;
                         self.eat(&Token::RParen)?;
-                        return Ok(Expr::Range(Box::new(first), Box::new(last)));
+                        return Ok(Expr::Range(Box::new(first.value), Box::new(last)));
                     }
                     // Collect first row (comma-separated items)
                     let mut row0 = vec![first];
@@ -523,11 +589,17 @@ impl Parser {
                     while *self.peek() == Token::Comma {
                         self.bump();
                         if matches!(self.peek(), Token::RParen | Token::Semicolon) { trailing_comma = true; break; }
-                        row0.push(self.expr()?);
+                        let f = self.parse_paren_item()?;
+                        any_named |= f.name.is_some();
+                        row0.push(f);
                     }
                     // Matrix literal: rows separated by ;
                     if *self.peek() == Token::Semicolon {
-                        let mut rows = vec![row0];
+                        if any_named {
+                            return Err("';' (matrix row separator) cannot be used in a record literal".into());
+                        }
+                        let mut row0: Vec<Expr> = row0.into_iter().map(|f| f.value).collect();
+                        let mut rows = vec![std::mem::take(&mut row0)];
                         while *self.peek() == Token::Semicolon {
                             self.bump();
                             if *self.peek() == Token::RParen { break; }
@@ -543,6 +615,11 @@ impl Parser {
                         return Ok(Expr::TensorLit(rows));
                     }
                     self.eat(&Token::RParen)?;
+                    // Any named field makes this a record — including the
+                    // 1-field `(a = 1)`, which is why the collapse-to-grouping
+                    // rule below is guarded on `any_named`.
+                    if any_named { return Ok(Expr::Record(row0)); }
+                    let row0: Vec<Expr> = row0.into_iter().map(|f| f.value).collect();
                     if row0.len() == 1 {
                         if trailing_comma {
                             // (x,) → a 1-element tuple (use [x] for a length-1 array).
@@ -626,6 +703,7 @@ impl Parser {
                             if *self.peek() == Token::Comma { self.bump(); } else { break; }
                         }
                     }
+                    self.check_not_kwarg()?;
                     self.eat(&Token::RParen)?;
                     Ok(Expr::Apply(Box::new(Expr::Var(name)), args))
                 } else {

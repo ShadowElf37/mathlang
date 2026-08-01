@@ -15,9 +15,8 @@ pub mod stats;
 pub mod linalg;
 pub mod vec;
 
-use crate::eval::Val;
+use crate::eval::{Val, Tup};
 use std::collections::HashMap;
-use std::sync::Arc;
 
 /// Bare builtin names that live ONLY inside a namespace (the new PDE functions).
 /// eval_builtin routes these to the relevant module's dispatch().
@@ -36,8 +35,14 @@ pub fn dispatch(name: &str, vals: Vec<Val>, env: &crate::eval::Env) -> Option<Re
     None
 }
 
-fn insert_ns(vars: &mut HashMap<String, Val>, name: &str, members: HashMap<String, Val>) {
-    vars.insert(name.to_string(), Val::Namespace(Arc::new(members)));
+/// A namespace is just a named tuple whose fields are its members, so `ops.lap`
+/// is the ordinary record field access and `linalg[0]` / `len(linalg)` work too.
+/// The member list is an ordered Vec (not a HashMap) so indexing and printing
+/// are deterministic.
+fn insert_ns(vars: &mut HashMap<String, Val>, name: &str, members: Vec<(String, Val)>) {
+    let (names, items): (Vec<_>, Vec<_>) =
+        members.into_iter().map(|(k, v)| (Some(k), v)).unzip();
+    vars.insert(name.to_string(), Val::Tuple(Tup::named(items, names)));
 }
 
 pub fn register_all(vars: &mut HashMap<String, Val>) {

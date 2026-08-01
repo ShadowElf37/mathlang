@@ -340,6 +340,8 @@ There are two container syntaxes, and they mean different things:
 - **`(a, b, c)` is a tuple**: a *tree* whose leaves may be anything — scalars,
   arrays, fields, or more tuples. It groups heterogeneous things and is what you
   destructure into function parameters or carry as `iterate`/solver state.
+  Fields may be named — `(x = 1, y = 2)` — which also makes them reachable as
+  `.x`; see [Named tuples](#named-tuples-records).
 
 ```
 > [1, 2, 3]                 # an array (tensor)
@@ -349,6 +351,71 @@ result = (1, 2, 3)
 > (1, 2, 3)[1]              # index either with [n] (negative counts from the end)
 result = 2
 ```
+
+### Named tuples (records)
+
+A tuple field can be given a name with `=`. The result is still a tuple —
+indexable, broadcastable, `len`-able — but each named slot is also reachable
+with `.name`:
+
+```
+> p = (x = 3, y = 4)
+result = (x = 3, y = 4)
+> p.x
+result = 3
+> p[0]                      # still positional
+result = 3
+> len(p)
+result = 2
+```
+
+Names may be mixed with positional slots, and records nest:
+
+```
+> (1, y = 2)
+result = (1, y = 2)
+> r = (p = (x = 1, y = 2), q = 3)
+> r.p.y
+result = 2
+```
+
+A field may be a function, defined exactly as a top-level function is. That is
+all a namespace is:
+
+```
+> v = (mag(u) = norm(u), unit(u) = u / norm(u))
+> v.unit([3, 4])
+result = [0.6, 0.8]
+```
+
+Combined with [multi-line syntax](#multi-line-syntax), this gives a
+configuration-file-like form:
+
+```
+physics = (
+  g = 9.81
+  c = 3e8
+
+  vec = (
+    unit(v) = v / norm(v)
+  )
+)
+
+physics.vec.unit([3, 4])    # [0.6, 0.8]
+```
+
+Notes:
+
+- A single named field still makes a record: `(a = 1)` is a 1-field record, while
+  `(a)` is just grouping.
+- A bare multi-argument lambda as a field value needs parens —
+  `(f = (a, b) -> a + b)` — otherwise the comma would be read as a field
+  separator.
+- Duplicate field names are an error.
+- `f(x = 1)` is **not** a keyword argument. Pass a record explicitly: `f((x = 1))`.
+- Field names are a syntax and display concept only. mathlang has no string type,
+  so there is no way to obtain a field name as a *value*, and no dynamic key
+  lookup. Use `!type` or just print the record to see them.
 
 ### Tree broadcasting
 
@@ -1025,14 +1092,36 @@ The standard namespaces are:
 | `forms`   | exterior calculus on fields: `d hodge wedge raise lower codiff laplace` — see below |
 | `pic`     | particle-in-cell coupling: `scatter` (deposit) / `gather` (interpolate) — see below |
 
-A namespace is a first-class value (`f = bits.xor; f(6,3)`). Names placed in a
-namespace are **not** reserved words, so `xor`, `lerp`, `var`, … are free to use
-as your own variable names. Browse a namespace's members with `!help <namespace>`.
+A namespace **is a named tuple** (see [Named tuples](#named-tuples-records)) —
+there is no separate namespace type. So everything a record can do, a namespace
+can do:
 
-**Your own namespaces:** put `!namespace <name>` at the top of a `.math` file and
-its definitions become members of `<name>` when you `!include` it. Prefix a
-definition with `private` to keep it internal (usable by the file's other
-definitions, but not exported):
+```
+> f = bits.xor; f(6,3)     # 5      — members are first-class values
+> len(linalg)              # 6      — it's a tuple
+> linalg[0]                # <builtin qr>
+```
+
+Names placed in a namespace are **not** reserved words, so `xor`, `lerp`, `var`,
+… are free to use as your own variable names. Browse a namespace's members with
+`!help <namespace>`.
+
+**Your own namespaces:** the direct way is a record literal — a namespace is just
+a record whose fields are functions:
+
+```
+geo = (
+  k = 3.14159
+  area(r)  = k * r^2
+  circum(r) = 2 * k * r
+)
+geo.area(2)                # 12.566
+```
+
+For a whole file, put `!namespace <name>` at the top of a `.math` file and its
+definitions become members of `<name>` when you `!include` it. This form also
+supports `private`, which a record literal does not — prefix a definition to keep
+it internal (usable by the file's other definitions, but not exported):
 
 ```
 # geo.math

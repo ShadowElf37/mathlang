@@ -1,0 +1,64 @@
+[1;4mrecords (named tuples)[0m
+
+A tuple field can be given a name with `=`. The result is still a tuple — you can
+index it, take its len, and broadcast operations over it — but each named slot is
+also reachable with `.name`.
+
+A namespace is exactly this: a record whose fields are functions. There is no
+separate namespace type.
+
+[1mExamples:[0m
+> p = (x = 3, y = 4)
+result = (x = 3, y = 4)
+> p.x
+result = 3
+> p[0]
+result = 3
+> len(p)
+result = 2
+
+Names may be mixed with positional slots, and records nest:
+
+> (1, y = 2)
+result = (1, y = 2)
+> r = (p = (x = 1, y = 2), q = 3)
+> r.p.y
+result = 2
+
+Operations broadcast over the leaves and the names ride along. Two records
+combine only if their field names match, in order:
+
+> (x = 1, y = 2) + 10
+result = (x = 11, y = 12)
+> (x = 1, y = 2) + (x = 3, y = 4)
+result = (x = 4, y = 6)
+> (x = 1, y = 2) + (a = 3, b = 4)
+error: tuple op tuple: field mismatch: (x, y) vs (a, b)
+
+Fields may be functions, defined just like top-level functions:
+
+> v = (mag(u) = norm(u), unit(u) = u / norm(u))
+> v.unit([3, 4])
+result = [0.6, 0.8]
+
+With multi-line syntax this reads like a config file:
+
+physics = (
+  g = 9.81
+  c = 3e8
+
+  vec = (
+    unit(v) = v / norm(v)
+  )
+)
+
+[1mNotes:[0m
+  (a = 1) is a 1-field record; (a) is just grouping.
+  A bare multi-arg lambda field needs parens: (f = (a, b) -> a + b).
+  Duplicate field names are an error.
+  f(x = 1) is not a keyword argument — pass a record: f((x = 1)).
+  Reshaping operations (filter, slicing) drop the names.
+  mathlang has no string type, so field names cannot be read as values and
+  there is no dynamic key lookup.
+
+[1mSee also:[0m  tuple  namespace  multiline

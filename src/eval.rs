@@ -190,6 +190,125 @@ pub(crate) fn field_data_as_tensor(f: &FieldVal) -> Val {
     Val::Tensor { data: f.data.clone(), shape }
 }
 
+/// The payload of `Val::Tuple` — a positional tuple that may additionally carry
+/// a field name per slot.
+///
+/// `names` is `None` for a plain positional tuple (the overwhelmingly common
+/// case, so it costs nothing there) and `Some` for a record; individual entries
+/// may still be `None` for the positional slots of a mixed literal like
+/// `(1, y = 2)`. It is `Arc`-wrapped so cloning stays O(1).
+///
+/// `Tup` derefs to `[Val]` and iterates like a `Vec<Val>`, so the many places
+/// that only care about the items read exactly as they did when this was a
+/// bare `Vec<Val>`.
+#[derive(Clone, Debug)]
+pub struct Tup {
+    items: Vec<Val>,
+    names: Option<Arc<Vec<Option<String>>>>,
+}
+
+impl Tup {
+    pub fn positional(items: Vec<Val>) -> Self { Tup { items, names: None } }
+
+    /// Build a tuple with per-slot names. Collapses to positional when no slot
+    /// is actually named, so `is_named` means "has at least one field name".
+    pub fn named(items: Vec<Val>, names: Vec<Option<String>>) -> Self {
+        debug_assert_eq!(items.len(), names.len());
+        if names.iter().all(|n| n.is_none()) { Tup::positional(items) }
+        else { Tup { items, names: Some(Arc::new(names)) } }
+    }
+
+    pub fn is_named(&self) -> bool { self.names.is_some() }
+    pub fn names(&self) -> Option<&Arc<Vec<Option<String>>>> { self.names.as_ref() }
+    pub fn name_of(&self, i: usize) -> Option<&str> {
+        self.names.as_ref()?.get(i)?.as_deref()
+    }
+    pub fn field_names(&self) -> Vec<&str> {
+        (0..self.items.len()).filter_map(|i| self.name_of(i)).collect()
+    }
+    pub fn lookup(&self, field: &str) -> Option<&Val> {
+        let names = self.names.as_ref()?;
+        names.iter().position(|n| n.as_deref() == Some(field)).map(|i| &self.items[i])
+    }
+    /// Do two tuples have the same field names in the same order? Positional
+    /// slots must line up too, so `(x=1, 2)` and `(x=1, y=2)` do not match.
+    pub fn names_match(&self, other: &Tup) -> bool {
+        match (&self.names, &other.names) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        }
+    }
+    /// Replace the items, keeping the field names. Arity must be unchanged —
+    /// use `Tup::positional` for operations that reshape the tuple.
+    pub fn with_items(&self, items: Vec<Val>) -> Tup {
+        debug_assert_eq!(items.len(), self.items.len());
+        Tup { items, names: self.names.clone() }
+    }
+    pub fn into_items(self) -> Vec<Val> { self.items }
+    /// Human-readable field list for error messages, e.g. `(x, y)`.
+    pub fn name_sig(&self) -> String {
+        match &self.names {
+            None => format!("{} positional items", self.items.len()),
+            Some(ns) => format!("({})",
+                ns.iter().map(|n| n.as_deref().unwrap_or("_")).collect::<Vec<_>>().join(", ")),
+        }
+    }
+}
+
+impl std::ops::Deref for Tup {
+    type Target = [Val];
+    fn deref(&self) -> &[Val] { &self.items }
+}
+impl std::ops::DerefMut for Tup {
+    fn deref_mut(&mut self) -> &mut [Val] { &mut self.items }
+}
+impl From<Vec<Val>> for Tup {
+    fn from(items: Vec<Val>) -> Self { Tup::positional(items) }
+}
+/// Collecting into a `Tup` yields a positional tuple. Operations that must keep
+/// field names use `Tup::with_items` / `Tup::named` instead — collect is used by
+/// the ones that reshape the tuple (sort, zip, flatten, …), where carrying the
+/// old names over would be wrong.
+impl FromIterator<Val> for Tup {
+    fn from_iter<I: IntoIterator<Item = Val>>(iter: I) -> Self {
+        Tup::positional(iter.into_iter().collect())
+    }
+}
+impl Tup {
+    /// Append an item. Appended slots are unnamed, so a record stays a record
+    /// and simply gains a positional field.
+    pub fn push(&mut self, v: Val) {
+        self.items.push(v);
+        if let Some(ns) = &mut self.names { Arc::make_mut(ns).push(None); }
+    }
+    pub fn extend_from(&mut self, other: Tup) {
+        let extra = other.items.len();
+        let other_names = other.names.clone();
+        self.items.extend(other.items);
+        match (&mut self.names, other_names) {
+            (Some(ns), Some(o)) => Arc::make_mut(ns).extend(o.iter().cloned()),
+            (Some(ns), None)    => Arc::make_mut(ns).extend(std::iter::repeat(None).take(extra)),
+            (None, Some(o))     => {
+                let mut ns: Vec<Option<String>> = vec![None; self.items.len() - extra];
+                ns.extend(o.iter().cloned());
+                self.names = Some(Arc::new(ns));
+            }
+            (None, None) => {}
+        }
+    }
+}
+impl IntoIterator for Tup {
+    type Item = Val;
+    type IntoIter = std::vec::IntoIter<Val>;
+    fn into_iter(self) -> Self::IntoIter { self.items.into_iter() }
+}
+impl<'a> IntoIterator for &'a Tup {
+    type Item = &'a Val;
+    type IntoIter = std::slice::Iter<'a, Val>;
+    fn into_iter(self) -> Self::IntoIter { self.items.iter() }
+}
+
 #[derive(Clone, Debug)]
 pub enum Val {
     Num(f64),
@@ -202,7 +321,7 @@ pub enum Val {
     /// Initialised on first call via apply_fn_direct; None means fall back to tree-walk.
     Fn(Vec<String>, Expr, Arc<HashMap<String, Val>>, Arc<OnceLock<Option<Vec<Instruction>>>>, Arc<FnSig>),
     Builtin(String),
-    Tuple(Vec<Val>),
+    Tuple(Tup),
     /// Real-valued tensor (row-major flat storage).
     /// `data` is a TData (Arc<Vec<f64>>), so cloning a Tensor Val is O(1).
     Tensor { data: TData, shape: Vec<usize> },
@@ -216,10 +335,6 @@ pub enum Val {
     /// A differential-form / vector field on a regular grid (see FieldVal).
     /// Arc-wrapped for O(1) clone.
     Field(Arc<FieldVal>),
-    /// A namespace: a map from member name to value, accessed with `ns.member`.
-    /// Builtin namespaces (ops, special, …) are registered in Env::new;
-    /// user namespaces are built by an `!namespace`-headed included file.
-    Namespace(Arc<HashMap<String, Val>>),
 }
 
 impl Val {
@@ -233,10 +348,12 @@ impl Val {
             Val::Tensor { .. }        => Err(format!("{ctx}: expected a number, got a tensor")),
             Val::ComplexTensor { .. } => Err(format!("{ctx}: expected a number, got a complex tensor")),
             Val::Cell(..)             => Err(format!("{ctx}: expected a number, got a cell (use get())")),
-            Val::Namespace(..)        => Err(format!("{ctx}: expected a number, got a namespace")),
             Val::Field(..)            => Err(format!("{ctx}: expected a number, got a field")),
         }
     }
+
+    /// A plain positional tuple — the common constructor.
+    pub fn tup(items: Vec<Val>) -> Val { Val::Tuple(Tup::positional(items)) }
 
     /// Construct a new user function with a fresh (empty) bytecode cache and no type hints.
     pub fn make_fn(params: Vec<String>, body: Expr, captured: Arc<HashMap<String, Val>>) -> Self {
@@ -348,7 +465,6 @@ pub fn hint_of_val(v: &Val) -> TypeHint {
         Val::Tuple(_)             => TypeHint::Tuple,
         Val::Cell(_)              => TypeHint::Cell,
         Val::Fn(..) | Val::Builtin(_) => TypeHint::Fn,
-        Val::Namespace(_)         => TypeHint::Any,
         Val::Field(_)             => TypeHint::Any,
     }
 }
@@ -445,6 +561,8 @@ pub fn infer_type(expr: &Expr, params: &HashMap<String, TypeHint>, env: &Env) ->
             _ => fuse_arith(infer_type(l, params, env), infer_type(r, params, env)),
         },
         Expr::Tuple(_)     => Tuple,
+        // A record is a tuple that carries field names; `tuple` accepts both.
+        Expr::Record(_)    => Tuple,
         Expr::Array(elems) => fuse_elems(&elems.iter().collect::<Vec<_>>(), params, env),
         Expr::TensorLit(rows) => {
             let flat: Vec<&Expr> = rows.iter().flatten().collect();
@@ -838,11 +956,6 @@ pub fn fmt_val(v: &Val) -> String {
         }
         Val::Builtin(name) => format!("<builtin {name}>"),
         Val::Cell(c) => format!("cell({})", fmt_val(&c.borrow())),
-        Val::Namespace(map) => {
-            let mut names: Vec<&String> = map.keys().collect();
-            names.sort();
-            format!("namespace{{{}}}", names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "))
-        }
         Val::Field(f) => {
             let kind = match f.variance { Variance::Form => "form", Variance::Vector => "vector field" };
             let dims = f.grid.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("×");
@@ -865,12 +978,18 @@ pub fn fmt_val(v: &Val) -> String {
                 fmt_val(&field_data_as_tensor(f)))
         }
         Val::Tuple(items) => {
-            let parts: Vec<String> = items.iter().map(|item| {
+            let parts: Vec<String> = items.iter().enumerate().map(|(i, item)| {
                 let s = fmt_val(item);
-                match item {
+                let s = match item {
                     Val::Tensor { shape, .. } if shape.len() >= 2 => format!("\n{s}"),
                     Val::ComplexTensor { shape, .. } if shape.len() >= 2 => format!("\n{s}"),
                     _ => s,
+                };
+                // Named fields print as `x = 1`; positional slots of a mixed
+                // record print bare, exactly as they were written.
+                match items.name_of(i) {
+                    Some(n) => format!("{n} = {s}"),
+                    None    => s,
                 }
             }).collect();
             format!("({})", parts.join(", "))
@@ -969,7 +1088,6 @@ fn to_complex(v: Val) -> Result<(f64, f64), String> {
         Val::Tensor { .. }        => Err("expected a number, got a tensor".into()),
         Val::ComplexTensor { .. } => Err("expected a number, got a complex tensor".into()),
         Val::Cell(..)             => Err("expected a number, got a cell (use get())".into()),
-        Val::Namespace(..)        => Err("expected a number, got a namespace".into()),
         Val::Field(..)            => Err("expected a number, got a field".into()),
     }
 }
@@ -1035,9 +1153,10 @@ fn lcm(a: u64, b: u64) -> u64 {
 
 fn broadcast1(v: Val, f: impl Fn(Val) -> Result<Val, String>) -> Result<Val, String> {
     match v {
-        Val::Tuple(items) => Ok(Val::Tuple(
-            items.into_iter().map(f).collect::<Result<_, _>>()?
-        )),
+        Val::Tuple(items) => {
+            let out = items.iter().cloned().map(f).collect::<Result<Vec<_>, _>>()?;
+            Ok(Val::Tuple(items.with_items(out)))
+        }
         Val::Tensor { data, shape } => {
             let new_data: Result<Vec<f64>, _> = data.into_iter()
                 .map(|x| f(Val::Num(x))?.num("broadcast"))
@@ -1081,8 +1200,11 @@ fn map_leaves_f(v: Val, who: &str, f: &impl Fn(f64) -> f64) -> Result<Val, Strin
         Val::Num(x) => Ok(Val::Num(f(x))),
         Val::Tensor { data, shape } =>
             Ok(Val::Tensor { data: TData::new(data.into_iter().map(|x| f(x)).collect()), shape }),
-        Val::Tuple(items) => Ok(Val::Tuple(
-            items.into_iter().map(|it| map_leaves_f(it, who, f)).collect::<Result<_, _>>()?)),
+        Val::Tuple(items) => {
+            let out = items.iter().cloned()
+                .map(|it| map_leaves_f(it, who, f)).collect::<Result<Vec<_>, _>>()?;
+            Ok(Val::Tuple(items.with_items(out)))
+        }
         other => Err(format!("{who}: expected a real scalar/tensor/tuple, got {}", fmt_val(&other))),
     }
 }
@@ -1671,14 +1793,14 @@ pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, St
             let disc = b * b - 4.0 * a * c;
             if disc >= 0.0 {
                 let s = disc.sqrt();
-                Ok(Val::Tuple(vec![
+                Ok(Val::tup(vec![
                     Val::Num((-b + s) / (2.0 * a)),
                     Val::Num((-b - s) / (2.0 * a)),
                 ]))
             } else {
                 let re = -b / (2.0 * a);
                 let im = (-disc).sqrt() / (2.0 * a);
-                Ok(Val::Tuple(vec![
+                Ok(Val::tup(vec![
                     Val::Complex(re,  im),
                     Val::Complex(re, -im),
                 ]))
@@ -1808,7 +1930,7 @@ pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, St
             let av = it.next().unwrap();
             let bv = it.next().unwrap();
             match (av, bv) {
-                (Val::Tuple(mut a), Val::Tuple(b)) => { a.extend(b); Ok(Val::Tuple(a)) }
+                (Val::Tuple(mut a), Val::Tuple(b)) => { a.extend_from(b); Ok(Val::Tuple(a)) }
                 // Numeric path: accept scalars, 1-D tensors, and empty operands (FEAT-E).
                 (a, b) => {
                     fn as_vec1(v: Val) -> Result<Vec<f64>, String> {
@@ -1833,8 +1955,8 @@ pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, St
                     let n = data.len();
                     Ok(Val::Tensor { data, shape: vec![n] })
                 }
-                Val::Tuple(items) => Ok(Val::Tuple(items.into_iter().flat_map(|v| match v {
-                    Val::Tuple(inner) => inner,
+                Val::Tuple(items) => Ok(Val::tup(items.into_iter().flat_map(|v| match v {
+                    Val::Tuple(inner) => inner.into_items(),
                     other             => vec![other],
                 }).collect())),
                 _ => Err("flatten: argument must be a tensor or tuple".into()),
@@ -1869,7 +1991,7 @@ pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, St
                         }
                         out.push(make_complex(acc_re, acc_im));
                     }
-                    Ok(Val::Tuple(out))
+                    Ok(Val::tup(out))
                 }
                 _ => Err(format!("{name}: argument must be a 1-D tensor or tuple")),
             }
@@ -1887,14 +2009,14 @@ pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, St
                     Ok(Val::Tensor { data: TData::new(out), shape: vec![n] })
                 }
                 Val::Tuple(items) => {
-                    if items.len() < 2 { return Ok(Val::Tuple(vec![])); }
+                    if items.len() < 2 { return Ok(Val::tup(vec![])); }
                     let mut out = Vec::with_capacity(items.len() - 1);
                     for w in items.windows(2) {
                         let (ar, ai) = to_complex(w[0].clone())?;
                         let (br, bi) = to_complex(w[1].clone())?;
                         out.push(make_complex(br - ar, bi - ai));
                     }
-                    Ok(Val::Tuple(out))
+                    Ok(Val::tup(out))
                 }
                 _ => Err("diff: argument must be a 1-D tensor or tuple".into()),
             }
@@ -2829,7 +2951,7 @@ pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, St
                     let (r, c) = (shape[0], shape[1]);
                     if r != c { return Err(format!("eig: matrix must be square ({r}×{c})")); }
                     let (lams, evecs) = eig_qr_impl(&data, r);
-                    Ok(Val::Tuple(vec![
+                    Ok(Val::tup(vec![
                         Val::Tensor { data: TData::new(lams), shape: vec![r] },
                         Val::Tensor { data: TData::new(evecs), shape: vec![r, r] },
                     ]))
@@ -2858,7 +2980,7 @@ pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, St
                     let (r, c) = (shape[0], shape[1]);
                     if r != c { return Err(format!("eig_top: matrix must be square ({r}×{c})")); }
                     let (lam, evec) = power_iter(&data, r);
-                    Ok(Val::Tuple(vec![
+                    Ok(Val::tup(vec![
                         Val::Num(lam),
                         Val::Tensor { data: TData::new(evec), shape: vec![r] },
                     ]))
@@ -2874,7 +2996,7 @@ pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, St
                     let (r, c) = (shape[0], shape[1]);
                     if r != c { return Err(format!("eig_bot: matrix must be square ({r}×{c})")); }
                     let (lam, evec) = inv_power_iter(&data, r)?;
-                    Ok(Val::Tuple(vec![
+                    Ok(Val::tup(vec![
                         Val::Num(lam),
                         Val::Tensor { data: TData::new(evec), shape: vec![r] },
                     ]))
@@ -2890,7 +3012,7 @@ pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, St
                     let (m, n) = (shape[0], shape[1]);
                     if m < n { return Err(format!("qr: need m ≥ n (got {m}×{n})")); }
                     let (q, r) = qr_householder(&data, m, n);
-                    Ok(Val::Tuple(vec![
+                    Ok(Val::tup(vec![
                         Val::Tensor { data: TData::new(q), shape: vec![m, m] },
                         Val::Tensor { data: TData::new(r), shape: vec![m, n] },
                     ]))
@@ -2909,7 +3031,7 @@ pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, St
                     let mut d = vec![0.0f64; r * r];
                     for i in 0..r { d[i*r+i] = lams[i]; }
                     let v_inv = inv_nxn(&evecs, r)?;
-                    Ok(Val::Tuple(vec![
+                    Ok(Val::tup(vec![
                         Val::Tensor { data: TData::new(evecs), shape: vec![r, r] },
                         Val::Tensor { data: TData::new(d), shape: vec![r, r] },
                         Val::Tensor { data: TData::new(v_inv), shape: vec![r, r] },
@@ -3352,6 +3474,9 @@ fn cfv(
         Expr::Tuple(es) | Expr::Array(es) => {
             for e in es { cfv(e, inner_params, outer_params, outer_locals, outer_captured, vars, seen); }
         }
+        Expr::Record(fs) => {
+            for f in fs { cfv(&f.value, inner_params, outer_params, outer_locals, outer_captured, vars, seen); }
+        }
         Expr::Index(base, idx) => {
             cfv(base, inner_params, outer_params, outer_locals, outer_captured, vars, seen);
             cfv(idx, inner_params, outer_params, outer_locals, outer_captured, vars, seen);
@@ -3405,6 +3530,7 @@ fn expr_contains_var(expr: &Expr, target: &str) -> bool {
         Expr::Neg(e) | Expr::Not(e) => expr_contains_var(e, target),
         Expr::Apply(f, args) => expr_contains_var(f, target) || args.iter().any(|a| expr_contains_var(a, target)),
         Expr::Tuple(es) | Expr::Array(es) => es.iter().any(|e| expr_contains_var(e, target)),
+        Expr::Record(fs) => fs.iter().any(|f| expr_contains_var(&f.value, target)),
         Expr::Index(b, i)    => expr_contains_var(b, target) || expr_contains_var(i, target),
         Expr::Member(b, _)   => expr_contains_var(b, target),
         Expr::Lambda(ps, _, body) => !ps.iter().any(|p| p.name == target) && expr_contains_var(body, target),
@@ -3630,7 +3756,7 @@ impl<'a> Compiler<'a> {
                 // (so the inner compiler emits LoadCaptured rather than a stale literal).
                 let mut hint = self.captured.clone();
                 for name in &free_vars {
-                    hint.insert(name.clone(), Val::Tuple(vec![]));
+                    hint.insert(name.clone(), Val::tup(vec![]));
                 }
                 let hint_arc = Arc::new(hint);
                 let inner_code = compile_fn(inner_params_slice, inner_body, &hint_arc)
@@ -3793,7 +3919,7 @@ fn run_vm(
                 // mirrors the tree-walk `Expr::Tuple` arm. Use `[…]` for arrays.
                 let start = stack.len() - n;
                 let items: Vec<Val> = stack.drain(start..).collect();
-                stack.push(Val::Tuple(items));
+                stack.push(Val::tup(items));
             }
             Instruction::MakeArray(n) => {
                 let start = stack.len() - n;
@@ -4022,7 +4148,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                 // "several arguments" and had no GPU-block counterpart.)
                 if let Val::Tuple(items) = &args[0] {
                     if items.len() == n {
-                        return apply_fn_direct(params, sig, body, captured, cache, items.clone(), env);
+                        return apply_fn_direct(params, sig, body, captured, cache, items.to_vec(), env);
                     }
                 }
                 // Single scalar/complex arg with 1-param fn → direct apply
@@ -4045,7 +4171,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
             if all_n_seqs {
                 let results: Result<Vec<Val>, _> = args.into_iter().map(|a| {
                     let items: Vec<Val> = match a {
-                        Val::Tuple(v) => v,
+                        Val::Tuple(v) => v.into_items(),
                         _ => unreachable!(),
                     };
                     apply_fn_direct(params, sig, body, captured, cache, items, env)
@@ -4065,7 +4191,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                     let nn = re.len();
                     Ok(maybe_real(re, im, vec![nn]))
                 } else {
-                    Ok(Val::Tuple(res))
+                    Ok(Val::tup(res))
                 };
             }
             // k scalar args, 1-param fn → map → Tensor if all-numeric
@@ -4087,7 +4213,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                     let nn = re.len();
                     Ok(maybe_real(re, im, vec![nn]))
                 } else {
-                    Ok(Val::Tuple(res))
+                    Ok(Val::tup(res))
                 };
             }
             Err(format!("function expects {n} args, got {k}"))
@@ -4099,12 +4225,12 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                         return Ok(scale_fn(s, args.into_iter().next().unwrap()));
                     }
                     Val::Num(n) => return Ok(Val::Num(s * n)),
-                    Val::Tuple(items) => {
-                        let scaled: Vec<Val> = items.iter().map(|v| match v {
+                    Val::Tuple(tup) => {
+                        let scaled: Vec<Val> = tup.iter().map(|v| match v {
                             Val::Num(n) => Val::Num(s * n),
                             _ => v.clone(),
                         }).collect();
-                        return Ok(Val::Tuple(scaled));
+                        return Ok(Val::Tuple(tup.with_items(scaled)));
                     }
                     Val::Tensor { data, shape } => {
                         let scaled = data.iter().map(|&x| s * x).collect();
@@ -4118,7 +4244,6 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                     }
                     Val::Builtin(_) => return Err("cannot scale a builtin function".into()),
                     Val::Cell(..) => return Err("cannot scale a cell (use get/set)".into()),
-                    Val::Namespace(..) => return Err("cannot scale a namespace".into()),
                     Val::Field(f) => {
                         let scaled = f.data.iter().map(|&x| s * x).collect();
                         return Ok(Val::Field(Arc::new(FieldVal { data: TData::new(scaled), ..(**f).clone() })));
@@ -4145,7 +4270,6 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
         Val::Tensor { .. } => Err("tensors are not callable".into()),
         Val::ComplexTensor { .. } => Err("complex tensors are not callable".into()),
         Val::Cell(..) => Err("cells are not callable (use get/set)".into()),
-        Val::Namespace(..) => Err("namespaces are not callable (use ns.member)".into()),
         Val::Field(..) => Err("fields are not callable".into()),
     }
 }
@@ -4191,28 +4315,41 @@ fn scale_fn(s: f64, g: Val) -> Val {
 /// recursing element-wise); a tuple against a leaf broadcasts the leaf into every
 /// element. Recurses through `binop_val`, so nested tuples and tensor/field leaves
 /// all work — e.g. `([1,2], 3) + 10` → `([11,12], 13)`.
+///
+/// The operation preserves structure, so field names ride along:
+/// `(x=1, y=2) + 10` → `(x=11, y=12)`. Two records combine only if their field
+/// names match exactly, in order — mixing `(x, y)` with `(a, b)` is almost
+/// always a mistake, so it is an error rather than a silent positional match.
+/// A record against a plain positional tuple of the same arity is allowed, and
+/// the result keeps the named side's names.
 fn binop_tuple(lv: Val, op: &Op, rv: Val) -> Result<Val, String> {
     match (lv, rv) {
         (Val::Tuple(ls), Val::Tuple(rs)) => {
             if ls.len() != rs.len() {
                 return Err(format!("tuple op tuple: length mismatch ({} vs {})", ls.len(), rs.len()));
             }
+            if ls.is_named() && rs.is_named() && !ls.names_match(&rs) {
+                return Err(format!("tuple op tuple: field mismatch: {} vs {}",
+                                   ls.name_sig(), rs.name_sig()));
+            }
+            // Keep whichever side carries names (they agree if both do).
+            let names = if ls.is_named() { ls.names().cloned() } else { rs.names().cloned() };
             let out: Result<Vec<Val>, _> = ls.into_iter().zip(rs)
                 .map(|(l, r)| binop_val(l, op, r))
                 .collect();
-            Ok(Val::Tuple(out?))
+            Ok(Val::Tuple(Tup { items: out?, names }))
         }
         (Val::Tuple(ls), leaf) => {
-            let out: Result<Vec<Val>, _> = ls.into_iter()
+            let out: Result<Vec<Val>, _> = ls.iter().cloned()
                 .map(|l| binop_val(l, op, leaf.clone()))
                 .collect();
-            Ok(Val::Tuple(out?))
+            Ok(Val::Tuple(ls.with_items(out?)))
         }
         (leaf, Val::Tuple(rs)) => {
-            let out: Result<Vec<Val>, _> = rs.into_iter()
+            let out: Result<Vec<Val>, _> = rs.iter().cloned()
                 .map(|r| binop_val(leaf.clone(), op, r))
                 .collect();
-            Ok(Val::Tuple(out?))
+            Ok(Val::Tuple(rs.with_items(out?)))
         }
         _ => unreachable!(),
     }
@@ -4231,8 +4368,10 @@ pub fn neg_val(v: Val) -> Result<Val, String> {
     match v {
         Val::Num(n)        => Ok(Val::Num(-n)),
         Val::Complex(a, b) => Ok(make_complex(-a, -b)),
-        Val::Tuple(items)  => Ok(Val::Tuple(
-            items.into_iter().map(neg_val).collect::<Result<Vec<_>, _>>()?)),
+        Val::Tuple(items)  => {
+            let out = items.iter().cloned().map(neg_val).collect::<Result<Vec<_>, _>>()?;
+            Ok(Val::Tuple(items.with_items(out)))
+        }
         Val::Tensor { data, shape } => Ok(Val::Tensor {
             data: TData::new(data.into_iter().map(|x| -x).collect()), shape }),
         Val::ComplexTensor { re, im, shape } => Ok(maybe_real(
@@ -4242,7 +4381,7 @@ pub fn neg_val(v: Val) -> Result<Val, String> {
             let neg = f.data.iter().map(|&x| -x).collect();
             Ok(Val::Field(Arc::new(FieldVal { data: TData::new(neg), ..(*f).clone() })))
         }
-        Val::Fn(..) | Val::Builtin(_) | Val::Cell(..) | Val::Namespace(..) =>
+        Val::Fn(..) | Val::Builtin(_) | Val::Cell(..) =>
             Err("unary minus: expected a number".into()),
     }
 }
@@ -4255,7 +4394,8 @@ pub fn binop_val(lv: Val, op: &Op, rv: Val) -> Result<Val, String> {
         // Whole-tuple equality returns a single bool, not a per-element tree.
         if matches!(op, Op::Eq | Op::Ne) {
             if let (Val::Tuple(ls), Val::Tuple(rs)) = (&lv, &rv) {
-                let eq = tuple_scalar_eq(ls, rs);
+                // Records with different field names are never equal.
+                let eq = ls.names_match(rs) && tuple_scalar_eq(ls, rs);
                 return Ok(Val::Num(if matches!(op, Op::Eq) == eq { 1.0 } else { 0.0 }));
             }
         }
@@ -4332,7 +4472,24 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
             // tensor: a tuple is a heterogeneous structure that broadcasts ops over
             // its elements; use `[a, b, c]` for a dense numeric array.
             let vals = exprs.iter().map(|e| eval(e, env)).collect::<Result<Vec<_>, _>>()?;
-            Ok(Val::Tuple(vals))
+            Ok(Val::tup(vals))
+        }
+        Expr::Record(fields) => {
+            // `(x = 1, y = 2)` — a tuple that also carries field names, reached
+            // with `.x` as well as `[0]`. Duplicate names are rejected: `.x`
+            // could only ever return the first, so the second is dead weight.
+            let mut names: Vec<Option<String>> = Vec::with_capacity(fields.len());
+            let mut vals:  Vec<Val>            = Vec::with_capacity(fields.len());
+            for f in fields {
+                if let Some(n) = &f.name {
+                    if names.iter().any(|m| m.as_deref() == Some(n.as_str())) {
+                        return Err(format!("duplicate field '{n}' in record"));
+                    }
+                }
+                names.push(f.name.clone());
+                vals.push(eval(&f.value, env)?);
+            }
+            Ok(Val::Tuple(Tup::named(vals, names)))
         }
         Expr::Array(exprs) => {
             // [a, b, c] — explicit 1-D tensor literal.
@@ -4399,13 +4556,13 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                 // ── ComplexTensor: same indexing, returns Complex or ComplexTensor ──
                 Val::ComplexTensor { re, im, shape } => eval_complex_tensor_index_ast(&re, &im, &shape, idx, env),
                 // ── Tuple: also supports slice expressions ────────────────────
-                Val::Tuple(items) => eval_tuple_index_ast(items, idx, env),
+                Val::Tuple(items) => eval_tuple_index_ast(items.into_items(), idx, env),
                 _ => Err("indexing requires a tuple or tensor".into()),
             }
         }
         Expr::Block(stmts) => {
             let mut child = env.clone();
-            let mut last_val = Val::Tuple(vec![]);
+            let mut last_val = Val::tup(vec![]);
             for stmt in stmts {
                 match stmt {
                     BlockStmt::Def(def) => match def {
@@ -4463,10 +4620,10 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                         let second = eval(&arg_exprs[1], env)?;
                         return match second {
                             Val::Tuple(items) => {
-                                let results: Result<Vec<Val>, _> = items.into_iter()
+                                let results: Result<Vec<Val>, _> = items.iter().cloned()
                                     .map(|item| apply_val(f_val.clone(), vec![item], env))
                                     .collect();
-                                Ok(Val::Tuple(results?))
+                                Ok(Val::Tuple(items.with_items(results?)))
                             }
                             Val::Tensor { data, shape } => {
                                 let mut re_out = Vec::with_capacity(data.len());
@@ -4513,7 +4670,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                                     let keep = apply_val(f_val.clone(), vec![item.clone()], env)?.num("filter")?;
                                     if keep != 0.0 { out.push(item); }
                                 }
-                                Ok(Val::Tuple(out))
+                                Ok(Val::tup(out))
                             }
                             other => Err(format!("filter: second arg must be a tensor or tuple, got {}", fmt_val(&other))),
                         };
@@ -4576,12 +4733,16 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
         Expr::Member(base, field) => {
             let base_val = eval(base, env)?;
             match base_val {
-                Val::Namespace(map) => map.get(field).cloned()
-                    .ok_or_else(|| {
-                        let ns = match base.as_ref() { Expr::Var(n) => n.as_str(), _ => "namespace" };
-                        format!("{ns} has no member '{field}'")
-                    }),
-                other => Err(format!("'.{field}': expected a namespace, got {}", fmt_val(&other))),
+                // Namespaces are named tuples too, so this one arm serves both.
+                Val::Tuple(t) => t.lookup(field).cloned().ok_or_else(|| {
+                    let who = match base.as_ref() { Expr::Var(n) => n.as_str(), _ => "value" };
+                    if t.is_named() {
+                        format!("{who} has no field '{field}' — has {}", t.name_sig())
+                    } else {
+                        format!("{who} is a positional tuple with no field '{field}' (index it: [0])")
+                    }
+                }),
+                other => Err(format!("'.{field}': expected a record, got {}", fmt_val(&other))),
             }
         }
         Expr::Neg(e) => neg_val(eval(e, env)?),
@@ -4590,11 +4751,11 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
             match eval(e, env)? {
                 Val::Num(n) => Ok(Val::Num(lnot(n))),
                 Val::Tuple(items) => {
-                    let r: Result<Vec<Val>, _> = items.into_iter().map(|v| match v {
-                        Val::Num(n) => Ok(Val::Num(lnot(n))),
+                    let r: Result<Vec<Val>, _> = items.iter().map(|v| match v {
+                        Val::Num(n) => Ok(Val::Num(lnot(*n))),
                         other => Err(format!("~: expected a number, got {}", fmt_val(&other))),
                     }).collect();
-                    Ok(Val::Tuple(r?))
+                    Ok(Val::Tuple(items.with_items(r?)))
                 }
                 Val::Tensor { data, shape } => {
                     Ok(Val::Tensor { data: TData::new(data.into_iter().map(lnot).collect()), shape })
@@ -4663,7 +4824,7 @@ fn eval_tuple_index_ast(items: Vec<Val>, idx: &Expr, env: &Env) -> Result<Val, S
                     let i = norm_index(raw, dim, "tuple")?;
                     items.get(i).cloned().ok_or_else(|| format!("index {raw} out of range"))
                 }).collect();
-                Ok(Val::Tuple(result?))
+                Ok(Val::tup(result?))
             }
             other => Err(format!("tuple index must be a number, got {}", fmt_val(&other))),
         }
@@ -5108,7 +5269,7 @@ fn stack_rows(states: Vec<Val>, who: &str) -> Result<Val, String> {
             let fields = columns.into_iter()
                 .map(|c| stack_rows(c, who))
                 .collect::<Result<Vec<_>, _>>()?;
-            return Ok(Val::Tuple(fields));
+            return Ok(Val::tup(fields));
         }
     }
     if matches!(states[0], Val::Num(_) | Val::Complex(..)) {
