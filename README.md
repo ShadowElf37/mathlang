@@ -395,7 +395,7 @@ result = 4
 
 ## Blocks
 
-Blocks `{...}` create a local scope. Statements are separated by `;`; the value of the last expression is the block's result.
+Blocks `{...}` create a local scope. Statements are separated by `;` or by a newline; the value of the last expression is the block's result.
 
 ```
 > {x = 3; y = 4; x^2 + y^2}
@@ -403,6 +403,81 @@ result = 25
 ```
 
 Blocks can appear anywhere an expression is expected — inside function bodies, multi-line files, etc.
+
+---
+
+## Multi-line syntax
+
+A newline is a separator. Which separator it means depends only on the bracket you are inside:
+
+| Inside | A newline means |
+|---|---|
+| `(` … `)` or `[` … `]` | `,` — an item separator |
+| `{` … `}` or top level | `;` — a statement separator |
+
+`;` and `,` are never deprecated; writing them explicitly always works. Matrix **rows** still require an explicit `;`, since a newline inside brackets means comma.
+
+```
+> {x = 3
+   y = 4
+   x^2 + y^2}
+result = 25
+
+> v = [1
+       2
+       3]
+result = [1, 2, 3]
+
+> A = [1, 2;      # ';' still separates matrix rows
+       3, 4]
+```
+
+### Continuation
+
+A newline is ignored — the expression simply continues — whenever the input obviously isn't finished:
+
+- the line ends with something that can't end an expression: a binary operator, `=`, `->`, `,`, or an open bracket
+- the next line starts with something that can't start one: `.member`, or an infix operator like `+` `*` `@`
+- blank lines and comment-only lines
+
+```
+> total = 1 +
+          2 + 3
+result = 6
+
+> f(x) =
+    x^2 + 1
+
+> r = physics
+        .vec
+        .unit([3, 4])
+```
+
+At the REPL an unfinished line gives a `... ` continuation prompt; a blank line abandons it.
+
+### One ambiguity
+
+Inside brackets, a line *starting* with `-` begins a new item, because `-` is also a prefix operator:
+
+```
+> (1
+   -2)
+result = (1, -2)      # a 2-tuple
+
+> (1 -
+   2)
+result = -1           # put the operator at the end of the line to continue
+```
+
+### Comments
+
+`#` comments run to the end of the line — including inside a multi-line bracket:
+
+```
+> [1,   # first
+   2]   # second
+result = [1, 2]
+```
 
 ---
 

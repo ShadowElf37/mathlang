@@ -494,32 +494,33 @@ pub fn import_file(path: &str, display: &str, env: &mut Env, verbose: bool) {
         Err(e) => { eprintln!("include {display}: {e}"); return; }
     };
 
-    // Phase A: split into top-level statements (brace-aware, comments stripped).
+    // Phase A: split into top-level statements. Lines are grouped with the same
+    // `needs_continuation` rule the interactive prompt uses, so a statement may
+    // span lines whenever a bracket is open or the line ends mid-expression.
+    // Lines are joined with '\n' (not ' ') so the lexer's newline handling still
+    // sees the breaks and can turn them into separators. Comments are left in
+    // place — the lexer skips them to end-of-line.
+    //
+    // Only `!` commands and the `private` prefix are genuinely line-oriented,
+    // which is why the split stays here rather than moving into the parser.
     let mut stmts: Vec<String> = vec![];
     let mut buf = String::new();
-    let mut depth = 0i32;
-    for line in src.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
-        // Strip any trailing # comment: brace-count and buffer only the code
-        // portion, so inline comments inside a multi-line { } block don't
-        // swallow the lines joined after them.
-        let code = (if let Some(i) = trimmed.find('#') { &trimmed[..i] } else { trimmed }).trim_end();
-        if code.is_empty() { continue; }
-        // Depth-track all bracket kinds so a statement may span lines whenever a
-        // {…}, (…) or […] is still open (mathlang has no string literals, so no
-        // quoting to escape). A line that closes everything ends the statement.
-        for ch in code.chars() {
-            match ch {
-                '{' | '(' | '[' => depth += 1,
-                '}' | ')' | ']' => depth -= 1,
-                _ => {}
-            }
-        }
-        if buf.is_empty() { buf.push_str(code); } else { buf.push(' '); buf.push_str(code); }
-        if depth <= 0 { stmts.push(std::mem::take(&mut buf)); depth = 0; }
+    let lines: Vec<&str> = src.lines().map(str::trim).collect();
+    for (i, trimmed) in lines.iter().enumerate() {
+        if buf.is_empty() && (trimmed.is_empty() || trimmed.starts_with('#')) { continue; }
+        if buf.is_empty() { buf.push_str(trimmed); } else { buf.push('\n'); buf.push_str(trimmed); }
+        // A `!` command is always exactly one line.
+        if buf.starts_with('!') { stmts.push(std::mem::take(&mut buf)); continue; }
+        if crate::lexer::needs_continuation(&buf) { continue; }
+        // The statement is self-contained, but the next non-blank line may still
+        // continue it (a leading `.member` or infix operator).
+        // (`!` commands are their own statement and never continue a previous
+        // one — a leading `!` would otherwise lex as postfix factorial.)
+        let next = lines[i + 1..].iter().find(|l| !l.is_empty() && !l.starts_with('#'));
+        if next.map_or(false, |l| !l.starts_with('!') && crate::lexer::starts_continuation(l)) { continue; }
+        stmts.push(std::mem::take(&mut buf));
     }
-    if !buf.is_empty() { stmts.push(buf); }
+    if !buf.trim().is_empty() { stmts.push(buf); }
 
     // Phase B: execute, optionally collecting into a namespace.
     let mut n = 0;
@@ -986,6 +987,10 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     "Syntax:    x = 3           f(x) = x^2        f = x -> x^2\n",
                     "           g = n,r -> n+r  f(x:real) = ...   f(x:nat)->real = ...\n",
                     "           {{x=3; y=4; x^2+y^2}}  block (local scope)\n\n",
+                    "Multiline: a newline separates items — ',' inside (…) […], ';' inside {{…}}\n",
+                    "           and at top level. ';' and ',' still work everywhere.\n",
+                    "           A line ending in an operator, '=' or ',' continues, as does a\n",
+                    "           line starting with '.' or an infix operator. '#' ends the line.\n\n",
                     "Operators: + - * / // % ^ **   -> (lambda)   n!   ~ (logical not)\n",
                     "           < > <= >= == !=   & | (logical and/or)   2pi  3sin(x)  (implicit mul)\n",
                     "           lt leq gt geq eq neq  — comparison fns for map/filter\n\n",
@@ -1521,8 +1526,26 @@ pub fn run_repl() {
     loop {
         match rl.readline("> ") {
             Ok(line) => {
-                let line = line.trim().to_string();
+                let mut line = line.trim().to_string();
                 if line.is_empty() { continue; }
+                // Multi-line input: keep reading while the input is unfinished
+                // (an open bracket, or a trailing operator / `=` / `->`). A
+                // blank continuation line abandons the attempt, so a typo like
+                // `1 +` can't wedge the prompt.
+                if !line.starts_with('!') {
+                    let mut abandoned = false;
+                    while crate::lexer::needs_continuation(&line) {
+                        match rl.readline("... ") {
+                            Ok(more) => {
+                                if more.trim().is_empty() { abandoned = true; break; }
+                                line.push('\n');
+                                line.push_str(more.trim_end());
+                            }
+                            Err(_) => { abandoned = true; break; }
+                        }
+                    }
+                    if abandoned { continue; }
+                }
                 let _ = rl.add_history_entry(&line);
                 if let Some(rest) = line.strip_prefix('!') {
                     let cmd = rest.trim_start();

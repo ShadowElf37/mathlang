@@ -1690,6 +1690,57 @@ run_match "elide.3d"        "ones(20,20,20)"       "⋮"
 run "elide.small.1d"        "linspace(0,1,5)"      "[0, 0.25, 0.5, 0.75, 1]"        # unchanged
 run "elide.small.2d"        "[1,2;3,4]"            "⎡ 1  2 ⎤ ⎣ 3  4 ⎦"             # unchanged
 
+# ── Significant newlines ──────────────────────────────────────────────────────
+# A newline is a separator: ',' inside (…)/[…], ';' inside {…} and at top level.
+# It is elided where the input obviously continues (trailing operator, after '=',
+# leading '.', blank lines). ';' and ',' remain valid everywhere.
+section "MULTILINE"
+
+run "ml.block.nosemi"      $'{ a = 1\nb = 2\na + b }'          "3"
+run "ml.tuple"             $'(1\n2\n3)'                        "(1, 2, 3)"
+run "ml.array"             $'[1\n2\n3]'                        "[1, 2, 3]"
+run "ml.array.mixed"       $'[1, 2\n3]'                        "[1, 2, 3]"
+run "ml.matrix.semi"       $'[1, 2;\n3, 4]'                    "⎡ 1  2 ⎤ ⎣ 3  4 ⎦"
+run "ml.matrix.paren"      $'(1, 2;\n3, 4)'                    "⎡ 1  2 ⎤ ⎣ 3  4 ⎦"
+run "ml.toplevel"          $'a = 1\nb = 2\na + b'              "3"
+run "ml.nested"            $'{ f(x) = x^2\n  [f(1)\n   f(2)] }' "[1, 4]"
+
+# Continuation: the newline is elided when the input can't end there.
+run "ml.cont.trailing.op"  $'x = 1 +\n2\nx'                    "3"
+run "ml.cont.after.eq"     $'f(x) =\nx^2\nf(3)'                "9"
+run "ml.cont.after.comma"  $'[1,\n2,\n3]'                      "[1, 2, 3]"
+run "ml.cont.leading.dot"  $'bits\n.xor(3, 5)'                 "6"
+run "ml.cont.leading.op"   $'x = 1\n+ 2\nx'                     "3"
+run "ml.cont.blank.lines"  $'(1\n\n\n2)'                       "(1, 2)"
+run "ml.cont.open.bracket" $'sum(x -> x^2,\n1,\n3)'             "14"
+
+# Comments end the line, not the input (they used to truncate everything after).
+run "ml.comment.trailing"  $'a = 1 # set a\na + 1'             "2"
+run "ml.comment.fullline"  $'a = 1\n# a comment\na + 1'        "2"
+run "ml.comment.inbracket" $'[1, # one\n 2]'                   "[1, 2]"
+
+# Documented ambiguity: inside brackets a leading '-' starts a new item.
+run "ml.minus.is.newitem"  $'(1\n-2)'                          "(1, -2)"
+run "ml.minus.cont"        $'(1 -\n2)'                         "-1"
+
+# Multi-line statements in .math files use the same rule.
+_file_check "ml.file.record"    "v = [1
+2
+3]
+!print sum = {sum(v)}"                                                  "sum = 6"
+_file_check "ml.file.leadingdot" "A = [1
+2]
+r = bits
+  .xor(3, 5)
+!print r = {r}"                                                        "r = 6"
+_file_check "ml.file.comment"   "a = 1 # trailing comment
+b = 2
+!print t = {a + b}"                                                    "t = 3"
+
+# ';'-separated forms are not deprecated — all still valid.
+run "ml.semi.block"        "{ a = 1; b = 2; a + b }"           "3"
+run "ml.semi.toplevel"     "a = 1; b = 2; a + b"               "3"
+
 # ── GPU compute backend (only when built with --features gpu + a GPU present) ──
 section "GPU BACKEND"
 gpu_probe=$("$M" 'GPU { 1 + 1 }' 2>&1)
