@@ -13,7 +13,6 @@
 // data[p*ncomp + c]. Components are indexed by the sorted k-subsets of
 // {0,..,n-1} in lexicographic order (see `subsets`).
 use crate::eval::{Val, TData, FieldVal, BC, Variance, Env, apply_val, binomial, fmt_val};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 pub const NAMES: &[&str] = &[
@@ -21,12 +20,11 @@ pub const NAMES: &[&str] = &[
     "form", "vector", "contract",
 ];
 
-pub fn members() -> HashMap<String, Val> {
-    let mut m: HashMap<String, Val> =
+pub fn members() -> Vec<(String, Val)> {
+    let mut m: Vec<(String, Val)> =
         NAMES.iter().map(|n| (n.to_string(), Val::Builtin(n.to_string()))).collect();
-    // BC sentinels for the `field` constructor (mathlang has no string type).
-    m.insert("periodic".into(), Val::Num(0.0));
-    m.insert("neumann".into(),  Val::Num(1.0));
+    m.push(("periodic".into(), Val::Num(0.0)));
+    m.push(("neumann".into(), Val::Num(1.0)));
     m
 }
 

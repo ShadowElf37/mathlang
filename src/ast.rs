@@ -39,6 +39,15 @@ pub struct Param {
     pub hint: Option<TypeHint>,
 }
 
+/// One item of a record literal. `name: None` is a positional item.
+/// A function field (`mag(v) = norm(v)`) is just a field whose value is a
+/// `Lambda`, so it needs no separate representation.
+#[derive(Debug, Clone)]
+pub struct Field {
+    pub name:  Option<String>,
+    pub value: Expr,
+}
+
 #[derive(Debug, Clone)]
 pub enum Expr {
     Num(f64),
@@ -50,6 +59,12 @@ pub enum Expr {
     // params, optional return hint (only Def::Func supports return hint), body
     Lambda(Vec<Param>, Option<TypeHint>, Box<Expr>),
     Tuple(Vec<Expr>),
+    /// A named tuple / record literal: `(x = 1, y = 2)`.
+    ///
+    /// Only produced when at least one field is named — an all-positional
+    /// paren list still parses to `Tuple`, so nothing that existed before
+    /// routes through this node. Fields may be mixed: `(1, y = 2)`.
+    Record(Vec<Field>),
     TensorLit(Vec<Vec<Expr>>),   // (1,2; 3,4) — rows separated by ;
     Array(Vec<Expr>),            // [a,b,c]    — 1-D tensor literal; all elements must be numeric
     Index(Box<Expr>, Box<Expr>),

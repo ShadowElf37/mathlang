@@ -19,7 +19,7 @@ fn sub(a: Val, b: Val) -> Result<Val, String> { binop_val(a, &Op::Sub, b) }
 
 pub const NAMES: &[&str] = &["rk4", "odeint", "verlet", "tao", "cfl"];
 
-pub fn members() -> std::collections::HashMap<String, Val> {
+pub fn members() -> Vec<(String, Val)> {
     NAMES.iter().map(|n| (n.to_string(), Val::Builtin(n.to_string()))).collect()
 }
 
@@ -210,7 +210,7 @@ fn verlet(vals: Vec<Val>, env: &Env) -> Result<Val, String> {
         }
         q = qn; p = pn;
     }
-    Ok(Val::Tuple(vec![q, p]))
+    Ok(Val::tup(vec![q, p]))
 }
 
 // Apply a 2-arg gradient g(a, b) where `a` follows template `ast` and `b` follows
@@ -305,7 +305,7 @@ fn tao(vals: Vec<Val>, env: &Env) -> Result<Val, String> {
             }
         }
     }
-    Ok(Val::Tuple(vec![from_state(q, &qst), from_state(p, &pst)]))
+    Ok(Val::tup(vec![from_state(q, &qst), from_state(p, &pst)]))
 }
 
 // cfl(V, dx, dt) — Courant number dt*max|V|/dx, a stability diagnostic.

@@ -16,13 +16,11 @@ pub const NAMES: &[&str] = &[
     "grad", "div", "curl", "lap", "poisson", "invlap", "specgrad",
 ];
 
-pub fn members() -> std::collections::HashMap<String, Val> {
-    let mut m: std::collections::HashMap<String, Val> =
+pub fn members() -> Vec<(String, Val)> {
+    let mut m: Vec<(String, Val)> =
         NAMES.iter().map(|n| (n.to_string(), Val::Builtin(n.to_string()))).collect();
-    // Named BC sentinels (mathlang has no string type):
-    //   ops.lap(T, dx, ops.neumann)
-    m.insert("periodic".into(), Val::Num(0.0));
-    m.insert("neumann".into(),  Val::Num(1.0));
+    m.push(("periodic".into(), Val::Num(0.0)));
+    m.push(("neumann".into(), Val::Num(1.0)));
     m
 }
 

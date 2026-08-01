@@ -1509,9 +1509,11 @@ run_ok "ns.flat.inv"     "inv(eye(2))"               ""
 run_ok "ns.flat.fft"     "fft([1,0,0,0])"            ""
 run "ns.flat.mean"       "mean((1,2,3,4))"           "2.5"
 # Namespace as a value, member errors, not callable
-run_match "ns.value.display" "bits"                  "namespace\{"
+# A namespace is a named tuple, so it prints as a record of its members.
+run_match "ns.value.display" "bits"                  "xor = <builtin xor>"
 run_err "ns.member.missing"  "bits.nope"             ""
-run_err "ns.not.callable"    "ops(3)"          ""
+# Calling a tuple indexes it, and that now applies to namespaces too.
+run_match "ns.call.is.index" "bits(2)"           "<builtin xor>"
 run_err "ns.protected"       "bits = 3"              ""
 # Member help + REPL guard
 _repl_check "ns.help.ops" "!help ops"    "grad"
@@ -1740,6 +1742,87 @@ b = 2
 # ';'-separated forms are not deprecated — all still valid.
 run "ml.semi.block"        "{ a = 1; b = 2; a + b }"           "3"
 run "ml.semi.toplevel"     "a = 1; b = 2; a + b"               "3"
+
+# ── Named tuples / records ────────────────────────────────────────────────────
+# `(x = 1, y = 2)` is a tuple that also carries field names: `.x` as well as [0].
+# A namespace is exactly this, so both share one code path.
+section "NAMED TUPLES"
+
+run "rec.basic"            "(x = 3, y = 4)"                         "(x = 3, y = 4)"
+run "rec.field"            "p = (x=3, y=4); p.x"                    "3"
+run "rec.field.2"          "p = (x=3, y=4); p.y"                    "4"
+run "rec.index"            "p = (x=3, y=4); p[0]"                   "3"
+run "rec.index.neg"        "p = (x=3, y=4); p[-1]"                  "4"
+run "rec.len"              "len((x=1,y=2,z=3))"                     "3"
+run "rec.one.field"        "(a = 1)"                                "(a = 1)"
+run "rec.trailing.comma"   "(x = 1,)"                               "(x = 1)"
+run "rec.mixed.pos.first"  "(1, y = 2)"                             "(1, y = 2)"
+run "rec.mixed.named.first" "(x = 1, 2)"                            "(x = 1, 2)"
+run "rec.nested"           "r = (p = (x=1,y=2), q=3); r.p.y"        "2"
+run "rec.nested.chain"     "r = (a = (b = (c = 7))); r.a.b.c"       "7"
+run "rec.tensor.field"     "r = (v = [1,2,3]); sum(r.v)"            "6"
+
+# Function-valued fields — a namespace built inline.
+run "rec.fn.field"         "v = (unit(u) = u/norm(u)); v.unit([3,4])"        "[0.6, 0.8]"
+run "rec.fn.rethint"       "r = (f(x): real = x^2); r.f(3)"                  "9"
+run "rec.fn.zeroarg"       "r = (f() = 7); r.f()"                            "7"
+run "rec.fn.paramhint"     "r = (f(x: real) = x+1); r.f(2)"                  "3"
+run "rec.fn.two"           "v = (a(x) = x+1, b(x) = x*2); v.a(1) + v.b(3)"   "8"
+
+# Ops broadcast over the leaves and the field names ride along.
+run "rec.bcast.scalar"     "(x=1,y=2) + 10"                         "(x = 11, y = 12)"
+run "rec.bcast.rec"        "(x=1,y=2) + (x=3,y=4)"                  "(x = 4, y = 6)"
+run "rec.bcast.mul"        "(x=2,y=3) * 2"                          "(x = 4, y = 6)"
+run "rec.bcast.positional" "(x=1,y=2) + (10, 20)"                   "(x = 11, y = 22)"
+run "rec.neg"              "-(x=1,y=2)"                             "(x = -1, y = -2)"
+run "rec.unary.math"       "sqrt((x=4,y=9))"                        "(x = 2, y = 3)"
+run "rec.map"              "map(x -> x*2, (a=1,b=2))"               "(a = 2, b = 4)"
+run "rec.scale"            "2((x=1,y=2))"                           "(x = 2, y = 4)"
+run "rec.eq.same"          "(x=1,y=2) == (x=1,y=2)"                 "1"
+run "rec.eq.diff.names"    "(x=1,y=2) == (a=1,b=2)"                 "0"
+run "rec.sum.leaves"       "sum((x=1,y=2,z=3))"                     "6"
+# Reshaping operations drop the names (the result isn't the same record).
+run "rec.filter.drops"     "filter(x -> x > 1, (a=1,b=2,c=3))"      "(2, 3)"
+run "rec.slice.drops"      "(a=1,b=2,c=3)[0..1]"                    "(1, 2)"
+
+# Multi-line record — the TOML-ish form, via Part 1's newline rules.
+_file_check "rec.file.multiline" "physics = (
+  g = 9.81
+  c = 3e8
+
+  vec = (
+    unit(v) = v / norm(v)
+  )
+)
+!print u = {physics.vec.unit([3,4])[0]}  g = {physics.g}"          "u = 0.6  g = 9.81"
+
+run_err "rec.err.semicolon"   "(x=1; y=2)"
+run_err "rec.err.range"       "(a = 1..3)"
+run_err "rec.err.kwarg"       "f(x) = x; f(x = 1)"
+run_err "rec.err.bracket"     "[x = 1]"
+run_err "rec.err.name.mismatch" "(x=1,y=2)+(a=3,b=4)"
+run_err "rec.err.arity"       "(x=1)+(x=1,y=2)"
+run_err "rec.err.dup.field"   "(x=1, x=2)"
+run_err "rec.err.no.field"    "p=(x=1); p.z"
+run_err "rec.err.pos.field"   "p=(1,2); p.x"
+
+# Regressions: an all-positional paren list is untouched by any of this.
+run "rec.reg.group"        "(2+3)*2"                                "10"
+run "rec.reg.singleton"    "(5,)"                                   "(5)"
+run "rec.reg.tuple"        "(1,2,3)"                                "(1, 2, 3)"
+run "rec.reg.empty"        "()"                                     "()"
+run "rec.reg.range"        "(1..5)"                                 "[1, 2, 3, 4, 5]"
+run "rec.reg.matrix"       "(1,2;3,4)"                              "⎡ 1  2 ⎤ ⎣ 3  4 ⎦"
+run "rec.reg.lambda"       "f = (n, r) -> n+r; f(2,3)"              "5"
+run "rec.reg.lambda.in"    "f = (n, r -> n+r); f(2,3)"              "5"
+run "rec.reg.lambda.hint"  "f = (n: real, r: int) -> n+r; f(2,3)"   "5"
+run "rec.reg.multilambda"  "h = a, b -> a+b; h(1,2)"                "3"
+
+# A namespace is a named tuple, so tuple operations apply to it.
+run "rec.ns.len"           "len(linalg)"                            "6"
+run "rec.ns.index"         "linalg[0]"                              "<builtin qr>"
+run "rec.ns.member"        "f = bits.xor; f(3,5)"                   "6"
+run "rec.ns.sentinel"      "ops.neumann"                            "1"
 
 # ── GPU compute backend (only when built with --features gpu + a GPU present) ──
 section "GPU BACKEND"

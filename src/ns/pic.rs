@@ -16,18 +16,16 @@
 // periodic wraps node indices; neumann clamps them to the edge. Both stages use
 // the identical (node, weight) stencil, so adjointness holds by construction.
 use crate::eval::{Val, TData, FieldVal, BC, fmt_val};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 pub const NAMES: &[&str] = &["scatter", "gather", "gathergrad"];
 
-pub fn members() -> HashMap<String, Val> {
-    let mut m: HashMap<String, Val> =
+pub fn members() -> Vec<(String, Val)> {
+    let mut m: Vec<(String, Val)> =
         NAMES.iter().map(|n| (n.to_string(), Val::Builtin(n.to_string()))).collect();
-    // kernel sentinels (mathlang has no string type), mirroring forms' BC consts.
-    m.insert("ngp".into(), Val::Num(0.0));
-    m.insert("cic".into(), Val::Num(1.0));
-    m.insert("tsc".into(), Val::Num(2.0));
+    m.push(("ngp".into(), Val::Num(0.0)));
+    m.push(("cic".into(), Val::Num(1.0)));
+    m.push(("tsc".into(), Val::Num(2.0)));
     m
 }
 

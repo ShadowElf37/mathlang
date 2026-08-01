@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::lexer::Lexer;
 use crate::ast::{BlockStmt, Def};
 use crate::parser::Parser;
-use crate::eval::{Val, Env, TData, eval, fmt_val, is_protected, FnSig, builtin_sig, infer_type, hint_of_val};
+use crate::eval::{Val, Tup, Env, TData, eval, fmt_val, is_protected, FnSig, builtin_sig, infer_type, hint_of_val};
 
 // Only flat (unqualified) builtins — names that are in scope without a namespace prefix.
 // Namespace-only functions (special.*, bits.*, stats.*, linalg.*, vec.*, ops.*, solver.*,
@@ -84,8 +84,9 @@ impl MathHelper {
         fns.clear(); vars.clear(); nss.clear();
         for (k, v) in env.vars.iter() {
             match v {
-                Val::Namespace(map) => {
-                    let mut members: Vec<String> = map.keys().cloned().collect();
+                Val::Tuple(t) if t.is_named() => {
+                    let mut members: Vec<String> =
+                        t.field_names().into_iter().map(str::to_string).collect();
                     members.sort();
                     nss.insert(k.clone(), members);
                 }
@@ -447,7 +448,7 @@ fn expand_path(p: &str) -> String {
 // A namespace being built from an `!namespace`-headed included file. Definitions
 // evaluate into a file-local env (seeded from the global env, so builtins and
 // other namespaces resolve); `private`-marked names stay local and only the
-// remaining top-level names are exported as `Val::Namespace` at finalize.
+// remaining top-level names are exported as a named tuple at finalize.
 struct NsBuild {
     name:    String,
     env:     Env,
@@ -474,7 +475,12 @@ impl NsBuild {
             if self.private.contains(k) { continue; }
             if let Some(v) = self.env.vars.get(k) { members.insert(k.clone(), v.clone()); }
         }
-        env.define(self.name.clone(), Val::Namespace(Arc::new(members)));
+        let mut names: Vec<Option<String>> = Vec::with_capacity(members.len());
+        let mut items: Vec<Val> = Vec::with_capacity(members.len());
+        for k in &self.public {
+            if let Some(v) = members.remove(k) { names.push(Some(k.clone())); items.push(v); }
+        }
+        env.define(self.name.clone(), Val::Tuple(Tup::named(items, names)));
     }
 }
 
@@ -995,6 +1001,8 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     "           < > <= >= == !=   & | (logical and/or)   2pi  3sin(x)  (implicit mul)\n",
                     "           lt leq gt geq eq neq  — comparison fns for map/filter\n\n",
                     "Tuples:    (1,2,3)  t[0]  t[-1]  t[1..3]  t[0,2,4]  (x,)  (singleton)\n",
+                    "Records:   (x=1, y=2)  p.x  p[0]  len(p)   named tuples; fields may be\n",
+                    "           functions: (unit(v) = v/norm(v))  — that is all a namespace is\n",
                     "           (0..10) inclusive  range(a,b) exclusive  linspace(a,b,n)\n\n",
                     "Math:      sin cos tan asin acos atan atan2  sinh cosh tanh  sec csc cot\n",
                     "           sqrt cbrt abs sign heaviside  floor ceil round trunc frac\n",
@@ -1029,24 +1037,24 @@ fn bang_command(cmd: &str, env: &mut Env) {
                 if let Some(dot) = topic.find('.') {
                     let ns_name = &topic[..dot];
                     let member  = &topic[dot+1..];
-                    if let Some(Val::Namespace(map)) = env.vars.get(ns_name) {
-                        if map.contains_key(member) {
+                    if let Some(Val::Tuple(t)) = env.vars.get(ns_name) {
+                        if t.lookup(member).is_some() {
                             let sig = builtin_sig(member)
                                 .map(|s| format!("\x1b[33m{s}\x1b[0m"))
                                 .unwrap_or_else(|| format!("{ns_name}.{member}(…)"));
                             println!("\x1b[1m{ns_name}.{member}\x1b[0m  {sig}");
                         } else {
                             eprintln!("'{member}' is not a member of namespace '{ns_name}'");
-                            let mut names: Vec<&String> = map.keys().collect();
+                            let mut names = t.field_names();
                             names.sort();
-                            eprintln!("  members: {}", names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("  "));
+                            eprintln!("  members: {}", names.join("  "));
                         }
                         return;
                     }
                 }
 
                 // Namespace? Show description + member list.
-                if let Some(Val::Namespace(map)) = env.vars.get(topic) {
+                if let Some(Val::Tuple(t)) = env.vars.get(topic).filter(|v| matches!(v, Val::Tuple(t) if t.is_named())) {
                     let user_desc = NS_HELP.with(|h| h.borrow().get(topic).cloned());
                     let desc = user_desc.as_deref().or_else(|| ns_builtin_desc(topic));
                     if let Some(d) = desc {
@@ -1054,9 +1062,9 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     } else {
                         println!("\x1b[1m{topic}\x1b[0m namespace");
                     }
-                    let mut names: Vec<&String> = map.keys().collect();
+                    let mut names = t.field_names();
                     names.sort();
-                    let list = names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("  ");
+                    let list = names.join("  ");
                     println!("Members (access as {topic}.<member>):\n  {list}");
                     return;
                 }
@@ -1082,8 +1090,8 @@ fn bang_command(cmd: &str, env: &mut Env) {
                 } else if let Some(sig) = builtin_sig(topic) {
                     // No help file but we have a signature — find which namespace owns it.
                     let owner = env.vars.iter().find_map(|(ns, v)| {
-                        if let Val::Namespace(map) = v {
-                            if map.contains_key(topic) { Some(ns.clone()) } else { None }
+                        if let Val::Tuple(t) = v {
+                            if t.lookup(topic).is_some() { Some(ns.clone()) } else { None }
                         } else { None }
                     });
                     let prefix = owner.as_deref()
@@ -1093,8 +1101,8 @@ fn bang_command(cmd: &str, env: &mut Env) {
                 } else {
                     // Last resort: check if it's a member of any namespace.
                     let owner = env.vars.iter().find_map(|(ns, v)| {
-                        if let Val::Namespace(map) = v {
-                            if map.contains_key(topic) { Some(ns.clone()) } else { None }
+                        if let Val::Tuple(t) = v {
+                            if t.lookup(topic).is_some() { Some(ns.clone()) } else { None }
                         } else { None }
                     });
                     if let Some(ns) = owner {
