@@ -1108,6 +1108,14 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
+// User-supplied help text for individual library-function members, set via
+// `!helpdef <ns>.<member> <text>` (keyed "ns.member"). Lets a .math library
+// document its functions, surfaced by `!help ns.member`.
+thread_local! {
+    static MEMBER_HELP: std::cell::RefCell<std::collections::HashMap<String,String>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 fn bang_command(cmd: &str, env: &mut Env) {
     let (name, arg) = cmd.split_once(' ').map_or((cmd, ""), |(a, b)| (a, b.trim()));
     match name.trim() {
@@ -1177,6 +1185,10 @@ fn bang_command(cmd: &str, env: &mut Env) {
                                 .map(|s| format!("\x1b[33m{s}\x1b[0m"))
                                 .unwrap_or_else(|| format!("{ns_name}.{member}(…)"));
                             println!("\x1b[1m{ns_name}.{member}\x1b[0m  {sig}");
+                            // User-supplied per-member help (via !helpdef ns.member <text>).
+                            if let Some(doc) = MEMBER_HELP.with(|h| h.borrow().get(topic).cloned()) {
+                                println!("{doc}");
+                            }
                         } else {
                             eprintln!("'{member}' is not a member of namespace '{ns_name}'");
                             let mut names = t.field_names();
@@ -1248,17 +1260,19 @@ fn bang_command(cmd: &str, env: &mut Env) {
             }
         }
         "helpdef" => {
-            // !helpdef <ns> <description text>
-            let (ns, desc) = arg.split_once(' ').map_or((arg, ""), |(a, b)| (a.trim(), b.trim()));
-            if ns.is_empty() {
-                eprintln!("usage: !helpdef <ns> <description>");
+            // !helpdef <ns> <text>         — namespace-level description
+            // !helpdef <ns>.<member> <text> — per-member help (for library functions)
+            let (target, desc) = arg.split_once(' ').map_or((arg, ""), |(a, b)| (a.trim(), b.trim()));
+            if target.is_empty() {
+                eprintln!("usage: !helpdef <ns>[.<member>] <description>");
                 return;
             }
+            // A dotted target sets per-member help; a bare name sets the namespace description.
+            let store = if target.contains('.') { &MEMBER_HELP } else { &NS_HELP };
             if desc.is_empty() {
-                // Clear the description.
-                NS_HELP.with(|h| h.borrow_mut().remove(ns));
+                store.with(|h| h.borrow_mut().remove(target)); // clear
             } else {
-                NS_HELP.with(|h| h.borrow_mut().insert(ns.to_string(), desc.to_string()));
+                store.with(|h| h.borrow_mut().insert(target.to_string(), desc.to_string()));
             }
         }
         "namespace" => {
