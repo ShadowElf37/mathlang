@@ -2452,25 +2452,7 @@ pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, St
                 .collect::<Result<_, _>>()?;
             let ndim = shape.len();
             let total: usize = shape.iter().product();
-            let mut results = Vec::with_capacity(total);
-            let mut indices = vec![0usize; ndim];
-            let mut has_complex = false;
-            for _ in 0..total {
-                let args: Vec<Val> = indices.iter().map(|&i| Val::Num(i as f64)).collect();
-                let v = apply_val(f.clone(), args, env)?;
-                match &v {
-                    Val::Complex(..) => { has_complex = true; }
-                    Val::Num(_) => {}
-                    other => return Err(format!("tensor: f must return a number or complex, got {}", fmt_val(other))),
-                }
-                results.push(v);
-                // Advance row-major (rightmost index fastest)
-                for k in (0..ndim).rev() {
-                    indices[k] += 1;
-                    if indices[k] < shape[k] { break; }
-                    indices[k] = 0;
-                }
-            }
+            let (results, has_complex) = eval_tensor_cells(&f, &shape, ndim, total, env)?;
             if has_complex {
                 let mut re_data = Vec::with_capacity(total);
                 let mut im_data = Vec::with_capacity(total);
@@ -2494,13 +2476,9 @@ pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, St
             let f = it.next().unwrap();
             let r = it.next().unwrap().num("matrix")? as usize;
             let c = it.next().unwrap().num("matrix")? as usize;
-            let mut data = Vec::with_capacity(r * c);
-            for i in 0..r {
-                for j in 0..c {
-                    let v = apply_val(f.clone(), vec![Val::Num(i as f64), Val::Num(j as f64)], env)?;
-                    data.push(v.num("matrix")?);
-                }
-            }
+            let (results, has_complex) = eval_tensor_cells(&f, &[r, c], 2, r * c, env)?;
+            if has_complex { return Err("matrix: f must return real numbers".into()); }
+            let data: Vec<f64> = results.into_iter().map(|v| match v { Val::Num(x) => x, _ => unreachable!() }).collect();
             Ok(Val::Tensor { data: TData::new(data), shape: vec![r, c] })
         }
         "zeros" => {
@@ -4002,6 +3980,22 @@ fn run_vm(
 ) -> Result<Val, String> {
     let mut stack:  Vec<Val> = Vec::with_capacity(16);
     let mut locals: Vec<Val> = Vec::new();
+    run_vm_reuse(code, args, captured, env, &mut stack, &mut locals)
+}
+
+// Same as `run_vm` but reuses caller-owned `stack`/`locals` buffers, so a tight
+// loop (e.g. per-cell `tensor(...)` construction) can run a compiled body many
+// times without re-allocating them each call. Cleared on entry.
+fn run_vm_reuse(
+    code:     &[Instruction],
+    args:     &[Val],
+    captured: &Arc<HashMap<String, Val>>,
+    env:      &Env,
+    stack:    &mut Vec<Val>,
+    locals:   &mut Vec<Val>,
+) -> Result<Val, String> {
+    stack.clear();
+    locals.clear();
     let mut pc = 0usize;
 
     loop {
@@ -4131,6 +4125,60 @@ fn run_vm(
     }
 
     stack.pop().ok_or_else(|| "vm: empty stack".into())
+}
+
+// Evaluate an index lambda over every cell of `shape` (row-major, rightmost index
+// fastest), returning the flat cell values and whether any is complex. Powers the
+// `tensor(...)`/`matrix(...)` builtins.
+//
+// Fast path: if `f` is a compiled, no-type-hint `Val::Fn` of matching arity, run
+// its bytecode per cell against REUSED VM buffers — no per-cell `apply_val` (arg
+// Vec allocation, DepthGuard, coercion, fresh VM stack). This is what makes large
+// `tensor(...)` construction (e.g. an [N,N] grid, or a demag pad/crop) fast; the
+// body already compiled, only the per-cell call overhead was killing it. Otherwise
+// falls back to `apply_val` per cell (unchanged semantics).
+fn eval_tensor_cells(f: &Val, shape: &[usize], ndim: usize, total: usize, env: &Env)
+    -> Result<(Vec<Val>, bool), String>
+{
+    let mut results: Vec<Val> = Vec::with_capacity(total);
+    let mut has_complex = false;
+    let mut indices = vec![0usize; ndim];
+
+    if let Val::Fn(params, body, captured, cache, sig) = f {
+        if params.len() == ndim && sig.params.iter().all(|p| p.is_none()) && sig.ret.is_none() {
+            if let Some(code) = cache.get_or_init(|| compile_fn(params, body, captured)) {
+                let mut stack:  Vec<Val> = Vec::with_capacity(16);
+                let mut locals: Vec<Val> = Vec::new();
+                let mut cell_args: Vec<Val> = vec![Val::Num(0.0); ndim];
+                for _ in 0..total {
+                    for k in 0..ndim { cell_args[k] = Val::Num(indices[k] as f64); }
+                    let v = run_vm_reuse(code, &cell_args, captured, env, &mut stack, &mut locals)?;
+                    match &v {
+                        Val::Complex(..) => has_complex = true,
+                        Val::Num(_) => {}
+                        other => return Err(format!("tensor: f must return a number or complex, got {}", fmt_val(other))),
+                    }
+                    results.push(v);
+                    for k in (0..ndim).rev() { indices[k] += 1; if indices[k] < shape[k] { break; } indices[k] = 0; }
+                }
+                return Ok((results, has_complex));
+            }
+        }
+    }
+
+    // Fallback: apply the callable per cell.
+    for _ in 0..total {
+        let args: Vec<Val> = indices.iter().map(|&i| Val::Num(i as f64)).collect();
+        let v = apply_val(f.clone(), args, env)?;
+        match &v {
+            Val::Complex(..) => has_complex = true,
+            Val::Num(_) => {}
+            other => return Err(format!("tensor: f must return a number or complex, got {}", fmt_val(other))),
+        }
+        results.push(v);
+        for k in (0..ndim).rev() { indices[k] += 1; if indices[k] < shape[k] { break; } indices[k] = 0; }
+    }
+    Ok((results, has_complex))
 }
 
 // ── Value application ─────────────────────────────────────────────────────────
