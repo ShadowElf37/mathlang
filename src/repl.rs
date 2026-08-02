@@ -898,7 +898,7 @@ fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
-fn load_ovf(path: &str) -> Result<Val, String> {
+pub(crate) fn load_ovf(path: &str) -> Result<Val, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let lower: Vec<u8> = bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
     let pos = find_bytes(&lower, b"# begin: data")
@@ -982,6 +982,44 @@ fn load_ovf(path: &str) -> Result<Val, String> {
     if nz > 1 { shape.push(nz); }
     if vd > 1 { shape.push(vd); }
     Ok(Val::Tensor { data: TData::new(out), shape })
+}
+
+// Write a tensor to an OVF 2.0 (Data Text) file that mumax can load — the inverse
+// of load_ovf. `data` is mathlang [nx,ny(,vd)] in x-outer row-major order; the OVF
+// is written x-fastest (mumax's order), components interleaved per cell. vd = 3 for
+// a magnetization, 1 for a scalar mask. dx,dy,dz are the cell sizes.
+pub(crate) fn write_ovf(path: &str, data: &[f64], nx: usize, ny: usize, nz: usize, vd: usize,
+                        dx: f64, dy: f64, dz: f64) -> Result<(), String> {
+    use std::io::Write;
+    if data.len() != nx * ny * nz * vd {
+        return Err(format!("write_ovf: data len {} != {nx}*{ny}*{nz}*{vd}", data.len()));
+    }
+    let (labels, units) = if vd == 3 { ("m_x m_y m_z", "1 1 1") } else { ("value", "1") };
+    let mut s = String::with_capacity(256 + data.len() * 16);
+    s.push_str("# OOMMF OVF 2.0\n# Segment count: 1\n# Begin: Segment\n# Begin: Header\n");
+    s.push_str("# Title: out\n# meshtype: rectangular\n# meshunit: m\n");
+    s.push_str("# xmin: 0\n# ymin: 0\n# zmin: 0\n");
+    s.push_str(&format!("# xmax: {}\n# ymax: {}\n# zmax: {}\n", dx * nx as f64, dy * ny as f64, dz * nz as f64));
+    s.push_str(&format!("# valuedim: {vd}\n# valuelabels: {labels}\n# valueunits: {units}\n"));
+    s.push_str(&format!("# xbase: {}\n# ybase: {}\n# zbase: {}\n", dx / 2.0, dy / 2.0, dz / 2.0));
+    s.push_str(&format!("# xnodes: {nx}\n# ynodes: {ny}\n# znodes: {nz}\n"));
+    s.push_str(&format!("# xstepsize: {dx}\n# ystepsize: {dy}\n# zstepsize: {dz}\n"));
+    s.push_str("# End: Header\n# Begin: Data Text\n");
+    for iz in 0..nz {
+        for iy in 0..ny {
+            for ix in 0..nx {
+                let m = ((ix * ny + iy) * nz + iz) * vd;
+                for c in 0..vd {
+                    if c > 0 { s.push(' '); }
+                    s.push_str(&format!("{:.12e}", data[m + c]));
+                }
+                s.push('\n');
+            }
+        }
+    }
+    s.push_str("# End: Data Text\n# End: Segment\n");
+    let mut f = std::fs::File::create(path).map_err(|e| format!("write_ovf: create {path}: {e}"))?;
+    f.write_all(s.as_bytes()).map_err(|e| format!("write_ovf: {e}"))
 }
 
 // ── HDF5 I/O ──────────────────────────────────────────────────────────────────

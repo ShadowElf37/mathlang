@@ -14,6 +14,7 @@ pub mod bits;
 pub mod stats;
 pub mod linalg;
 pub mod vec;
+pub mod mumax;
 
 use crate::eval::{Val, Tup};
 use std::collections::HashMap;
@@ -22,7 +23,7 @@ use std::collections::HashMap;
 /// eval_builtin routes these to the relevant module's dispatch().
 pub fn is_ns_builtin(name: &str) -> bool {
     ops::NAMES.contains(&name) || solver::NAMES.contains(&name) || forms::NAMES.contains(&name)
-        || pic::NAMES.contains(&name)
+        || pic::NAMES.contains(&name) || mumax::NAMES.contains(&name)
 }
 
 /// Route a namespaced new-function call to its module. Returns None if `name`
@@ -32,6 +33,7 @@ pub fn dispatch(name: &str, vals: Vec<Val>, env: &crate::eval::Env) -> Option<Re
     if solver::NAMES.contains(&name) { return Some(solver::dispatch(name, vals, env)); }
     if forms::NAMES.contains(&name)  { return Some(forms::dispatch(name, vals, env)); }
     if pic::NAMES.contains(&name)    { return Some(pic::dispatch(name, vals, env)); }
+    if mumax::NAMES.contains(&name)  { return Some(mumax::dispatch(name, vals, env)); }
     None
 }
 
@@ -55,4 +57,5 @@ pub fn register_all(vars: &mut HashMap<String, Val>) {
     insert_ns(vars, "stats",     stats::members());
     insert_ns(vars, "linalg",    linalg::members());
     insert_ns(vars, "vec",       vec::members());
+    insert_ns(vars, "mumax",     mumax::members());
 }
