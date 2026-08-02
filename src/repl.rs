@@ -850,6 +850,105 @@ fn load_tensor(path: &str) -> Result<Val, String> {
     }
 }
 
+// ── OVF 2.0 reader (OOMMF/mumax) ────────────────────────────────────────────────
+//
+// Reads an OVF 2.0 file (text, binary 4, or binary 8) into a tensor in mathlang's
+// T[x, y(, z), c] convention. OVF stores points x-fastest then y then z, with
+// `valuedim` components per point; this transposes to x-outer (mathlang row-major)
+// and drops size-1 z / component axes:
+//   znodes=1, valuedim=3  -> [nx, ny, 3]     (feeds !animateField directly)
+//   znodes=1, valuedim=1  -> [nx, ny]        (scalar field, feeds !animate2D)
+//   znodes>1              -> [nx, ny, nz, vd] (slice a z-plane to view)
+fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+fn load_ovf(path: &str) -> Result<Val, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let lower: Vec<u8> = bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
+    let pos = find_bytes(&lower, b"# begin: data")
+        .ok_or("not an OVF file (no '# Begin: Data' section)")?;
+    let line_end = bytes[pos..].iter().position(|&b| b == b'\n').map(|i| pos + i)
+        .ok_or("malformed OVF data marker")?;
+    let mode = String::from_utf8_lossy(&lower[pos..line_end]).to_string(); // "...binary 4" / "text"
+
+    let header = String::from_utf8_lossy(&bytes[..pos]);
+    let hdr_int = |key: &str| -> Option<usize> {
+        for line in header.lines() {
+            let l = line.trim_start_matches('#').trim().to_ascii_lowercase();
+            if let Some(rest) = l.strip_prefix(key) {
+                if let Some(rest) = rest.trim_start().strip_prefix(':') {
+                    if let Ok(v) = rest.trim().parse::<usize>() { return Some(v); }
+                }
+            }
+        }
+        None
+    };
+    let nx = hdr_int("xnodes").ok_or("OVF: missing xnodes")?;
+    let ny = hdr_int("ynodes").ok_or("OVF: missing ynodes")?;
+    let nz = hdr_int("znodes").ok_or("OVF: missing znodes")?;
+    let vd = hdr_int("valuedim").unwrap_or(1);
+    let n = nx * ny * nz * vd;
+    if n == 0 { return Err("OVF: zero-sized mesh".into()); }
+
+    // Read the raw values in OVF (x-fastest) order.
+    let raw: Vec<f64> = if mode.contains("text") {
+        let s = String::from_utf8_lossy(&bytes[line_end + 1..]);
+        let mut v = Vec::with_capacity(n);
+        for line in s.lines() {
+            let lt = line.trim();
+            if lt.starts_with('#') { break; }
+            for tok in lt.split_whitespace() {
+                v.push(tok.parse::<f64>().map_err(|_| format!("OVF text: bad number '{tok}'"))?);
+                if v.len() == n { break; }
+            }
+            if v.len() == n { break; }
+        }
+        v
+    } else if mode.contains("binary 8") {
+        let mut off = line_end + 1;
+        if bytes.len() < off + 8 { return Err("OVF binary 8: truncated".into()); }
+        let ctrl = f64::from_le_bytes(bytes[off..off + 8].try_into().unwrap());
+        if (ctrl - 123456789012345.0).abs() > 1.0 {
+            return Err(format!("OVF binary 8: bad control number {ctrl} (endianness/format mismatch)"));
+        }
+        off += 8;
+        if bytes.len() < off + n * 8 { return Err("OVF binary 8: truncated data".into()); }
+        (0..n).map(|i| f64::from_le_bytes(bytes[off + i * 8..off + i * 8 + 8].try_into().unwrap())).collect()
+    } else if mode.contains("binary 4") {
+        let mut off = line_end + 1;
+        if bytes.len() < off + 4 { return Err("OVF binary 4: truncated".into()); }
+        let ctrl = f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+        if (ctrl - 1234567.0).abs() > 1.0 {
+            return Err(format!("OVF binary 4: bad control number {ctrl} (endianness/format mismatch)"));
+        }
+        off += 4;
+        if bytes.len() < off + n * 4 { return Err("OVF binary 4: truncated data".into()); }
+        (0..n).map(|i| f32::from_le_bytes(bytes[off + i * 4..off + i * 4 + 4].try_into().unwrap()) as f64).collect()
+    } else {
+        return Err(format!("OVF: unsupported data mode '{}'", mode.trim_start_matches("# begin: data").trim()));
+    };
+    if raw.len() != n {
+        return Err(format!("OVF: expected {n} values ({nx}×{ny}×{nz}×{vd}), got {}", raw.len()));
+    }
+
+    // Transpose OVF (x-fastest) -> mathlang [nx,ny,nz,vd] row-major (x-outer).
+    let mut out = vec![0f64; n];
+    for iz in 0..nz {
+        for iy in 0..ny {
+            for ix in 0..nx {
+                let src = ((iz * ny + iy) * nx + ix) * vd;
+                let dst = ((ix * ny + iy) * nz + iz) * vd;
+                out[dst..dst + vd].copy_from_slice(&raw[src..src + vd]);
+            }
+        }
+    }
+    let mut shape = vec![nx, ny];
+    if nz > 1 { shape.push(nz); }
+    if vd > 1 { shape.push(vd); }
+    Ok(Val::Tensor { data: TData::new(out), shape })
+}
+
 // ── HDF5 I/O ──────────────────────────────────────────────────────────────────
 
 #[cfg(feature = "hdf5")]
@@ -1324,6 +1423,21 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     println!("loaded {var} ({desc}) from {fp}");
                 }
                 Err(e) => eprintln!("loadtensor: {e}"),
+            }
+        }
+        "loadovf" => {
+            let mut it = arg.splitn(2, ' ');
+            let (var, fp) = (it.next().unwrap_or("").trim(), it.next().unwrap_or("").trim());
+            if var.is_empty() || fp.is_empty() {
+                eprintln!("usage: !loadovf <var> <file.ovf>"); return;
+            }
+            match load_ovf(&expand_path(fp)) {
+                Ok(val) => {
+                    let shape = match &val { Val::Tensor { shape, .. } => shape.clone(), _ => vec![] };
+                    env.define(var.to_string(), val);
+                    println!("loaded {var} (shape {shape:?}) from {fp}");
+                }
+                Err(e) => eprintln!("loadovf: {e}"),
             }
         }
         "savenpy" => {

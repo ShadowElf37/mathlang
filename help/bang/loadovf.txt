@@ -1,0 +1,19 @@
+[1;4m!loadovf[0m
+
+Load an OVF 2.0 file (OOMMF / mumax3 output) into a tensor variable. Supports
+text, binary-4, and binary-8 data. Values are stored in T[x, y(, z), c] order.
+
+Size-1 axes are dropped, so a 2-D vector field (znodes=1, valuedim=3) loads as
+[nx, ny, 3] — ready to hand straight to [33m!animateField[0m. A 2-D scalar field
+(valuedim=1) loads as [nx, ny] for [33m!animate2D[0m. A 3-D field loads as
+[nx, ny, nz, valuedim] — slice a z-plane to view.
+
+[1mUsage:[0m
+- [33m!loadovf <var> <file.ovf>[0m
+
+[1mExamples:[0m
+[0m> !loadovf m std4_relax.out/std4_relax.ovf
+loaded m (shape [128, 32, 3]) from std4_relax.out/std4_relax.ovf
+> !animateField m
+[0m
+[1mSee also:[0m  animateField  loadtensor  loadnpy
