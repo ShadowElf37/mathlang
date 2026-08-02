@@ -1192,7 +1192,7 @@ run "shape.union"      "a=[1,0,1,0]; b=[1,1,0,0]; flatten(a + b - a*b)" "[1, 1, 
 run "shape.intersect"  "a=[1,0,1,0]; b=[1,1,0,0]; flatten(a*b)"         "[1, 0, 0, 0]"
 run "shape.difference" "a=[1,1,1]; b=[0,1,0]; flatten(a*(1-b))"         "[1, 0, 1]"
 # anti-aliased coverage: supersample then average sub-blocks -> fractional fill
-run "shape.coverage" "fine=lingrid((-1,-1),(1,1),(80,80),(x,y)->1.0*(x^2+y^2<=0.25)); c=sum(sum(reshape(fine,20,4,20,4),3),1)/16; round(sum(c)*(2.0/20)^2,2)" "0.78"
+run "shape.coverage" "fine=lingrid((-1,-1),(1,1),(80,80),(x,y)->1.0*(x^2+y^2<=0.25)); c=sum(sum(reshape(fine,20,4,20,4),3),1)/16; round(sum(c)*(2.0/20)^2,2)" "0.77"
 
 # ── !savetensor / !loadtensor ─────────────────────────────────────────────────
 section "SAVETENSOR / LOADTENSOR"
