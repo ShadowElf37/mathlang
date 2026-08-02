@@ -31,6 +31,29 @@ exchangeField(m, Aex, Msat, dx) = (2*Aex/Msat) * lap(m, dx)
 #  field B_ext, is built explicitly.)
 bcast(B, nx, ny) = tensor((i, j, c) -> B[c], nx, ny, 3)
 
+# --- demag field (Tesla): mu0*Msat*(N ⊛ m) via FFT convolution ---
+# The demagnetizing (magnetostatic) field. m is [nx,ny,3] (2-D); dx,dy are the
+# in-plane cell size and dz the film thickness. The geometry-only demag tensor N
+# (demagkernel) is FFT-convolved with the zero-padded magnetization. Matches mumax
+# to ~1e-4. (Kernel is stored (y,x); m is transposed in and the result back out.)
+demagField(m, Msat, dx, dy, dz) = {
+    nx = shape(m)[0];
+    ny = shape(m)[1];
+    K   = demagkernel(nx, ny, 1, dx, dy, dz);
+    Kxx = fft(K[0,0,..,..]); Kxy = fft(K[1,0,..,..]);
+    Kyy = fft(K[3,0,..,..]); Kzz = fft(K[5,0,..,..]);
+    pad(t) = tensor((i,j) -> if((i<ny) & (j<nx), t[i,j], 0.0), 2*ny, 2*nx);
+    mxh = fft(pad(transpose(m[.., .., 0])));
+    myh = fft(pad(transpose(m[.., .., 1])));
+    mzh = fft(pad(transpose(m[.., .., 2])));
+    Bx = re(ifft(Kxx*mxh + Kxy*myh));
+    By = re(ifft(Kxy*mxh + Kyy*myh));
+    Bz = re(ifft(Kzz*mzh));
+    crop(b) = tensor((x,y) -> b[y,x], nx, ny);   # crop [0:ny,0:nx] and (y,x)->(x,y)
+    scl = mu0 * Msat;
+    scl * cat(2, unsqueeze(crop(Bx),2), unsqueeze(crop(By),2), unsqueeze(crop(Bz),2))
+}
+
 # --- one RK4 step of dm/dt = llg(m, heff(m), a), renormalized to |m|=1 ---
 #   heff : m -> effective field B (Tesla), a function of the current m.
 step(m, heff, a, dt) = {

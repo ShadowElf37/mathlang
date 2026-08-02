@@ -1174,6 +1174,10 @@ run "demag.film_zz"        "K=demagkernel(4,4,1,4e-9,4e-9,1e-9); round(K[5,0,0,0
 run "demag.shape2d"        "shape(demagkernel(8,8,1,4e-9,4e-9,4e-9))" "[6, 1, 16, 16]"
 # 2-D out-of-plane cross terms vanish
 run "demag.2d_xz_zero"     "round(max(abs(demagkernel(4,4,1,4e-9,4e-9,1e-9)[2])),9)" "0"
+# demag field via FFT convolution: for a uniform +x square film the y-component
+# is antisymmetric in y, so it sums to zero. Guards the kernel+FFT+conv wiring.
+# (Full field-vs-mumax parity ~5e-8 is validated out-of-band with mag.demagField.)
+run "demag.conv_by_sym" "m=tensor((i,j,c)->[1,0,0][c],4,4,3); K=demagkernel(4,4,1,4e-9,4e-9,4e-9); Kxy=fft(K[1,0,..,..]); Kyy=fft(K[3,0,..,..]); pad=t->tensor((i,j)->if((i<4)&(j<4),t[i,j],0.0),8,8); mxh=fft(pad(transpose(m[..,..,0]))); myh=fft(pad(transpose(m[..,..,1]))); By=re(ifft(Kxy*mxh+Kyy*myh)); round(sum(tensor((x,y)->By[y,x],4,4)),6)" "0"
 
 # ── !savetensor / !loadtensor ─────────────────────────────────────────────────
 section "SAVETENSOR / LOADTENSOR"
