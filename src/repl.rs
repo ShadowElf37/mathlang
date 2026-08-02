@@ -445,6 +445,41 @@ fn expand_path(p: &str) -> String {
     }
 }
 
+// Directories searched for bundled libraries when a source is not found at the
+// given path — so `!include mag` (or `m -f mag`) resolves libraries/mag.math.
+fn library_dirs() -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Ok(dir) = std::env::var("MATHLANG_LIB") { dirs.push(PathBuf::from(dir)); }
+    dirs.push(PathBuf::from("libraries")); // CWD-relative (repo root)
+    if let Ok(exe) = std::env::current_exe() {
+        // <repo>/target/{debug,release}/m  →  <repo>/libraries
+        if let Some(root) = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
+            dirs.push(root.join("libraries"));
+        }
+        // installed layout: libraries/ next to the binary
+        if let Some(d) = exe.parent() { dirs.push(d.join("libraries")); }
+    }
+    dirs
+}
+
+// Resolve a source path for !include / -f: try it as given (and with a .math
+// suffix), then look it up by basename in the library directories.
+pub fn resolve_source(arg: &str) -> Option<String> {
+    use std::path::Path;
+    let p = expand_path(arg);
+    if Path::new(&p).exists() { return Some(p); }
+    let pm = format!("{p}.math");
+    if Path::new(&pm).exists() { return Some(pm); }
+    let base = Path::new(&p).file_name()?.to_str()?.to_string();
+    for dir in library_dirs() {
+        for cand in [dir.join(&base), dir.join(format!("{base}.math"))] {
+            if cand.exists() { return Some(cand.to_string_lossy().into_owned()); }
+        }
+    }
+    None
+}
+
 // A namespace being built from an `!namespace`-headed included file. Definitions
 // evaluate into a file-local env (seeded from the global env, so builtins and
 // other namespaces resolve); `private`-marked names stay local and only the
@@ -1231,17 +1266,9 @@ fn bang_command(cmd: &str, env: &mut Env) {
         }
         "include" | "import" => {
             if arg.is_empty() { eprintln!("usage: !include <file>"); return; }
-            let path = expand_path(arg);
-            if std::path::Path::new(&path).exists() {
-                import_file(&path, arg, env, true);
-            } else {
-                let math_path = format!("{path}.math");
-                if std::path::Path::new(&math_path).exists() {
-                    import_file(&math_path, &math_path, env, true);
-                } else {
-                    import_file(&path, arg, env, true);
-                }
-            }
+            // Resolve against CWD and the library dirs (so `!include mag` works).
+            let path = resolve_source(arg).unwrap_or_else(|| expand_path(arg));
+            import_file(&path, arg, env, true);
         }
         "graph" => {
             if arg.is_empty() { eprintln!("usage: !graph f [, a, b]"); return; }

@@ -42,7 +42,8 @@ fn run() -> i32 {
         }
         let path = &args[1];
         let mut env = eval::Env::new();
-        repl::import_file(path, path, &mut env, false);
+        let resolved = repl::resolve_source(path).unwrap_or_else(|| path.clone());
+        repl::import_file(&resolved, path, &mut env, false);
         if args.len() >= 3 {
             let expr = args[2..].join(" ");
             let ok = repl::eval_line(&expr, &mut env, false);
