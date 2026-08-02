@@ -1183,6 +1183,15 @@ run "exch.separable_lap" "m=tensor((i,j,c)->[1,0,0][c],4,4,3); round(max(abs((sh
 # the mag.world construction pattern: enrich a config record (unpack cell -> dx)
 run "world.record_enrich" "f(c) = (nx=c.nx, dx=c.cell[0], dy=c.cell[1]); w = f((nx=8, cell=(0.5,0.7,0.9))); (w.nx, w.dx, w.dy)" "(8, 0.5, 0.7)"
 
+# ── shape masks (geometry) ────────────────────────────────────────────────────
+section "SHAPE MASKS"
+# rasterize a disk predicate via lingrid; sum*cell_area ~ pi*r^2
+run "shape.disk_area" "round(sum(lingrid((-1,-1),(1,1),(200,200),(x,y)->1.0*(x^2+y^2<=0.25)))*(2.0/200)^2, 2)" "0.78"
+# mask combinators as 0/1 arithmetic (dimension-agnostic)
+run "shape.union"      "a=[1,0,1,0]; b=[1,1,0,0]; flatten(a + b - a*b)" "[1, 1, 1, 0]"
+run "shape.intersect"  "a=[1,0,1,0]; b=[1,1,0,0]; flatten(a*b)"         "[1, 0, 0, 0]"
+run "shape.difference" "a=[1,1,1]; b=[0,1,0]; flatten(a*(1-b))"         "[1, 0, 1]"
+
 # ── !savetensor / !loadtensor ─────────────────────────────────────────────────
 section "SAVETENSOR / LOADTENSOR"
 _TMLT=$(mktemp /tmp/mlt_test_XXXXXX.mlt)

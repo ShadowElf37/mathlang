@@ -1,0 +1,63 @@
+# shape — composable geometric masks for 1-D / 2-D / 3-D grids.
+#
+# A *shape* is a predicate on coordinates returning 1.0 inside and 0.0 outside.
+# Place/orient shapes with the coordinate transforms, then rasterize onto a grid
+# with `mask` (a thin wrapper over lingrid) to get a 0/1 mask tensor. Combine
+# masks with union/intersect/invert (plain elementwise arithmetic, so they work
+# in any dimension).
+#
+#   !include shape
+#   disk   = shape.disk(0.5)
+#   ring   = shape.difference(shape.disk(1), shape.disk(0.5))
+#   m      = shape.mask(disk, (-1,-1), (1,1), (128,128))   # 128x128 0/1 tensor
+#   cross  = shape.union(shape.mask(shape.rect(2,0.5), lo,hi,n),
+#                        shape.mask(shape.rect(0.5,2), lo,hi,n))
+!namespace shape
+
+# ── primitive shapes (predicates; centered at the origin) ─────────────────────
+# 1-D
+!helpdef shape.interval 1-D interval [a,b]: interval(a,b) is a predicate x -> inside.
+interval(a, b)     = x -> 1.0*((x >= a) & (x <= b))
+# 2-D
+!helpdef shape.disk 2-D disk of radius r (predicate (x,y) -> inside), centered at origin.
+disk(r)            = (x, y) -> 1.0*(x^2 + y^2 <= r^2)
+!helpdef shape.ellipse 2-D ellipse with semi-axes ax, ay (predicate (x,y) -> inside).
+ellipse(ax, ay)    = (x, y) -> 1.0*((x/ax)^2 + (y/ay)^2 <= 1)
+!helpdef shape.rect 2-D axis-aligned rectangle of full width w, height h, centered at origin.
+rect(w, h)         = (x, y) -> 1.0*((abs(x) <= w/2) & (abs(y) <= h/2))
+!helpdef shape.square 2-D square of side s (centered).
+square(s)          = rect(s, s)
+!helpdef shape.annulus 2-D annulus (ring) with inner radius ri, outer radius ro.
+annulus(ri, ro)    = (x, y) -> 1.0*((x^2 + y^2 >= ri^2) & (x^2 + y^2 <= ro^2))
+# 3-D
+!helpdef shape.ball 3-D ball of radius r (predicate (x,y,z) -> inside).
+ball(r)            = (x, y, z) -> 1.0*(x^2 + y^2 + z^2 <= r^2)
+!helpdef shape.ellipsoid 3-D ellipsoid with semi-axes a, b, c.
+ellipsoid(a, b, c) = (x, y, z) -> 1.0*((x/a)^2 + (y/b)^2 + (z/c)^2 <= 1)
+!helpdef shape.box 3-D axis-aligned box of full dimensions w, h, d (centered).
+box(w, h, d)       = (x, y, z) -> 1.0*((abs(x)<=w/2) & (abs(y)<=h/2) & (abs(z)<=d/2))
+!helpdef shape.cylinder 3-D cylinder radius r (in x-y), height h (along z), centered.
+cylinder(r, h)     = (x, y, z) -> 1.0*((x^2 + y^2 <= r^2) & (abs(z) <= h/2))
+
+# ── coordinate transforms (2-D: place/orient a shape) ─────────────────────────
+!helpdef shape.translate translate a 2-D shape by (dx, dy). translate(s, dx, dy) -> shape.
+translate(s, dx, dy) = (x, y) -> s(x - dx, y - dy)
+!helpdef shape.rotate rotate a 2-D shape by angle th (radians, counter-clockwise). rotate(s, th) -> shape.
+rotate(s, th)        = (x, y) -> s(x*cos(th) + y*sin(th), -x*sin(th) + y*cos(th))
+!helpdef shape.scale scale a 2-D shape by (sx, sy). scale(s, sx, sy) -> shape.
+scale(s, sx, sy)     = (x, y) -> s(x/sx, y/sy)
+
+# ── rasterize a shape predicate onto a grid -> 0/1 mask tensor ────────────────
+# lo, hi, counts are scalars (1-D) or same-length tuples per axis (n-D), as in lingrid.
+!helpdef shape.mask rasterize a shape predicate onto a grid -> a 0/1 mask tensor. Args (s, lo, hi, counts); lo/hi/counts scalars (1-D) or tuples per axis (n-D), like lingrid.
+mask(s, lo, hi, counts) = lingrid(lo, hi, counts, s)
+
+# ── combine masks (elementwise; 0/1 arithmetic, any dimension) ────────────────
+!helpdef shape.union union of two masks (a OR b): a + b - a*b.
+union(a, b)      = a + b - a*b
+!helpdef shape.intersect intersection of two masks (a AND b): a*b.
+intersect(a, b)  = a * b
+!helpdef shape.invert complement of a mask: 1 - a.
+invert(a)        = 1 - a
+!helpdef shape.difference set difference a minus b: a*(1 - b).
+difference(a, b) = a * (1 - b)
