@@ -577,6 +577,7 @@ pub fn infer_type(expr: &Expr, params: &HashMap<String, TypeHint>, env: &Env) ->
             _             => Any,
         },
         Expr::Slice(..)  => Any,
+        Expr::Splat(..)  => Any,
         Expr::Member(..) => Any,
         Expr::GpuBlock(body) => infer_type(body, params, env),
         Expr::Lambda(..) => Fn,
@@ -3617,6 +3618,7 @@ fn cfv(
             if let Some(e) = hi { cfv(e, inner_params, outer_params, outer_locals, outer_captured, vars, seen); }
         }
         Expr::GpuBlock(body) => cfv(body, inner_params, outer_params, outer_locals, outer_captured, vars, seen),
+        Expr::Splat(inner)   => cfv(inner, inner_params, outer_params, outer_locals, outer_captured, vars, seen),
     }
 }
 
@@ -3655,6 +3657,7 @@ fn expr_contains_var(expr: &Expr, target: &str) -> bool {
         Expr::Slice(lo, hi)  => lo.as_ref().map_or(false, |e| expr_contains_var(e, target))
                              || hi.as_ref().map_or(false, |e| expr_contains_var(e, target)),
         Expr::GpuBlock(body) => expr_contains_var(body, target),
+        Expr::Splat(inner)   => expr_contains_var(inner, target),
     }
 }
 
@@ -4625,6 +4628,73 @@ fn scalar_binop(lv: Val, op: &Op, rv: Val) -> Result<Val, String> {
 
 // ── Evaluator ─────────────────────────────────────────────────────────────────
 
+/// Expand one `..x` item into the slots it contributes to an enclosing list.
+/// A tuple/record contributes its items together with their field names; a 1-D
+/// array contributes its elements positionally. Anything else has no slots to
+/// splice, so it is an error rather than a silent one-element splice.
+fn splat_slots(v: Val) -> Result<Vec<(Option<String>, Val)>, String> {
+    match v {
+        Val::Tuple(t) => {
+            let names: Vec<Option<String>> =
+                (0..t.len()).map(|i| t.name_of(i).map(str::to_string)).collect();
+            Ok(names.into_iter().zip(t.into_items()).collect())
+        }
+        Val::Tensor { data, shape } if shape.len() == 1 =>
+            Ok(data.iter().map(|x| (None, Val::Num(*x))).collect()),
+        Val::ComplexTensor { re, im, shape } if shape.len() == 1 =>
+            Ok(re.iter().zip(im.iter()).map(|(a, b)| (None, Val::Complex(*a, *b))).collect()),
+        other => Err(format!(
+            "'..' needs a tuple or a 1-D array to splice, got {}", fmt_val(&other)
+        )),
+    }
+}
+
+/// Push one slot into a record under construction, applying the override rule:
+/// a repeated field name replaces the earlier slot **in place** (so `(..w, x = 1)`
+/// keeps w's field order) when either side came from a `..` splat. Two names
+/// written out literally are still the pre-existing duplicate-field error.
+fn push_slot(
+    names:   &mut Vec<Option<String>>,
+    vals:    &mut Vec<Val>,
+    spliced: &mut Vec<bool>,
+    name:    Option<String>,
+    val:     Val,
+    from_splat: bool,
+) -> Result<(), String> {
+    if let Some(n) = &name {
+        if let Some(i) = names.iter().position(|m| m.as_deref() == Some(n.as_str())) {
+            if !from_splat && !spliced[i] {
+                return Err(format!("duplicate field '{n}' in record"));
+            }
+            vals[i]    = val;
+            spliced[i] = from_splat;
+            return Ok(());
+        }
+    }
+    names.push(name);
+    vals.push(val);
+    spliced.push(from_splat);
+    Ok(())
+}
+
+/// Evaluate a list of expressions, splicing any `..x` items positionally.
+/// Field names carried by a splatted record are dropped here — the only
+/// name-preserving list is a record literal.
+fn eval_spliced(exprs: &[Expr], env: &Env) -> Result<Vec<Val>, String> {
+    if !exprs.iter().any(|e| matches!(e, Expr::Splat(_))) {
+        return exprs.iter().map(|e| eval(e, env)).collect();
+    }
+    let mut out = Vec::with_capacity(exprs.len());
+    for e in exprs {
+        match e {
+            Expr::Splat(inner) =>
+                out.extend(splat_slots(eval(inner, env)?)?.into_iter().map(|(_, v)| v)),
+            _ => out.push(eval(e, env)?),
+        }
+    }
+    Ok(out)
+}
+
 pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
     match expr {
         Expr::Num(n)      => Ok(Val::Num(*n)),
@@ -4641,23 +4711,25 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
             // `(a, b, c)` is always a tuple (a tree node). No autopromotion to a
             // tensor: a tuple is a heterogeneous structure that broadcasts ops over
             // its elements; use `[a, b, c]` for a dense numeric array.
-            let vals = exprs.iter().map(|e| eval(e, env)).collect::<Result<Vec<_>, _>>()?;
-            Ok(Val::tup(vals))
+            Ok(Val::tup(eval_spliced(exprs, env)?))
         }
         Expr::Record(fields) => {
             // `(x = 1, y = 2)` — a tuple that also carries field names, reached
             // with `.x` as well as `[0]`. Duplicate names are rejected: `.x`
             // could only ever return the first, so the second is dead weight.
-            let mut names: Vec<Option<String>> = Vec::with_capacity(fields.len());
-            let mut vals:  Vec<Val>            = Vec::with_capacity(fields.len());
+            // A `..x` splat contributes its slots here, names and all.
+            let mut names:   Vec<Option<String>> = Vec::with_capacity(fields.len());
+            let mut vals:    Vec<Val>            = Vec::with_capacity(fields.len());
+            let mut spliced: Vec<bool>           = Vec::with_capacity(fields.len());
             for f in fields {
-                if let Some(n) = &f.name {
-                    if names.iter().any(|m| m.as_deref() == Some(n.as_str())) {
-                        return Err(format!("duplicate field '{n}' in record"));
+                if let Expr::Splat(inner) = &f.value {
+                    for (n, v) in splat_slots(eval(inner, env)?)? {
+                        push_slot(&mut names, &mut vals, &mut spliced, n, v, true)?;
                     }
+                } else {
+                    let v = eval(&f.value, env)?;
+                    push_slot(&mut names, &mut vals, &mut spliced, f.name.clone(), v, false)?;
                 }
-                names.push(f.name.clone());
-                vals.push(eval(&f.value, env)?);
             }
             Ok(Val::Tuple(Tup::named(vals, names)))
         }
@@ -4666,15 +4738,18 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
             // All elements must evaluate to numbers; non-numeric values are an error.
             // Unlike (a,b,c) which auto-promotes, [] always means tensor.
             // [x]  → length-1 tensor;  [] → empty tensor.
-            if exprs.is_empty() {
+            // `..x` splices another array's / tuple's elements in first, so the
+            // element count is only known after expansion.
+            let items = eval_spliced(exprs, env)?;
+            if items.is_empty() {
                 return Ok(Val::Tensor { data: TData::new(vec![]), shape: vec![0] });
             }
-            let mut data = Vec::with_capacity(exprs.len());
+            let mut data = Vec::with_capacity(items.len());
             let mut re_data: Vec<f64> = Vec::new();
             let mut im_data: Vec<f64> = Vec::new();
             let mut has_complex = false;
-            for expr in exprs {
-                match eval(expr, env)? {
+            for item in items {
+                match item {
                     Val::Num(x) => {
                         data.push(x);
                         re_data.push(x);
@@ -4717,6 +4792,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
             Ok(Val::Tensor { data: TData::new(data), shape: vec![r, c] })
         }
         Expr::Slice(..) => Err("slice expression can only appear inside T[…]".into()),
+        Expr::Splat(..) => Err("'..' can only splice into (…), […], or a call's arguments".into()),
 
         Expr::Index(expr, idx) => {
             let v = eval(expr, env)?;
@@ -4876,8 +4952,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                 }
             }
             let f_val = eval(f_expr, env)?;
-            let args: Result<Vec<Val>, _> = arg_exprs.iter().map(|a| eval(a, env)).collect();
-            apply_val(f_val, args?, env)
+            apply_val(f_val, eval_spliced(arg_exprs, env)?, env)
         }
         Expr::Range(start, end) => {
             let a = eval(start, env)?.num("range")? as i64;

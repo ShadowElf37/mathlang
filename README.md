@@ -417,6 +417,68 @@ Notes:
   so there is no way to obtain a field name as a *value*, and no dynamic key
   lookup. Use `!type` or just print the record to see them.
 
+### Splat `..x`
+
+`..x` splices a value's slots into the list around it. A tuple or record
+contributes its items **with their field names**; an array contributes its
+elements. It works in paren lists, array literals, and call arguments — one
+operator for what other languages split into two.
+
+The case it exists for is varying one field of a config record without respelling
+the rest:
+
+```
+> w = (nx = 128, ny = 32, alpha = 0.02)
+> (..w, alpha = 0.05)
+result = (nx = 128, ny = 32, alpha = 0.05)
+```
+
+A later slot with the same name **overrides** an earlier one whenever either side
+came from a splat, replacing it in place so the field order is preserved. (Two
+names both written out literally are still a `duplicate field` error.) That one
+rule gives override, merge, and defaults:
+
+```
+> a = (x = 1, y = 2); b = (y = 9, z = 3)
+> (..a, ..b)                       # merge; b wins where they overlap
+result = (x = 1, y = 9, z = 3)
+> defaults = (nx = 8, alpha = 0.02); cfg = (nx = 64)
+> (..defaults, ..cfg)              # cfg overrides the defaults
+result = (nx = 64, alpha = 0.02)
+```
+
+Positional containers splice too:
+
+```
+> t = (1, 2, 3)
+> (..t, 4)                         # append to a tuple
+result = (1, 2, 3, 4)
+> u = [1, 2]; v = [3, 4]
+> [..u, ..v, 5]                    # concatenate arrays
+result = [1, 2, 3, 4, 5]
+> f(a, b, c) = a + b + c
+> f(..t)                           # splice into call arguments
+result = 6
+> f(1, ..[2, 3])                   # mixed with ordinary arguments
+result = 6
+```
+
+**`..` inside `T[…]` still means a slice.** The two never collide, because a
+splat is only legal as a *list item* and a slice only inside index brackets — but
+the two spellings look alike, so it is worth seeing side by side:
+
+```
+> T = [10, 20, 30, 40]
+> T[..2]                           # slice: from the start to index 2
+result = [10, 20, 30]
+> [..T]                            # splat: T's elements into a new array
+result = [10, 20, 30, 40]
+```
+
+Splicing anything without slots — a number, a function, a 2-D tensor — is an
+error rather than a silent one-element splice. `..` is also rejected in matrix
+literals and in a `GPU { … }` block.
+
 ### Tree broadcasting
 
 Arithmetic and unary math **broadcast over a tuple's leaves** (and recurse into

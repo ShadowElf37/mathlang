@@ -186,6 +186,10 @@ fn hoist_gets(
             })).collect::<Result<Vec<_>, String>>()?;
             Expr::Block(nstmts)
         }
+        // `..x` splices host-side slots (and, for a record, field names) into a
+        // list — neither of which this backend has any representation for.
+        Expr::Splat(_) =>
+            return Err("GPU: '..' splat is not supported inside a GPU block".into()),
         leaf @ (Expr::Num(_) | Expr::ImagLit(_) | Expr::Var(_)) => leaf.clone(),
     })
 }

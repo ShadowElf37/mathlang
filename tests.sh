@@ -1886,6 +1886,53 @@ run "rec.ns.index"         "linalg[0]"                              "<builtin qr
 run "rec.ns.member"        "f = bits.xor; f(3,5)"                   "6"
 run "rec.ns.sentinel"      "ops.neumann"                            "1"
 
+# ── Splat `..x` ───────────────────────────────────────────────────────────────
+section "SPLAT"
+
+# The headline case: vary one field of a config record.
+run "splat.override"       "w=(nx=128,ny=32,alpha=0.02); (..w, alpha=0.05)"  "(nx = 128, ny = 32, alpha = 0.05)"
+run "splat.override.first" "w=(nx=128,ny=32); (..w, nx=1)"          "(nx = 1, ny = 32)"
+run "splat.add.field"      "w=(nx=1); (..w, ny=2)"                  "(nx = 1, ny = 2)"
+run "splat.merge"          "a=(x=1,y=2); b=(y=9,z=3); (..a, ..b)"   "(x = 1, y = 9, z = 3)"
+run "splat.defaults"       "d=(nx=8,alpha=0.02); c=(nx=64); (..d, ..c)" "(nx = 64, alpha = 0.02)"
+run "splat.explicit.first" "a=(x=9); (x=1, ..a)"                    "(x = 9)"
+run "splat.alone"          "a=(x=1,y=2); (..a)"                     "(x = 1, y = 2)"
+run "splat.nested"         "r=(p=(x=1,y=2), q=3); (..r, q=9).q"     "9"
+
+# Positional tuples and arrays splice too — the same operator.
+run "splat.tuple.append"   "t=(1,2,3); (..t, 4)"                    "(1, 2, 3, 4)"
+run "splat.tuple.prepend"  "t=(2,3); (1, ..t)"                      "(1, 2, 3)"
+run "splat.tuple.merge"    "a=(1,2); b=(3,4); (..a, ..b)"           "(1, 2, 3, 4)"
+run "splat.array.concat"   "u=[1,2]; v=[3,4]; [..u, ..v, 5]"        "[1, 2, 3, 4, 5]"
+run "splat.array.empty"    "[..[]]"                                 "[]"
+run "splat.array.of.tuple" "t=(1,2); [..t, 3]"                      "[1, 2, 3]"
+run "splat.array.complex"  "z=[2+3i,2]; [..z]"                      "[2 + 3i, 2]"
+run "splat.tensor.into.rec" "(..[1,2], z=3)"                        "(1, 2, z = 3)"
+
+# Call arguments: positional slots splice in order.
+run "splat.call"           "f(a,b,c)=a+b+c; t=(1,2,3); f(..t)"      "6"
+run "splat.call.mixed"     "f(a,b,c)=a*100+b*10+c; f(1, ..[2,3])"   "123"
+run "splat.call.array"     "f(a,b)=a-b; f(..[10,4])"                "6"
+run "splat.call.lambda"    "g=(a,b)->a*b; g(..(3,4))"               "12"
+run "splat.call.builtin"   "pow(..[2,10])"                          "1024"
+
+# `..` keeps meaning slice inside T[…]; a splat never reaches there.
+run "splat.vs.slice.to"    "T=[10,20,30,40]; T[..2]"                "[10, 20, 30]"
+run "splat.vs.slice.from"  "T=[10,20,30,40]; T[2..]"                "[30, 40]"
+run "splat.vs.slice.all"   "T=[10,20,30]; T[..]"                    "[10, 20, 30]"
+run "splat.vs.range"       "(1..4)"                                 "[1, 2, 3, 4]"
+run "splat.array.slice.ok" "a=[1,2]; T=[9,8,7]; [..a, T[1]]"        "[1, 2, 8]"
+
+run_err "splat.err.number"    "(..5,)"
+run_err "splat.err.fn"        "f=x->x; (..f,)"
+run_err "splat.err.matrix"    "[..[1,2]; 3,4]"
+run_err "splat.err.matrix.p"  "(..[1,2]; 3,4)"
+run_err "splat.err.range"     "a=(1,2); (..a..3)"
+run_err "splat.err.bare"      "a=(1,2); ..a"
+run_err "splat.err.2d"        "T=[1,2;3,4]; (..T,)"
+# Two names both written out literally stay a duplicate-field error.
+run_err "splat.err.dup"       "(x=1, x=2)"
+
 # ── GPU compute backend (only when built with --features gpu + a GPU present) ──
 section "GPU BACKEND"
 gpu_probe=$("$M" 'GPU { 1 + 1 }' 2>&1)
@@ -1909,6 +1956,8 @@ else
     run_err "gpu.err.shape"  "A=[1,2,3]; B=[1,2]; GPU { A + B }"
     run_err "gpu.err.undef"  "GPU { nope + 1 }"
     run_err "gpu.err.fn"     "f = x -> x; GPU { f + 1 }"
+    run_err "gpu.err.splat"  "a=[1,2]; GPU { [..a, 3] }"
+    run_err "gpu.err.splat.t" "a=(1,2); GPU { (..a, 3) }"
 
     # unary math (exact-in-f32 results, or scalar-reduced for transcendentals)
     run "gpu.unary.sqrt"     "A=[1,4,9]; GPU { sqrt(A) }"                     "[1, 2, 3]"

@@ -76,6 +76,13 @@ pub enum Expr {
     /// Index-position slice: T[lo..hi]  T[lo..]  T[..hi]  T[..]
     /// Only produced by parse_index_item; never appears outside Index children.
     Slice(Option<Box<Expr>>, Option<Box<Expr>>),
+    /// `..x` — splice a value's slots into the enclosing list.
+    ///
+    /// Legal only as an item of a paren list, an array literal, or a call
+    /// argument list; every other position (including inside `T[…]`, where
+    /// `..` already means a slice) rejects it at parse time. A tuple/record
+    /// contributes its items with their field names, a 1-D array its elements.
+    Splat(Box<Expr>),
     /// `GPU { ... }` — a block evaluated on the GPU compute backend.
     /// The body is a standard `Expr::Block`.
     GpuBlock(Box<Expr>),

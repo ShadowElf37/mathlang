@@ -263,14 +263,34 @@ impl Parser {
         Ok(())
     }
 
-    /// Parse one item of a paren list, which may be a named record field
-    /// (`g = 9.81`, `mag(v) = norm(v)`) or a plain positional expression.
+    /// Parse one item of a paren list, which may be a `..x` splat, a named
+    /// record field (`g = 9.81`, `mag(v) = norm(v)`), or a plain positional
+    /// expression.
     fn parse_paren_item(&mut self) -> Result<Field, String> {
+        if *self.peek() == Token::DotDot {
+            return Ok(Field { name: None, value: self.parse_splat()? });
+        }
         if self.is_def_start() {
             self.parse_record_field()
         } else {
             Ok(Field { name: None, value: self.expr()? })
         }
+    }
+
+    /// Parse one item of a list that admits `..x` splats — an array literal or
+    /// a call argument list. `..` inside `T[…]` is a slice and is parsed by
+    /// `parse_index_item`, which never reaches here.
+    fn parse_list_item(&mut self) -> Result<Expr, String> {
+        if *self.peek() == Token::DotDot {
+            return self.parse_splat();
+        }
+        self.expr()
+    }
+
+    /// `..x` — cursor is on the `..`.
+    fn parse_splat(&mut self) -> Result<Expr, String> {
+        self.bump();
+        Ok(Expr::Splat(Box::new(self.expr()?)))
     }
 
     /// Parse `name = expr` or `name(params) [: ret] = body` inside a record
@@ -491,7 +511,7 @@ impl Parser {
                 let mut args = vec![];
                 if *self.peek() != Token::RParen {
                     loop {
-                        args.push(self.expr()?);
+                        args.push(self.parse_list_item()?);
                         if *self.peek() == Token::Comma { self.bump(); } else { break; }
                     }
                 }
@@ -572,8 +592,12 @@ impl Parser {
                     // change meaning.
                     let first = self.parse_paren_item()?;
                     let mut any_named = first.name.is_some();
+                    let mut any_splat = matches!(first.value, Expr::Splat(_));
                     // Range literal (a..b)
                     if *self.peek() == Token::DotDot {
+                        if any_splat {
+                            return Err("'..' splat cannot be the start of a range".into());
+                        }
                         if any_named {
                             return Err("'..' is not allowed as a record field value; \
                                         wrap it in parens: (r = (1..3))".into());
@@ -591,10 +615,14 @@ impl Parser {
                         if matches!(self.peek(), Token::RParen | Token::Semicolon) { trailing_comma = true; break; }
                         let f = self.parse_paren_item()?;
                         any_named |= f.name.is_some();
+                        any_splat |= matches!(f.value, Expr::Splat(_));
                         row0.push(f);
                     }
                     // Matrix literal: rows separated by ;
                     if *self.peek() == Token::Semicolon {
+                        if any_splat {
+                            return Err("'..' splat cannot be used in a matrix literal".into());
+                        }
                         if any_named {
                             return Err("';' (matrix row separator) cannot be used in a record literal".into());
                         }
@@ -618,7 +646,14 @@ impl Parser {
                     // Any named field makes this a record — including the
                     // 1-field `(a = 1)`, which is why the collapse-to-grouping
                     // rule below is guarded on `any_named`.
-                    if any_named { return Ok(Expr::Record(row0)); }
+                    //
+                    // A splat routes here too, even with no literal name in
+                    // sight: whether `(..w)` carries field names is only known
+                    // once `w` is evaluated, and Record is the node that keeps
+                    // them. `Tup::named` collapses back to positional when the
+                    // splatted value turns out to be a plain tuple, so
+                    // `(..t, 4)` still prints as a tuple.
+                    if any_named || any_splat { return Ok(Expr::Record(row0)); }
                     let row0: Vec<Expr> = row0.into_iter().map(|f| f.value).collect();
                     if row0.len() == 1 {
                         if trailing_comma {
@@ -643,14 +678,17 @@ impl Parser {
                     self.bump();
                     return Ok(Expr::Array(vec![]));
                 }
-                let first = self.expr()?;
+                let first = self.parse_list_item()?;
                 let mut row0 = vec![first];
                 while *self.peek() == Token::Comma {
                     self.bump();
                     if matches!(self.peek(), Token::RBracket | Token::Semicolon) { break; }
-                    row0.push(self.expr()?);
+                    row0.push(self.parse_list_item()?);
                 }
                 if *self.peek() == Token::Semicolon {
+                    if row0.iter().any(|e| matches!(e, Expr::Splat(_))) {
+                        return Err("'..' splat cannot be used in a matrix literal".into());
+                    }
                     // Matrix literal [1,2;3,4]
                     let mut rows = vec![row0];
                     while *self.peek() == Token::Semicolon {
@@ -699,7 +737,7 @@ impl Parser {
                     let mut args = vec![];
                     if *self.peek() != Token::RParen {
                         loop {
-                            args.push(self.expr()?);
+                            args.push(self.parse_list_item()?);
                             if *self.peek() == Token::Comma { self.bump(); } else { break; }
                         }
                     }
