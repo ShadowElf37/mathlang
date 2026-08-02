@@ -386,7 +386,8 @@ pub fn eval_line(line: &str, env: &mut Env, repl: bool) -> bool {
                 let names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
                 let sig = FnSig::from_params(params, ret_hint.clone());
                 env.define(name.clone(), Val::make_fn_with_sig(
-                    names, sig.with_self(name), body.clone(), env.snapshot()));
+                    names, sig.with_self(name), body.clone(),
+                    crate::eval::capture_for(body, params, env)));
             }
             BlockStmt::Assign(a) => {
                 if let Err(e) = crate::eval::eval_assign(a, env) {
@@ -1184,6 +1185,14 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     "           += -= *= /=   rebinds the name in *this* scope — a caller, an\n",
                     "           outer scope and any closure never see the write. For shared\n",
                     "           mutable state use a cell: set(c[i], v) / update(c.f, g).\n\n",
+                    "Compiled:  a function body is compiled to bytecode on first call and\n",
+                    "           cached. Definition order does not affect speed — a body may\n",
+                    "           call a name defined further down. Nodes with no bytecode form\n",
+                    "           (slices, map/filter/reduce, deriv) are interpreted on their own;\n",
+                    "           the rest of the body still runs compiled.\n",
+                    "Capture:   a closure keeps a snapshot of the names its body and its\n",
+                    "           parameter defaults can read — rebinding one afterwards does not\n",
+                    "           reach back in. A cell is shared, since it is a reference.\n\n",
                     "Multiline: a newline separates items — ',' inside (…) […], ';' inside {{…}}\n",
                     "           and at top level. ';' and ',' still work everywhere.\n",
                     "           A line ending in an operator, '=' or ',' continues, as does a\n",

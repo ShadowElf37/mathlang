@@ -15,9 +15,32 @@
        depth (it broke 90 000-deep recursion outright).
 
    Still possible to add to the bytecode VM:
-   1a. Slices in compiled bodies: T[lo..hi] currently falls back; add a Slice instruction
-   1b. Ranges in compiled bodies: lo..hi currently falls back; produces a 1-D tensor
-   1c. Tensor literals: (1,2; 3,4) currently falls back; straightforward to compile
+   1.1 [DONE v0.46.2] EvalSub — the escape hatch that retired whole-body fallback.
+       A node the compiler has no instruction for is interpreted *in place* rather
+       than abandoning the body (and, because the OnceLock cached the failure,
+       abandoning it permanently). Instruction::EvalSub{expr, binds} names the
+       params/locals the node reads, resolved to slots at compile time, and the
+       executor copies just those into a frame. Worth ~19-24% on a body that mixes
+       supported and unsupported nodes (heavy arithmetic + one slice: 345 -> 278 ms).
+       Roughly neutral when the body is dominated by unsupported nodes — Phase 1
+       had already made falling back cheap, so this is structural more than fast:
+       adding a real instruction is now a local optimization instead of a
+       prerequisite for the body compiling at all.
+       Guard to preserve: Splat and Named must never be EvalSub'd alone. They
+       splice a *variable* number of slots into the enclosing list, so the
+       enclosing call/tuple/array is interpreted whole. Missing this broke
+       `[..u, x]`, `g(..cfg)` and `g(b=1, a=x)` inside bodies; tests.sh vm.splat.*
+       and vm.named.* cover it.
+       Also: compile_fn hands a body back (returns None) when it compiled to
+       nothing but one whole-body EvalSub, since VM setup would buy nothing.
+
+   1a. Slices in compiled bodies: T[lo..hi] is interpreted via EvalSub (~1.1 us
+       per evaluation). A dedicated Slice instruction would remove that.
+   1b. [MOOT] Ranges. `(lo..hi)` — the only range syntax there is, since a bare
+       `1..5` does not parse outside index brackets — already works in a body via
+       EvalSub. A dedicated instruction is the same optimization as 1a.
+   1c. Tensor literals: (1,2; 3,4) is interpreted via EvalSub; a MakeTensorLit
+       instruction is straightforward if it ever shows up in a profile.
    1d. [DONE v0.46.1] Recursive local functions. A recursive closure is genuinely
        cyclic and `captured` is a plain Arc<HashMap> that cannot contain itself, so
        the old code did a two-step dance (build the fn, insert it into a *second*
@@ -26,7 +49,11 @@
        Replaced by FnSig::self_name: the callee binds its own name at call time, in
        both the VM (LoadCaptured checks it first) and the tree-walk path. Acyclic,
        depth-independent, and it deleted one of the two whole-env clones per
-       definition.
+       definition. v0.46.2 extended it to MakeClosure, so a local `f(x) = …` that
+       calls itself compiles instead of abandoning the enclosing body: 100k
+       iterations of a body defining and calling a recursive local went
+       2883 -> 1486 ms (1.94x). An anonymous lambda gets no self-name, since it
+       has no name to recurse through.
    1e. [DONE v0.21.1] Loop instruction: bounded iteration (sum/prod/iterate/scan)
        compiled to a flat loop in the VM (Instruction::Loop(LoopForm, argc)) — the
        only recursion-analogue that is GPU-safe. The compiler pushes the operands
@@ -40,14 +67,21 @@
        it without pulling in eval.rs. run_vm/Compiler stay in eval.rs (they need Val).
    1g. LoadBuffer instruction: GPU-side tensor indexing for captured buffers inside
        GPU lambda bodies (v2 GPU feature, see CONSIDERATIONS.md §15)
-   1h. Path writes in compiled bodies: `T[i] = v` and `set(c[i], v)` still fall
-       back for the whole body — the compiler has no instruction that mutates a
-       binding or reaches into a cell. Route (b) below was taken in v0.46.1, so the
-       fallback now costs ~1 us/call instead of ~21: 100k iterations of
-       `iterate(i -> {set(c[i], …); i+1}, …)` went 2.2 s -> 91 ms. Route (a), a
-       StoreIndex/CellStore instruction pair, is still worth it — it is the one
-       case an EvalSub escape hatch cannot serve, because copying the binding out
-       to a sub-frame detaches it from the thing being written.
+   1h. [DONE v0.46.2] Path writes in compiled bodies. Two different problems:
+       - The *value* axis (`T[i] = v`) genuinely cannot use EvalSub: an assignment
+         mutates a binding, and copying it into a sub-frame detaches it from the
+         slot the write has to land in. Instruction::StoreAssign moves the root out
+         of its local slot, runs the shared tree-walk writer on it (so index rules
+         and error text are identical by construction), and moves it back —
+         refcount 1 throughout, which is what keeps repeated writes O(1). A root
+         arriving as a param or from the captured scope is seeded into a local
+         first, which is also exactly the "assignment rebinds in this scope"
+         semantics. 100k iterations of a body with two writes plus real
+         arithmetic: 394 -> 321 ms.
+       - The *cell* axis (`set(c[i], v)`) needs nothing special: a cell is a
+         reference, so interpreting just that call still writes through to the one
+         cell every holder shares. 100k iterations: 2.2 s originally, 66 ms now.
+         A dedicated CellStore would shave the frame construction; not yet worth it.
 
    1i. [DONE v0.46.1] Expr::Member in compiled bodies. `ns.member` fell into the
        compiler's catch-all, so every body calling vec.normalize(...) / bits.and(...)
@@ -65,21 +99,29 @@
        order. A 33x difference decided by line order alone. Unknown names now emit
        LoadCaptured, which resolves live and errors cleanly if truly undefined.
 
-2.6. Narrow closure capture to free variables. Defining a closure snapshots the
-   whole visible environment (Env::snapshot). At the top level that is an Arc bump,
-   but it pins env.vars at refcount >= 2, so the *next* Env::define deep-clones the
-   globals via Arc::make_mut — and so does every definition after it. Top-level
-   definition is therefore O(n^2): 500 defs 147 ms, 1000 529, 2000 2005, 4000 8119
-   (halved in v0.46.1 by deleting the self-insert clone, still quadratic). Two more
-   consequences: closure memory is O(env) each, and every tensor in scope gains an
-   Arc reference that never goes away, which is what defeats the in-place fast path
-   for `T[i] = v` at top level.
-   The fix is a free_names walker capturing only what the body can read — sound here
-   because mathlang has no string type and no dynamic name lookup, so that set is
-   statically complete. Note this is NOT the existing `cfv`, which deliberately
-   ignores outer_captured because it answers a different question (which VM slots
-   MakeClosure must push). Needs its own test pass: a miss breaks closures rather
-   than just slowing them.
+2.6. [DONE v0.46.2] Narrow closure capture to free names. Defining a closure used
+   to snapshot the whole visible environment. At the top level that is only an Arc
+   bump, but it pins env.vars at refcount >= 2, so the *next* Env::define
+   deep-clones the globals via Arc::make_mut — and so does every definition after
+   it. Top-level definition was therefore O(n^2): 500 defs 147 ms, 1000 529,
+   2000 2005, 4000 8119.
+   Now `capture_for` collects the names the body and the *parameter defaults* can
+   read (defaults are evaluated in the captured scope by fill_defaults, and their
+   names never appear in the body — the one gap that would have broken this) and
+   snapshots only those. Linear now, and 100-600x faster in absolute terms:
+   500 4 ms, 1000 7, 2000 8, 4000 14, 8000 32.
+   The walker is deliberately conservative — it subtracts nothing for inner
+   binders, because over-collecting costs an Arc bump and is shadowed by the frame
+   at run time, while under-collecting breaks the closure. Sound because mathlang
+   has no string type and no dynamic name lookup, so the names a body can reach
+   are exactly the ones it spells. That is a property of the language, not of the
+   analysis.
+   NOT the same as `cfv`/collect_free_vars, which answers "which of the enclosing
+   frame's slots must a nested lambda be handed" and so ignores captured names on
+   purpose. Both exist; do not merge them.
+   Side effects: closure memory is O(free names) instead of O(env), and env.vars
+   is no longer pinned, so the in-place fast path for `T[i] = v` at top level is
+   reachable again.
 
 2. [SEPARATE BRANCH] GPU backend (see CONSIDERATIONS.md) + PDE solvers
 

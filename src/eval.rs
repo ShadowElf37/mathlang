@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::cell::{Cell as StdCell, RefCell};
 use crate::ast::{Expr, BlockStmt, Op, Def, TypeHint, Assign, PathSeg};
-use crate::vm::{Instruction, LoopForm};
+use crate::vm::{Instruction, LoopForm, Slot};
 
 // ── Recursion guard ───────────────────────────────────────────────────────────
 // User-function calls all funnel through apply_fn_direct. A thread-local depth
@@ -477,25 +477,6 @@ impl Env {
     }
 
     pub fn keys(&self) -> impl Iterator<Item = &String> { self.iter().map(|(k, _)| k) }
-
-    /// The scope a closure defined here should capture, flattened to one map.
-    ///
-    /// At the top level — every `.math` file, every REPL line, all of
-    /// `libraries/` — there are no layers and this is a refcount bump. Inside a
-    /// function body it flattens the visible chain, which is exactly the copy
-    /// closure creation already paid when `Env` was one flat map, so this is
-    /// never a regression. Phase 5 (narrowing capture to the body's free names)
-    /// removes the flatten altogether.
-    pub fn snapshot(&self) -> Arc<HashMap<String, Val>> {
-        if self.outer.is_empty() { return Arc::clone(&self.vars); }
-        // Outermost first so inner scopes shadow, matching `get`'s order.
-        let mut m: HashMap<String, Val> = HashMap::new();
-        for layer in self.outer.iter().rev() {
-            m.extend(layer.iter().map(|(k, v)| (k.clone(), v.clone())));
-        }
-        m.extend(self.vars.iter().map(|(k, v)| (k.clone(), v.clone())));
-        Arc::new(m)
-    }
 }
 
 impl Env {
@@ -3662,6 +3643,99 @@ fn has_slice(expr: &Expr) -> bool {
 /// Collect names from `expr` that are free in the inner lambda — i.e. they appear
 /// in `outer_params` or `outer_locals` but not in `inner_params` or `outer_captured`.
 /// These must be explicitly pushed onto the stack before a MakeClosure instruction.
+/// Every name an expression could read from its defining scope.
+///
+/// Deliberately conservative: it collects each identifier that appears as a
+/// variable (plus every assignment root, which is read as well as written) and
+/// subtracts nothing for inner binders. Over-collecting is free — the extra
+/// entry is an Arc bump and is shadowed at run time by the frame anyway, since
+/// lookup goes frame, then captured, then globals. Under-collecting would break
+/// a closure outright, so the walk errs the other way.
+///
+/// Sound because mathlang has no string type and no dynamic name lookup: the set
+/// of names a body can reach is exactly the set it spells out. That is a
+/// property of the language, not of this function being careful.
+///
+/// NOT interchangeable with `collect_free_vars`, which answers a different
+/// question — which of the *enclosing frame's slots* a nested lambda must be
+/// handed — and so deliberately ignores captured names.
+fn free_names(expr: &Expr, out: &mut Vec<String>, seen: &mut std::collections::HashSet<String>) {
+    let note = |n: &String, out: &mut Vec<String>, seen: &mut std::collections::HashSet<String>| {
+        if seen.insert(n.clone()) { out.push(n.clone()); }
+    };
+    match expr {
+        Expr::Num(_) | Expr::ImagLit(_) => {}
+        Expr::Var(n) => note(n, out, seen),
+        Expr::BinOp(l, _, r) => { free_names(l, out, seen); free_names(r, out, seen); }
+        Expr::Neg(e) | Expr::Not(e) | Expr::Splat(e) | Expr::Named(_, e) | Expr::GpuBlock(e) =>
+            free_names(e, out, seen),
+        Expr::Apply(f, args) => {
+            free_names(f, out, seen);
+            for a in args { free_names(a, out, seen); }
+        }
+        Expr::Tuple(es) | Expr::Array(es) => for e in es { free_names(e, out, seen) },
+        Expr::Record(fs) => for f in fs { free_names(&f.value, out, seen) },
+        Expr::TensorLit(rows) => for r in rows { for e in r { free_names(e, out, seen) } },
+        Expr::Index(b, i) => { free_names(b, out, seen); free_names(i, out, seen); }
+        Expr::Member(b, _) => free_names(b, out, seen),
+        Expr::Lambda(ps, _, body) => {
+            // A parameter's *default* is evaluated in the closure's captured
+            // scope (see fill_defaults), so its names have to be captured too.
+            for p in ps { if let Some(d) = &p.default { free_names(d, out, seen); } }
+            free_names(body, out, seen);
+        }
+        Expr::Range(a, b) => { free_names(a, out, seen); free_names(b, out, seen); }
+        Expr::Slice(a, b) => {
+            if let Some(e) = a { free_names(e, out, seen); }
+            if let Some(e) = b { free_names(e, out, seen); }
+        }
+        Expr::Block(stmts) => for st in stmts {
+            match st {
+                BlockStmt::Def(Def::Var(_, e)) => free_names(e, out, seen),
+                BlockStmt::Def(Def::Func(_, ps, _, body)) => {
+                    for p in ps { if let Some(d) = &p.default { free_names(d, out, seen); } }
+                    free_names(body, out, seen);
+                }
+                BlockStmt::Assign(a) => {
+                    // The root is read as well as written (compound assignment,
+                    // and StoreAssign seeds the slot from it).
+                    note(&a.lvalue.root, out, seen);
+                    free_names(&a.value, out, seen);
+                    for seg in &a.lvalue.path {
+                        if let PathSeg::Index(i) = seg { free_names(i, out, seen); }
+                    }
+                }
+                BlockStmt::Expr(e) => free_names(e, out, seen),
+            }
+        },
+    }
+}
+
+/// The captured scope for a closure defined here: just the names its body (and
+/// its parameter defaults) can reach, snapshotted.
+///
+/// Snapshotting the *whole* environment instead is what made top-level
+/// definition O(n^2). It is an Arc bump, but it pins `env.vars` at refcount >= 2,
+/// so the next `Env::define` deep-clones the globals through `Arc::make_mut` —
+/// and so does every definition after it. Measured: 500 defs 147 ms, 1000 529,
+/// 2000 2005, 4000 8119. It also gave every tensor in scope a reference that
+/// never goes away, which is what defeated the in-place fast path for `T[i] = v`.
+///
+/// A name absent at definition time is simply not here, exactly as before, and
+/// still resolves through the live-env fallback — so forward references and
+/// mutual recursion are unaffected.
+pub fn capture_for(body: &Expr, params: &[crate::ast::Param], env: &Env) -> Arc<HashMap<String, Val>> {
+    let mut names = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for p in params { if let Some(d) = &p.default { free_names(d, &mut names, &mut seen); } }
+    free_names(body, &mut names, &mut seen);
+    let mut m = HashMap::with_capacity(names.len());
+    for n in names {
+        if let Some(v) = env.get(&n) { m.insert(n, v.clone()); }
+    }
+    Arc::new(m)
+}
+
 fn collect_free_vars(
     expr:           &Expr,
     inner_params:   &[String],
@@ -3770,61 +3844,15 @@ fn cfv(
     }
 }
 
-/// Returns true if `target` appears as a free variable anywhere in `expr`
-/// (accounting for shadowing by inner params/locals).
-fn expr_contains_var(expr: &Expr, target: &str) -> bool {
-    match expr {
-        Expr::Var(name)      => name == target,
-        Expr::Num(_) | Expr::ImagLit(_) => false,
-        Expr::BinOp(l, _, r) => expr_contains_var(l, target) || expr_contains_var(r, target),
-        Expr::Neg(e) | Expr::Not(e) => expr_contains_var(e, target),
-        Expr::Apply(f, args) => expr_contains_var(f, target) || args.iter().any(|a| expr_contains_var(a, target)),
-        Expr::Tuple(es) | Expr::Array(es) => es.iter().any(|e| expr_contains_var(e, target)),
-        Expr::Record(fs) => fs.iter().any(|f| expr_contains_var(&f.value, target)),
-        Expr::Index(b, i)    => expr_contains_var(b, target) || expr_contains_var(i, target),
-        Expr::Member(b, _)   => expr_contains_var(b, target),
-        Expr::Lambda(ps, _, body) => !ps.iter().any(|p| p.name == target) && expr_contains_var(body, target),
-        Expr::Block(stmts) => {
-            for stmt in stmts {
-                match stmt {
-                    BlockStmt::Def(Def::Var(name, body)) => {
-                        if expr_contains_var(body, target) { return true; }
-                        if name == target { return false; } // shadowed from here on
-                    }
-                    BlockStmt::Def(Def::Func(name, ps, _, body)) => {
-                        if name == target { return false; } // shadowed from here on
-                        if !ps.iter().any(|p| p.name == target) && expr_contains_var(body, target) { return true; }
-                    }
-                    BlockStmt::Assign(a) => {
-                        // An assignment reads its root as well as writing it,
-                        // so it is a use, not a shadowing definition.
-                        if a.lvalue.root == target || expr_contains_var(&a.value, target) { return true; }
-                        for seg in &a.lvalue.path {
-                            if let PathSeg::Index(i) = seg {
-                                if expr_contains_var(i, target) { return true; }
-                            }
-                        }
-                    }
-                    BlockStmt::Expr(e) => if expr_contains_var(e, target) { return true; },
-                }
-            }
-            false
-        }
-        Expr::TensorLit(rows) => rows.iter().any(|row| row.iter().any(|e| expr_contains_var(e, target))),
-        Expr::Range(lo, hi)  => expr_contains_var(lo, target) || expr_contains_var(hi, target),
-        Expr::Slice(lo, hi)  => lo.as_ref().map_or(false, |e| expr_contains_var(e, target))
-                             || hi.as_ref().map_or(false, |e| expr_contains_var(e, target)),
-        Expr::GpuBlock(body) => expr_contains_var(body, target),
-        Expr::Splat(inner)   => expr_contains_var(inner, target),
-        Expr::Named(_, e)    => expr_contains_var(e, target),
-    }
-}
 
 struct Compiler<'a> {
     params:   &'a [String],
     captured: &'a HashMap<String, Val>,
     code:     Vec<Instruction>,
     locals:   Vec<String>,
+    /// Name to give the next `MakeClosure` a self-reference under, set only
+    /// while compiling the lambda a `Def::Func` desugars to.
+    pending_self: Option<String>,
 }
 
 impl<'a> Compiler<'a> {
@@ -3833,6 +3861,52 @@ impl<'a> Compiler<'a> {
     }
     fn local_index(&self, name: &str) -> Option<usize> {
         self.locals.iter().position(|l| l == name)
+    }
+
+    /// True if any item is a splicing node. `..x` and `name = v` do not evaluate
+    /// to one stack value — they contribute a *variable* number of slots to the
+    /// enclosing list, or a name the callee resolves. So the enclosing node has
+    /// to be interpreted whole; handing one to `eval_sub` on its own both breaks
+    /// the operand count and reports "'..' can only splice into (…)".
+    fn has_spliced(items: &[Expr]) -> bool {
+        items.iter().any(|e| matches!(e, Expr::Splat(_) | Expr::Named(..)))
+    }
+
+    /// Ensure `name` occupies a local slot, emitting the load that seeds it when
+    /// it does not yet. Assignment rebinds in the current scope, so a root that
+    /// arrives as a parameter or from the captured scope has to be copied into a
+    /// local first — after which every write lands in that local, in place.
+    fn ensure_local(&mut self, name: &str) -> usize {
+        if let Some(i) = self.local_index(name) { return i; }
+        if let Some(i) = self.param_index(name) {
+            self.code.push(Instruction::LoadParam(i));
+        } else {
+            self.code.push(Instruction::LoadCaptured(name.to_string()));
+        }
+        let slot = self.locals.len();
+        self.locals.push(name.to_string());
+        self.code.push(Instruction::StoreLocal(slot));
+        slot
+    }
+
+    /// Emit an `EvalSub` for a node the compiler has no instruction for, binding
+    /// exactly the parameters and locals the node reads. This is what keeps an
+    /// unsupported node from costing the *rest* of the body anything.
+    /// Where a name lives in the running frame, if it is a param or a local.
+    /// Locals shadow params, matching the `Expr::Var` arm.
+    fn slot_of(&self, name: &str) -> Option<Slot> {
+        if let Some(i) = self.local_index(name) { return Some(Slot::Local(i)); }
+        self.param_index(name).map(Slot::Param)
+    }
+
+    fn eval_sub(&mut self, expr: &Expr) {
+        // cfv with no inner params answers precisely "which of my params/locals
+        // does this sub-expression read", shadowing included.
+        let free = collect_free_vars(expr, &[], self.params, &self.locals, self.captured);
+        let binds = free.into_iter()
+            .filter_map(|name| self.slot_of(&name).map(|sl| (name, sl)))
+            .collect();
+        self.code.push(Instruction::EvalSub { expr: Arc::new(expr.clone()), binds });
     }
 
     /// Resolve `ns.field` against the captured snapshot, when `ns` is a plain
@@ -3887,9 +3961,10 @@ impl<'a> Compiler<'a> {
             }
 
             Expr::Neg(e) => { self.compile(e)?; self.code.push(Instruction::Neg); }
-            Expr::Not(_) => return Err(()),  // fall back to tree-walk
+            Expr::Not(_) => self.eval_sub(expr),
 
             Expr::Apply(f_expr, arg_exprs) => {
+                if Self::has_spliced(arg_exprs) { self.eval_sub(expr); return Ok(()); }
                 if let Expr::Var(name) = f_expr.as_ref() {
                     match name.as_str() {
                         // if → conditional jump pair
@@ -3914,9 +3989,16 @@ impl<'a> Compiler<'a> {
                         // `c[i]` into a detached copy, so the body falls back to
                         // the tree-walk evaluator. The whole-cell forms
                         // `set(c, v)` / `update(c, f)` still compile.
+                        // `set(c[i], v)` / `update(c.f, g)` need the path
+                        // unevaluated. A cell is a reference, so interpreting just
+                        // this call in a sub-frame still writes through to the one
+                        // cell everyone shares (TODO 1h keeps the faster route open).
                         "set" | "update"
                             if matches!(arg_exprs.first(), Some(Expr::Index(..) | Expr::Member(..)))
-                            => return Err(()),
+                            => {
+                            self.eval_sub(expr);
+                            return Ok(());
+                        }
                         // Bounded-iteration special forms compile to a flat VM Loop:
                         // push the operands (function + bounds/seed/count), then a
                         // single Loop instruction runs the iteration with no native-
@@ -3933,8 +4015,12 @@ impl<'a> Compiler<'a> {
                             self.code.push(Instruction::Loop(form, arg_exprs.len()));
                             return Ok(());
                         }
-                        // Still need unevaluated Expr args / bespoke handling — fall back.
-                        "integral" | "deriv" | "map" | "filter" | "reduce" => return Err(()),
+                        // These need their arguments unevaluated / bespoke handling,
+                        // so the call itself is interpreted — but only the call.
+                        "integral" | "deriv" | "map" | "filter" | "reduce" => {
+                            self.eval_sub(expr);
+                            return Ok(());
+                        }
                         _ => {}
                     }
                     // Treat as builtin when not shadowed by a param/local.
@@ -3976,11 +4062,13 @@ impl<'a> Compiler<'a> {
             }
 
             Expr::Tuple(exprs) => {
+                if Self::has_spliced(exprs) { self.eval_sub(expr); return Ok(()); }
                 for e in exprs { self.compile(e)?; }
                 self.code.push(Instruction::MakeTuple(exprs.len()));
             }
 
             Expr::Array(exprs) => {
+                if Self::has_spliced(exprs) { self.eval_sub(expr); return Ok(()); }
                 for e in exprs { self.compile(e)?; }
                 self.code.push(Instruction::MakeArray(exprs.len()));
             }
@@ -3990,10 +4078,35 @@ impl<'a> Compiler<'a> {
                 for (i, stmt) in stmts.iter().enumerate() {
                     let is_last = i + 1 == n;
                     match stmt {
-                        // Path assignment mutates a binding; the VM has no
-                        // instruction for that, so the whole body falls back to
-                        // the tree-walk evaluator.
-                        BlockStmt::Assign(_) => return Err(()),
+                        BlockStmt::Assign(assign) => {
+                            let root = assign.lvalue.root.clone();
+                            let slot = self.ensure_local(&root);
+                            // Whatever the right-hand side and the indices read,
+                            // minus the root itself — the executor binds that from
+                            // the slot, so that a compound `T[i] += 1` reads the
+                            // value it is about to write.
+                            let mut reads = collect_free_vars(
+                                &assign.value, &[], self.params, &self.locals, self.captured);
+                            for seg in &assign.lvalue.path {
+                                if let PathSeg::Index(i) = seg {
+                                    for n in collect_free_vars(
+                                        i, &[], self.params, &self.locals, self.captured) {
+                                        if !reads.contains(&n) { reads.push(n); }
+                                    }
+                                }
+                            }
+                            let binds = reads.into_iter()
+                                .filter(|n| *n != root)
+                                .filter_map(|n| self.slot_of(&n).map(|sl| (n, sl)))
+                                .collect();
+                            self.code.push(Instruction::StoreAssign {
+                                slot, assign: Arc::new(assign.clone()), binds,
+                            });
+                            // A block's value is its last expression; an
+                            // assignment is a statement and pushes nothing, so
+                            // there is nothing to Pop either.
+                            if is_last { self.code.push(Instruction::LoadLocal(slot)); }
+                        }
                         BlockStmt::Def(Def::Var(name, body)) => {
                             self.compile(body)?;
                             // Reuse the existing slot if this name was already defined in
@@ -4007,12 +4120,16 @@ impl<'a> Compiler<'a> {
                             };
                             self.code.push(Instruction::StoreLocal(slot));
                         }
-                        // Non-recursive Def::Func compiles as a lambda stored in a local.
-                        // Recursive functions (body references own name) fall back to the
-                        // tree-walk evaluator, which sets up the self-reference correctly.
+                        // `f(x) = …` in a block compiles as a lambda stored in a
+                        // local. A recursive one used to abandon the whole body;
+                        // now the closure carries its own name (FnSig::self_name),
+                        // so it reaches itself at any depth (TODO 1d).
                         BlockStmt::Def(Def::Func(name, params, _ret, body)) => {
-                            if expr_contains_var(body, name) { return Err(()); }
-                            self.compile(&Expr::Lambda(params.clone(), None, Box::new(body.clone())))?;
+                            self.pending_self = Some(name.clone());
+                            let r = self.compile(
+                                &Expr::Lambda(params.clone(), None, Box::new(body.clone())));
+                            self.pending_self = None;
+                            r?;
                             let slot = if let Some(existing) = self.local_index(name) {
                                 existing
                             } else {
@@ -4049,7 +4166,9 @@ impl<'a> Compiler<'a> {
             }
 
             Expr::Index(base, idx) => {
-                if has_slice(idx) { return Err(()); }
+                // A slice produces a new tensor rather than an element; no Index
+                // instruction covers it (TODO 1a).
+                if has_slice(idx) { self.eval_sub(expr); return Ok(()); }
                 self.compile(base)?;
                 self.compile(idx)?;
                 self.code.push(Instruction::Index);
@@ -4090,11 +4209,15 @@ impl<'a> Compiler<'a> {
                     body:   Arc::new(*inner_body.clone()),
                     code:   inner_code,
                     free_vars,
+                    self_name: self.pending_self.take(),
                 });
             }
 
-            // Unsupported: ranges, slices, tensor literals.
-            _ => return Err(()),
+            // Everything else — ranges, slices, tensor literals, records, splat,
+            // named args, GPU blocks — is interpreted in place rather than
+            // abandoning the body. Phase 4 replaces the ones that matter with
+            // real instructions; correctness does not depend on that happening.
+            _ => self.eval_sub(expr),
         }
         Ok(())
     }
@@ -4107,8 +4230,13 @@ fn compile_fn(
     body:     &Expr,
     captured: &Arc<HashMap<String, Val>>,
 ) -> Option<Vec<Instruction>> {
-    let mut c = Compiler { params, captured, code: vec![], locals: vec![] };
+    let mut c = Compiler { params, captured, code: vec![], locals: vec![], pending_self: None };
     c.compile(body).ok()?;
+    // A body that compiled to nothing but one whole-body EvalSub would pay VM
+    // setup to do exactly what the tree-walk path does directly. Hand it back.
+    if c.code.len() == 1 && matches!(c.code[0], Instruction::EvalSub { .. }) {
+        return None;
+    }
     c.code.push(Instruction::Return);
     Some(c.code)
 }
@@ -4254,6 +4382,18 @@ fn run_vm_reuse(
                 let call_args: Vec<Val> = stack.drain(start..).collect();
                 stack.push(eval_builtin(name, call_args, env)?);
             }
+            Instruction::EvalSub { expr, binds } => {
+                let mut local = make_local(env, captured);
+                if let Some((n, v)) = me { local.define(n.to_string(), v.clone()); }
+                for (name, slot) in binds {
+                    let v = match slot {
+                        Slot::Param(i) => args[*i].clone(),
+                        Slot::Local(i) => locals[*i].clone(),
+                    };
+                    local.define(name.clone(), v);
+                }
+                stack.push(eval(expr, &local)?);
+            }
             Instruction::Member { field, who } => {
                 // Mirrors the tree-walk `Expr::Member` arm, messages included.
                 let base = stack.pop().unwrap();
@@ -4350,7 +4490,7 @@ fn run_vm_reuse(
                 }?;
                 stack.push(result);
             }
-            Instruction::MakeClosure { params, body, code, free_vars } => {
+            Instruction::MakeClosure { params, body, code, free_vars, self_name } => {
                 let start = stack.len() - free_vars.len();
                 let vals: Vec<Val> = stack.drain(start..).collect();
                 let mut new_captured = (**captured).clone();
@@ -4358,12 +4498,37 @@ fn run_vm_reuse(
                     new_captured.insert(name.clone(), val);
                 }
                 let new_cap = Arc::new(new_captured);
+                let mut sig = FnSig::default();
+                if let Some(n) = self_name { sig = sig.with_self(n); }
                 let fn_val = if code.is_empty() {
-                    Val::make_fn(params.clone(), (**body).clone(), new_cap)
+                    Val::make_fn_with_sig(params.clone(), sig, (**body).clone(), new_cap)
                 } else {
-                    Val::make_fn_compiled(params.clone(), (**body).clone(), new_cap, (**code).clone())
+                    Val::Fn(params.clone(), (**body).clone(), new_cap,
+                            Arc::new({ let l = OnceLock::new(); let _ = l.set(Some((**code).clone())); l }),
+                            Arc::new(sig))
                 };
                 stack.push(fn_val);
+            }
+            Instruction::StoreAssign { slot, assign, binds } => {
+                // Move the root out of its slot so it is uniquely owned, let the
+                // shared tree-walk writer mutate it in place, then move it back.
+                // Cloning instead would push the buffer's refcount to 2 and make
+                // `Arc::make_mut` copy on every single write.
+                let mut frame = make_local(env, captured);
+                if let Some((n, v)) = me { frame.define(n.to_string(), v.clone()); }
+                for (name, sl) in binds {
+                    let v = match sl {
+                        Slot::Param(i) => args[*i].clone(),
+                        Slot::Local(i) => locals[*i].clone(),
+                    };
+                    frame.define(name.clone(), v);
+                }
+                let root = assign.lvalue.root.clone();
+                let taken = std::mem::replace(&mut locals[*slot], Val::Num(0.0));
+                frame.define(root.clone(), taken);
+                eval_assign(assign, &mut frame)?;
+                locals[*slot] = Arc::make_mut(&mut frame.vars).remove(&root)
+                    .ok_or("vm: assignment lost its root")?;
             }
         }
         pc += 1;
@@ -5078,7 +5243,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
         Expr::Lambda(params, ret_hint, body) => {
             let names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
             let sig = FnSig::from_params(params, ret_hint.clone());
-            Ok(Val::make_fn_with_sig(names, sig, *body.clone(), env.snapshot()))
+            Ok(Val::make_fn_with_sig(names, sig, *body.clone(), capture_for(body, params, env)))
         }
         Expr::Tuple(exprs) => {
             // `(a, b, c)` is always a tuple (a tree node). No autopromotion to a
@@ -5117,7 +5282,8 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                         let pnames: Vec<String> = ps.iter().map(|p| p.name.clone()).collect();
                         let sig = FnSig::from_params(ps, ret.clone());
                         Val::make_fn_with_sig(
-                            pnames, sig.with_self(fname), (**body).clone(), child.snapshot())
+                            pnames, sig.with_self(fname), (**body).clone(),
+                            capture_for(body, ps, &child))
                     }
                     _ => eval(&f.value, &child)?,
                 };
@@ -5223,7 +5389,8 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                             let names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
                             let sig = FnSig::from_params(params, ret_hint.clone());
                             child.define(name.clone(), Val::make_fn_with_sig(
-                                names, sig.with_self(name), body.clone(), child.snapshot()));
+                                names, sig.with_self(name), body.clone(),
+                                capture_for(body, params, &child)));
                         }
                     },
                     // Rebinds in the block's own scope, so an enclosing scope

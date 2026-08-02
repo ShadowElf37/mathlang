@@ -719,12 +719,8 @@ In practice:
 Rebuilding a tensor per element — the only option before — is O(m·N). For a hot
 in-place loop, use a cell.
 
-One caveat worth knowing: a function body containing a path write does not
-compile to bytecode and falls back to the tree-walk evaluator, which costs
-roughly 20 µs per call regardless of tensor size. That is the same fallback
-slices, ranges and `map`/`filter`/`reduce` already take — it is interpreter
-overhead, not copying — but it means a tight loop of single-element writes is
-currently dominated by it.
+A path write inside a function body compiles to bytecode like everything else,
+and mutates its slot in place — see *How functions are compiled* below.
 
 ---
 
@@ -1120,6 +1116,70 @@ result = [1, 3, 6, 10]
 result = [1, 2, 6, 24]
 > diff([1, 4, 9, 16])
 result = [3, 5, 7]
+```
+
+---
+
+## How functions are compiled
+
+You do not have to think about this to use mathlang. It is here because the
+answer used to be surprising, and people write code around surprises.
+
+A function body is compiled to bytecode the first time it is called, and the
+result is cached on the function. Top-level lines are not compiled — a line runs
+once, so compiling it would cost more than interpreting it. That is not a gap:
+every construct that loops (`iterate`, `scan`, `sum`, `prod`, `map`, `tensor`)
+takes a *function*, so the code that runs many times is exactly the code that
+gets compiled.
+
+**Two rules that used to matter and no longer do.**
+
+*Definition order does not affect speed.* A body may call a function defined
+further down the file, or two functions may call each other. Such a name is
+resolved when the call happens.
+
+```
+f(x) = g(x) + 1          # g does not exist yet — fine, and just as fast
+g(x) = x * 2
+```
+
+*Nothing forces a body back to the interpreter wholesale.* A construct with no
+bytecode form — a slice, a tensor literal, `map`/`filter`/`reduce`, `deriv` —
+is interpreted on its own, and the rest of the body still runs compiled. A
+`T[i] = v` write mutates its slot in place rather than copying, and a local
+recursive function compiles like any other.
+
+```
+step(T, i) = {
+    row  = T[i, ..]                 # interpreted node
+    acc  = zeros(3)
+    acc[0] = sum(row) * 2           # in-place write
+    fib(n) = if(n < 2, n, fib(n-1) + fib(n-2))   # recursion is fine here
+    acc[0] + fib(6)                 # …and all of this is compiled
+}
+```
+
+**What a function captures.** A closure captures the names its body — and its
+parameter defaults — can actually read, snapshotted at the point of definition.
+Rebinding a name afterwards does not reach back into a closure that captured it:
+
+```
+> k = 10
+> f(x) = x + k
+> k = 99
+> f(1)
+result = 11                # f captured k = 10
+```
+
+A cell is the exception, and deliberately so: the *binding* is snapshotted, but a
+cell is a reference, so what it points at is shared.
+
+```
+> c = cell(5)
+> f(x) = get(c) + x
+> set(c, 10)
+> f(1)
+result = 11                # the cell is shared, not copied
 ```
 
 ---

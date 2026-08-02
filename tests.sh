@@ -2162,10 +2162,111 @@ run "vm.assign.block.scope" "n=3; f(x) = { n = x; n*2 }; f(5); n"     "3"
 run "vm.assign.outer.copy" "T=zeros(4); f(x) = { T[0]=1; T[1]=2; T[2]=3; sum(T) }; f(0)" "6"
 run "vm.assign.outer.intact" "T=zeros(4); f(x) = { T[0]=1; sum(T) }; f(0); sum(T)" "0"
 
+# Constructs the compiler has no instruction for are interpreted node-by-node
+# (EvalSub) instead of forcing the whole body back to the tree-walk evaluator.
+# Each must produce inside a body exactly what it produces at top level.
+run "vm.sub.slice"         "T=tensor(i->i*1.0,6); f(x) = sum(T[1..4]) + x; f(0)" "10"
+run "vm.sub.slice.same"    "T=tensor(i->i*1.0,6); sum(T[1..4])"       "10"
+run "vm.sub.tensorlit"     "f(x) = sum((1,2;3,4)) + x; f(0)"          "10"
+run "vm.sub.not"           "f(x) = ~(x) + 0; f(0)"                    "1"
+run "vm.sub.map"           "f(x) = map(y -> y*2, [1,2,3])[1] + x; f(0)" "4"
+run "vm.sub.reduce"        "f(x) = reduce((a,b)->a+b, [1,2,3,4]) + x; f(0)" "10"
+run "vm.sub.filter"        "f(x) = filter(y -> y>2, [1,2,3,4])[0] + x; f(0)" "3"
+run "vm.sub.deriv"         "f(x) = round(deriv(y -> y*y, x), 3); f(3)" "6"
+run "vm.sub.integral"      "f(x) = round(integral(y -> y, 0, x),3); f(2)" "2"
+run "vm.sub.record"        "f(x) = (a=x, b=x*2).b; f(3)"              "6"
+# A cell is a reference, so interpreting only the `set` call still writes through
+# to the one cell every holder shares.
+run "vm.sub.cell.set"      "c=cell(zeros(4)); f(x) = { set(c[1], x); get(c)[1] }; f(7)" "7"
+run "vm.sub.cell.update"   "c=cell(zeros(4)); f(x) = { update(c[2], v -> v + x); get(c)[2] }; f(3); f(3)" "6"
+
+# `..x` and `name = v` splice into their *enclosing* node — they do not evaluate
+# to one stack value — so the enclosing call/list must be interpreted whole.
+# Handing one to EvalSub alone breaks the operand count.
+run "vm.splat.array"       "f(x) = [..[1,2], x][0]; f(9)"             "1"
+run "vm.splat.array.sum"   "u=[1,2]; f(x) = sum([..u, x]); f(9)"      "12"
+run "vm.splat.tuple"       "u=(1,2); f(x) = len((..u, x)); f(9)"      "3"
+run "vm.splat.callargs"    "cfg=(a=1,b=2); g(a,b)=a+b; f(x) = g(..cfg) + x; f(0)" "3"
+run "vm.named.callargs"    "g(a,b)=a+b; f(x) = g(b=1, a=x); f(5)"     "6"
+run "vm.named.record.over" "cfg=(n=2,m=3); f(x) = (..cfg, n=x).n; f(9)" "9"
+
+# Assignment inside a compiled block writes a VM slot in place (StoreAssign).
+# This is the one case EvalSub cannot serve — copying the binding into a
+# sub-frame would detach it from the slot the write must land in.
+run "vm.assign.local"      "f(x) = { T = zeros(4); T[0] = x; T[1] = x*2; sum(T) }; f(3)" "9"
+run "vm.assign.compound"   "f(x) = { T = zeros(4); T[0] = x; T[0] += 5; T[0] }; f(3)" "8"
+run "vm.assign.field"      "f(x) = { w = (a=1,b=2); w.a = x; w.a + w.b }; f(9)" "11"
+run "vm.assign.computed.idx" "f(x) = { T = zeros(3); i = 1; T[i] = x; T[i] }; f(5)" "5"
+run "vm.assign.is.last"    "f(x) = { T = zeros(3); T[0] = x; T }; f(5)"  "[5, 0, 0]"
+# A root from an enclosing scope is copied into this scope before being written,
+# so neither the global nor the caller's argument can observe it.
+run "vm.assign.captured.root" "T=zeros(4); f(x) = { T[0] = x; sum(T) }; f(7)" "7"
+run "vm.assign.captured.safe" "T=zeros(4); f(x) = { T[0] = x; sum(T) }; f(7); sum(T)" "0"
+run "vm.assign.param.root" "f(T) = { T[0] = 99; sum(T) }; A=zeros(3); f(A); sum(A)" "0"
+
+# A local `f(x) = …` that calls itself compiles now (MakeClosure self_name);
+# it used to abandon the enclosing body to the tree-walk evaluator.
+run "vm.rec.local.compiled" "f(n) = { fact(x) = if(x<=1,1,x*fact(x-1)); fact(n) }; f(6)" "720"
+run "vm.rec.local.inloop"   "iterate(k -> { g(x) = if(x<=0,0,x+g(x-1)); g(3) }, 0, 3)" "6"
+# An anonymous lambda has no name to recurse through, and must not gain one.
+run "vm.lambda.no.self"     "g = 100; f(x) = { g = y -> y*2; g(x) }; f(4)" "8"
+
+# `(lo..hi)` is the only range syntax; it works in a body as at top level.
+run "vm.range.body"        "f(x) = sum((1..5)) + x; f(0)"             "15"
+run "vm.range.same"        "sum((1..5))"                              "15"
+
 # Env size must not affect call cost — the regression this section guards is
 # `make_local` rebuilding the whole environment per call. Correctness proxy:
 # a deep call chain with a large environment still resolves every name.
 run "vm.bigenv.resolves"   "a1=1;a2=2;a3=3;a4=4;a5=5; f(x) = a1+a2+a3+a4+a5+x; f(0)" "15"
+
+# ── Closure capture ───────────────────────────────────────────────────────────
+#
+# A closure captures only the names its body and its parameter defaults can
+# read, rather than the whole environment. This is the section that would catch
+# a miss in that analysis: a name the walker fails to collect does not slow a
+# closure down, it breaks it. Sound because mathlang has no string type and no
+# dynamic name lookup, so what a body can reach is what it spells.
+section "CLOSURE CAPTURE"
+
+# The capture is a snapshot: rebinding a name later does not reach back in.
+run "cap.snapshot.deffunc"  "k=10; f(x) = x+k; k=99; f(1)"            "11"
+run "cap.snapshot.lambda"   "k=10; f = x -> x+k; k=99; f(1)"          "11"
+# …but a name that did not exist yet still resolves live, so definition order
+# stays irrelevant.
+run "cap.forward"           "f(x) = g(x)+1; g(x) = x*2; f(5)"         "11"
+run "cap.mutual"            "even(n) = if(n<=0,1,odd(n-1)); odd(n) = if(n<=0,0,even(n-1)); even(7)" "0"
+
+# Names reached indirectly must still be collected.
+run "cap.member.chain"      "a=(p=1,q=(r=7)); f(x) = a.q.r + x; f(1)"  "8"
+run "cap.slice.base"        "T=tensor(i->i*1.0,5); f(x) = sum(T[1..3]) + x; f(0)" "6"
+run "cap.splat.inline"      "g(a,b)=a+b; f(x) = g(..(a=1,b=2)) + x; f(0)" "3"
+run "cap.assign.root"       "T=zeros(3); f(x) = { T[0] = x; sum(T) }; f(4)" "4"
+# A cell is captured by reference, so a later `set` *is* visible — the snapshot
+# rule applies to the binding, not to what the binding points at.
+run "cap.cell.byref"        "c=cell(5); f(x) = get(c)+x; set(c,10); f(1)" "11"
+
+# A parameter default is evaluated in the captured scope, so its names must be
+# captured as well — they never appear in the body.
+run "cap.default.name"      "K=7; f(x, y = K) = x+y; f(1)"            "8"
+run "cap.default.expr"      "K=7; f(x, y = K*2) = x+y; f(1)"          "15"
+run "cap.default.lambda"    "K=7; h = (x, y = K) -> x+y; h(1)"        "8"
+
+# Builtins, higher-order plumbing and synthetic captures (__f__/__g__).
+run "cap.builtin"           "f(x) = sin(x)+cos(x); round(f(0),3)"     "1"
+run "cap.compose"           "sq(x)=x*x; inc(x)=x+1; c = compose(sq, inc); c(3)" "16"
+run "cap.partial"           "p = partial(pow, 2); p(10)"              "1024"
+run "cap.map"               "f(x)=x*2; map(f, [1,2,3])"               "[2, 4, 6]"
+
+# A record literal is a scope: a function field closes over earlier fields,
+# including private ones, which are reachable only through it.
+run "cap.record.field"      "ns = (k = 3, g(x) = x*k); ns.g(4)"       "12"
+run "cap.record.private"    "r = (private n = 5, m = n*2); r.m"       "10"
+run "cap.record.private.fn" "v = (private eps=1e-12, mag(u)=norm(u), unit(u)=u/(mag(u)+eps)); round(sum(v.unit([3,4])),4)" "1.4"
+
+# Closures over enclosing frames at each nesting depth.
+run "cap.block.local"       "f(x) = { y = x*2; z -> z + y }; f(3)(10)" "16"
+run "cap.nested.param"      "f(a) = { g(y) = { z -> z + a + y }; g(2) }; f(100)(1)" "103"
 
 # ── GPU compute backend (only when built with --features gpu + a GPU present) ──
 section "GPU BACKEND"

@@ -10,7 +10,7 @@
 // since they operate on `Val`; only the data definition moved here.
 
 use std::sync::Arc;
-use crate::ast::{Expr, Op};
+use crate::ast::{Assign, Expr, Op};
 
 #[derive(Debug, Clone)]
 pub enum Instruction {
@@ -43,12 +43,54 @@ pub enum Instruction {
                                 // push result. The only GPU-safe recursion analogue
                                 // and the in-VM form of the special-form loops, so
                                 // they no longer force a tree-walk fallback (TODO 1e).
+    /// Tree-walk one *sub-expression* and push its value.
+    ///
+    /// The escape hatch that retires whole-body fallback. A node the compiler
+    /// cannot emit code for used to abort the entire body — and because the
+    /// `OnceLock` cached that failure, permanently — so one slice in one branch
+    /// made all of the body's arithmetic pay interpreter cost too. Now only the
+    /// unsupported node itself is interpreted.
+    ///
+    /// `binds` names the parameters and locals the sub-expression reads, resolved
+    /// to their slots at compile time; the executor copies just those into a
+    /// frame layered over the captured scope. Dedicated instructions (Slice,
+    /// Range, …) are optimizations over this, not prerequisites for it.
+    ///
+    /// Not usable for anything that *writes* a binding: copying a value into a
+    /// sub-frame detaches it from the slot being written.
+    EvalSub { expr: Arc<Expr>, binds: Vec<(String, Slot)> },
+
+    /// `T[i] = v` / `w.f += 1` inside a compiled block, writing a VM slot in place.
+    ///
+    /// The one thing `EvalSub` cannot do: an assignment mutates a *binding*, and
+    /// copying that binding into a sub-frame would detach it from the slot the
+    /// write has to land in. So the value is moved out of `slot`, mutated by the
+    /// shared tree-walk writer (identical index rules and error text), and moved
+    /// back — refcount 1 throughout, which is what keeps repeated writes O(1)
+    /// instead of copying the buffer each time (TODO 1h).
+    StoreAssign {
+        slot:   usize,          // local holding the root binding
+        assign: Arc<Assign>,    // the whole statement, re-used verbatim
+        binds:  Vec<(String, Slot)>, // params/locals the RHS and indices read
+    },
+
     MakeClosure {               // build Val::Fn capturing free vars from the stack
         params:    Vec<String>,
         body:      Arc<Expr>,
         code:      Arc<Vec<Instruction>>, // eagerly pre-compiled; empty = lazy fallback
         free_vars: Vec<String>,           // names to pop from stack into captured env
+        /// Set for a named local `f(x) = …`, so the closure can call itself
+        /// (see FnSig::self_name). None for an anonymous lambda, which has no
+        /// name to recurse through.
+        self_name: Option<String>,
     },
+}
+
+/// Where an `EvalSub` binding's value comes from in the running frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slot {
+    Param(usize),
+    Local(usize),
 }
 
 /// Which bounded-iteration special form a `Loop` instruction runs. All four share

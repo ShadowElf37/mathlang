@@ -185,11 +185,16 @@ vector, so the positional path in `apply_val` is untouched.
 
 ### Bytecode VM
 
-`Instruction` enum used by a stack-based VM. Compiled lazily on first call via `OnceLock`. Instructions: `PushNum`, `LoadParam`, `LoadCaptured`, `BinOp`, `Neg`, `CallBuiltin`, `CallVal`, `MakeTuple`, `MakeArray`, `JumpIfFalse`, `Jump`, `StoreLocal`, `LoadLocal`, `Index`, `MakeClosure`, `Return`.
+`Instruction` (in `src/vm.rs`, which depends only on `crate::ast` so `src/gpu/` can import it) used by a stack-based VM. Compiled lazily on first call via `OnceLock`. Instructions: `PushNum`, `PushComplex`, `LoadParam`, `LoadCaptured`, `BinOp`, `Neg`, `CallBuiltin`, `CallVal`, `MakeTuple`, `MakeArray`, `JumpIfFalse`, `Jump`, `StoreLocal`, `LoadLocal`, `Pop`, `Index`, `Member{field,who}`, `Loop(LoopForm,argc)`, `EvalSub{expr,binds}`, `StoreAssign{slot,assign,binds}`, `MakeClosure{..,self_name}`, `Return`.
 
-`compile_fn(params, body, captured)` → `Option<Vec<Instruction>>` — returns `None` for bodies the compiler can't handle (slices, ranges, tensor literals, recursive fns, `sum`/`prod`/`map`/`filter`/`reduce`).
+`compile_fn(params, body, captured)` → `Option<Vec<Instruction>>`. **There is no whole-body fallback any more.** A node with no instruction is emitted as `EvalSub`, which tree-walks that node alone in a frame holding just the params/locals it reads. `None` now means only "this body compiled to nothing but one whole-body `EvalSub`", where VM setup would buy nothing.
 
-`run_vm(code, args, captured, env)` — executes bytecode; falls back automatically via `apply_fn_direct`.
+Two invariants worth knowing before touching the compiler:
+
+- `Expr::Splat` and `Expr::Named` must never reach `EvalSub` alone — they splice a *variable* number of slots into the enclosing list, so the enclosing call/tuple/array is interpreted whole (`Compiler::has_spliced`). Missing this breaks `[..u, x]`, `g(..cfg)` and `g(b=1, a=x)` inside bodies.
+- An unknown name compiles to `LoadCaptured`, not a failure. It used to return `Err(())`, and the `OnceLock` cached that permanently, so a forward reference tree-walked forever.
+
+`run_vm(code, args, captured, env, me)` — executes bytecode. `me` carries the `(name, value)` self-reference from `FnSig::self_name`, which is how a recursive closure reaches itself: a closure is genuinely cyclic and `Arc<HashMap>` cannot contain itself, so the name is bound at call time instead.
 
 ### Key public functions
 
@@ -217,7 +222,17 @@ When a single argument is passed to an n-param function:
 
 ### Env
 
-`Env { vars: Arc<HashMap<String, Val>> }` — copy-on-write via `Arc::make_mut`. `Env::new()` pre-populates all constants and builtins as `Val::Builtin(name)`.
+```rust
+Env { vars: Arc<HashMap<String, Val>>, outer: Arc<[Arc<HashMap<String, Val>>]> }
+```
+
+A writable innermost frame over read-only layers, innermost first. `Env::get` walks frame → layers; `Env::define` writes only the frame, copy-on-write via `Arc::make_mut`. `Env::new()` pre-populates all constants and builtins as `Val::Builtin(name)` and has no layers.
+
+`make_local(env, captured)` builds a call frame as `[captured, globals]` — **always exactly two layers, never the caller's chain**. Splicing the caller's layers in is both dynamic scoping and quadratic in recursion depth; it broke 90 000-deep recursion outright when tried. The global frame is the last layer by construction, or `vars` itself at the top level.
+
+`capture_for(body, params, env)` builds a closure's captured map from the names the body *and the parameter defaults* can read (defaults are evaluated in the captured scope by `fill_defaults`, and their names never appear in the body). The walker `free_names` is deliberately conservative — it subtracts nothing for inner binders, since over-collecting is an Arc bump shadowed by the frame at run time while under-collecting breaks the closure. Sound because mathlang has no string type and no dynamic name lookup.
+
+`free_names` is **not** interchangeable with `collect_free_vars`/`cfv`, which answers a different question — which of the enclosing frame's slots a nested lambda must be handed — and so ignores captured names on purpose. Both exist; do not merge them.
 
 ## src/repl.rs
 
