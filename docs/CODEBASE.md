@@ -185,7 +185,7 @@ vector, so the positional path in `apply_val` is untouched.
 
 ### Bytecode VM
 
-`Instruction` (in `src/vm.rs`, which depends only on `crate::ast` so `src/gpu/` can import it) used by a stack-based VM. Compiled lazily on first call via `OnceLock`. Instructions: `PushNum`, `PushComplex`, `LoadParam`, `LoadCaptured`, `BinOp`, `Neg`, `CallBuiltin`, `CallVal`, `MakeTuple`, `MakeArray`, `JumpIfFalse`, `Jump`, `StoreLocal`, `LoadLocal`, `Pop`, `Index`, `Member{field,who}`, `Loop(LoopForm,argc)`, `EvalSub{expr,binds}`, `StoreAssign{slot,assign,binds}`, `MakeClosure{..,self_name}`, `Return`.
+`Instruction` (in `src/vm.rs`, which depends only on `crate::ast` so `src/gpu/` can import it) used by a stack-based VM. Compiled lazily on first call via `OnceLock<Option<CompiledFn>>`. Instructions: `PushNum`, `PushComplex`, `LoadParam`, `LoadCaptured`, `LoadCapturedSlot`, `BinOp`, `Neg`, `CallBuiltin`, `CallVal`, `MakeTuple`, `MakeArray`, `JumpIfFalse`, `Jump`, `StoreLocal`, `LoadLocal`, `Pop`, `Index`, `Member{field,who}`, `Loop(LoopForm,argc)`, `EvalSub{expr,binds}`, `StoreAssign{slot,assign,binds}`, `MakeClosure{..,self_name}`, `Return`.
 
 `compile_fn(params, body, captured)` → `Option<Vec<Instruction>>`. **There is no whole-body fallback any more.** A node with no instruction is emitted as `EvalSub`, which tree-walks that node alone in a frame holding just the params/locals it reads. `None` now means only "this body compiled to nothing but one whole-body `EvalSub`", where VM setup would buy nothing.
 
@@ -194,7 +194,13 @@ Two invariants worth knowing before touching the compiler:
 - `Expr::Splat` and `Expr::Named` must never reach `EvalSub` alone — they splice a *variable* number of slots into the enclosing list, so the enclosing call/tuple/array is interpreted whole (`Compiler::has_spliced`). Missing this breaks `[..u, x]`, `g(..cfg)` and `g(b=1, a=x)` inside bodies.
 - An unknown name compiles to `LoadCaptured`, not a failure. It used to return `Err(())`, and the `OnceLock` cached that permanently, so a forward reference tree-walked forever.
 
-`run_vm(code, args, captured, env, me)` — executes bytecode. `me` carries the `(name, value)` self-reference from `FnSig::self_name`, which is how a recursive closure reaches itself: a closure is genuinely cyclic and `Arc<HashMap>` cannot contain itself, so the name is bound at call time instead.
+`compile_fn` also builds a **constant pool**: a captured name becomes `LoadCapturedSlot(i)` indexing `CompiledFn { code, pool, pool_names }`, rather than hashing the string on every access. Three names are deliberately excluded, and each would yield a *wrong value* rather than an error:
+
+- `FnSig::self_name` — a previous binding of the same name may sit in `captured`. This applies to scalar **inlining** as well as pooling: missing it meant `f = 100` followed by `f(n) = … f(n-1) …` read `f` as the literal `100` and the recursive call became implicit multiplication.
+- a nested closure's `free_vars` — the inner body is compiled against a hint map holding placeholders, so `MakeClosure` carries `pool_names` and resolves the pool against the closure's *real* captured map when the closure is built. Carrying names rather than values is also what keeps `src/vm.rs` free of any dependency on `Val`.
+- names absent from `captured`, which stay `LoadCaptured(String)`.
+
+`run_vm(code, args, captured, env, me, pool)` — executes bytecode. `me` carries the `(name, value)` self-reference from `FnSig::self_name`, which is how a recursive closure reaches itself: a closure is genuinely cyclic and `Arc<HashMap>` cannot contain itself, so the name is bound at call time instead.
 
 ### Key public functions
 

@@ -365,7 +365,7 @@ pub enum Val {
     /// Fn(params, body, captured_env, bytecode_cache, sig)
     /// `bytecode_cache` is an Arc<OnceLock> so all clones share the compiled code.
     /// Initialised on first call via apply_fn_direct; None means fall back to tree-walk.
-    Fn(Vec<String>, Expr, Arc<HashMap<String, Val>>, Arc<OnceLock<Option<Vec<Instruction>>>>, Arc<FnSig>),
+    Fn(Vec<String>, Expr, Arc<HashMap<String, Val>>, Arc<OnceLock<Option<CompiledFn>>>, Arc<FnSig>),
     Builtin(String),
     Tuple(Tup),
     /// Real-valued tensor (row-major flat storage).
@@ -404,14 +404,6 @@ impl Val {
     /// Construct a new user function with a fresh (empty) bytecode cache and no type hints.
     pub fn make_fn(params: Vec<String>, body: Expr, captured: Arc<HashMap<String, Val>>) -> Self {
         Val::Fn(params, body, captured, Arc::new(OnceLock::new()), Arc::new(FnSig::default()))
-    }
-
-    /// Construct a user function with bytecode pre-filled — zero recompile cost on first call.
-    /// Used by MakeClosure to pass eagerly-compiled inner code to the resulting Val::Fn.
-    pub fn make_fn_compiled(params: Vec<String>, body: Expr, captured: Arc<HashMap<String, Val>>, code: Vec<Instruction>) -> Self {
-        let lock = OnceLock::new();
-        let _ = lock.set(Some(code));
-        Val::Fn(params, body, captured, Arc::new(lock), Arc::new(FnSig::default()))
     }
 
     /// Construct a user function with type signature hints.
@@ -3845,6 +3837,16 @@ fn cfv(
 }
 
 
+/// A compiled function body: its instructions plus the constant pool that
+/// `LoadCapturedSlot` indexes. `pool_names` is kept so a `MakeClosure` can
+/// re-resolve the pool against the closure's real captured map at run time.
+#[derive(Debug, Clone)]
+pub struct CompiledFn {
+    pub code:       Vec<Instruction>,
+    pub pool:       Vec<Val>,
+    pub pool_names: Vec<String>,
+}
+
 struct Compiler<'a> {
     params:   &'a [String],
     captured: &'a HashMap<String, Val>,
@@ -3853,6 +3855,12 @@ struct Compiler<'a> {
     /// Name to give the next `MakeClosure` a self-reference under, set only
     /// while compiling the lambda a `Def::Func` desugars to.
     pending_self: Option<String>,
+    /// Captured names promoted to pool slots, in slot order.
+    pool_names:   Vec<String>,
+    /// The function's own name, if it can call itself. Never pooled: the
+    /// executor resolves it against the function being applied, and a *previous*
+    /// binding of the same name may be sitting in `captured`.
+    self_name:    Option<&'a str>,
 }
 
 impl<'a> Compiler<'a> {
@@ -3892,6 +3900,45 @@ impl<'a> Compiler<'a> {
     /// Emit an `EvalSub` for a node the compiler has no instruction for, binding
     /// exactly the parameters and locals the node reads. This is what keeps an
     /// unsupported node from costing the *rest* of the body anything.
+    /// Promote a captured name to a pool slot, reusing the slot if it already
+    /// has one. Returns None when the name must keep a live string lookup.
+    fn pool_slot(&mut self, name: &str) -> Option<usize> {
+        if self.self_name == Some(name) { return None; }
+        if !self.captured.contains_key(name) { return None; }
+        if let Some(i) = self.pool_names.iter().position(|n| n == name) { return Some(i); }
+        self.pool_names.push(name.to_string());
+        Some(self.pool_names.len() - 1)
+    }
+
+    /// Emit the cheapest read of a captured name: nothing at all for a scalar
+    /// (inlined as a literal), a pool index when it can be resolved now, and a
+    /// live string lookup otherwise.
+    fn load_captured(&mut self, name: &str) {
+        // The self-reference is never resolved from `captured` — not as a pool
+        // slot and not as an inlined literal. A *previous* binding of the same
+        // name may be sitting there, and the executor has to resolve the name
+        // against the function actually being applied. Inlining it was a real
+        // bug: after `f = 100`, the body of `f(n) = … f(n-1) …` read `f` as the
+        // literal 100, turning the recursive call into implicit multiplication
+        // (`f(3)` gave 201 instead of 3). The tree-walk path, and any case where
+        // the shadowed value was not a scalar, always got this right.
+        if self.self_name == Some(name) {
+            self.code.push(Instruction::LoadCaptured(name.to_string()));
+            return;
+        }
+        if let Some(v) = self.captured.get(name) {
+            match v {
+                Val::Num(x)        => { self.code.push(Instruction::PushNum(*x)); return; }
+                Val::Complex(a, b) => { self.code.push(Instruction::PushComplex(*a, *b)); return; }
+                _ => {}
+            }
+        }
+        match self.pool_slot(name) {
+            Some(i) => self.code.push(Instruction::LoadCapturedSlot(i)),
+            None    => self.code.push(Instruction::LoadCaptured(name.to_string())),
+        }
+    }
+
     /// Where a name lives in the running frame, if it is a param or a local.
     /// Locals shadow params, matching the `Expr::Var` arm.
     fn slot_of(&self, name: &str) -> Option<Slot> {
@@ -3932,16 +3979,8 @@ impl<'a> Compiler<'a> {
                     self.code.push(Instruction::LoadLocal(i));
                 } else if let Some(i) = self.param_index(name) {
                     self.code.push(Instruction::LoadParam(i));
-                } else if let Some(v) = self.captured.get(name.as_str()) {
-                    match v {
-                        // Inline scalar constants — avoids a HashMap lookup on every call.
-                        Val::Num(x)        => self.code.push(Instruction::PushNum(*x)),
-                        Val::Complex(a, b) => self.code.push(Instruction::PushComplex(*a, *b)),
-                        // Cells must be loaded live; their inner value can change.
-                        // Everything else (Builtin, Fn, Tensor, Tuple) is also loaded live
-                        // so the VM uses the current binding, not a stale snapshot.
-                        _                  => self.code.push(Instruction::LoadCaptured(name.clone())),
-                    }
+                } else if self.captured.contains_key(name.as_str()) {
+                    self.load_captured(name);
                 } else {
                     // Not in the captured snapshot — a forward reference, a
                     // mutually recursive callee, or the function's own name.
@@ -4201,15 +4240,22 @@ impl<'a> Compiler<'a> {
                     hint.insert(name.clone(), Val::tup(vec![]));
                 }
                 let hint_arc = Arc::new(hint);
-                let inner_code = compile_fn(inner_params_slice, inner_body, &hint_arc)
-                    .map(Arc::new)
-                    .unwrap_or_else(|| Arc::new(vec![]));
+                let self_name = self.pending_self.take();
+                let inner = compile_fn(
+                    inner_params_slice, inner_body, &hint_arc, self_name.as_deref());
+                // Empty code = no usable compile; the closure falls back to lazy
+                // compilation against its real captured map on first call.
+                let (inner_code, pool_names) = match inner {
+                    Some(c) => (Arc::new(c.code), c.pool_names),
+                    None    => (Arc::new(vec![]), vec![]),
+                };
                 self.code.push(Instruction::MakeClosure {
                     params: inner_params,
                     body:   Arc::new(*inner_body.clone()),
                     code:   inner_code,
                     free_vars,
-                    self_name: self.pending_self.take(),
+                    pool_names,
+                    self_name,
                 });
             }
 
@@ -4226,11 +4272,15 @@ impl<'a> Compiler<'a> {
 /// Compile a function body to bytecode.  Returns None if any node is unsupported;
 /// the caller falls back to the tree-walk evaluator.
 fn compile_fn(
-    params:   &[String],
-    body:     &Expr,
-    captured: &Arc<HashMap<String, Val>>,
-) -> Option<Vec<Instruction>> {
-    let mut c = Compiler { params, captured, code: vec![], locals: vec![], pending_self: None };
+    params:    &[String],
+    body:      &Expr,
+    captured:  &Arc<HashMap<String, Val>>,
+    self_name: Option<&str>,
+) -> Option<CompiledFn> {
+    let mut c = Compiler {
+        params, captured, code: vec![], locals: vec![],
+        pending_self: None, pool_names: vec![], self_name,
+    };
     c.compile(body).ok()?;
     // A body that compiled to nothing but one whole-body EvalSub would pay VM
     // setup to do exactly what the tree-walk path does directly. Hand it back.
@@ -4238,7 +4288,9 @@ fn compile_fn(
         return None;
     }
     c.code.push(Instruction::Return);
-    Some(c.code)
+    // `pool_slot` only admits names present in `captured`, so this cannot fail.
+    let pool = c.pool_names.iter().map(|n| captured[n.as_str()].clone()).collect();
+    Some(CompiledFn { code: c.code, pool, pool_names: c.pool_names })
 }
 
 // ── Bytecode VM helpers ────────────────────────────────────────────────────────
@@ -4329,10 +4381,11 @@ fn run_vm(
     captured: &Arc<HashMap<String, Val>>,
     env:      &Env,
     me:       Option<(&str, &Val)>,
+    pool:     &[Val],
 ) -> Result<Val, String> {
     let mut stack:  Vec<Val> = Vec::with_capacity(16);
     let mut locals: Vec<Val> = Vec::new();
-    run_vm_reuse(code, args, captured, env, &mut stack, &mut locals, me)
+    run_vm_reuse(code, args, captured, env, &mut stack, &mut locals, me, pool)
 }
 
 // Same as `run_vm` but reuses caller-owned `stack`/`locals` buffers, so a tight
@@ -4346,6 +4399,7 @@ fn run_vm_reuse(
     stack:    &mut Vec<Val>,
     locals:   &mut Vec<Val>,
     me:       Option<(&str, &Val)>,
+    pool:     &[Val],
 ) -> Result<Val, String> {
     stack.clear();
     locals.clear();
@@ -4356,6 +4410,7 @@ fn run_vm_reuse(
             Instruction::PushNum(n)         => stack.push(Val::Num(*n)),
             Instruction::PushComplex(a, b)  => stack.push(make_complex(*a, *b)),
             Instruction::LoadParam(i)       => stack.push(args[*i].clone()),
+            Instruction::LoadCapturedSlot(i) => stack.push(pool[*i].clone()),
             Instruction::LoadCaptured(name) => {
                 // The self-reference wins: it is the only binding that cannot be
                 // in `captured` (a map cannot contain the function that owns it).
@@ -4490,7 +4545,7 @@ fn run_vm_reuse(
                 }?;
                 stack.push(result);
             }
-            Instruction::MakeClosure { params, body, code, free_vars, self_name } => {
+            Instruction::MakeClosure { params, body, code, free_vars, pool_names, self_name } => {
                 let start = stack.len() - free_vars.len();
                 let vals: Vec<Val> = stack.drain(start..).collect();
                 let mut new_captured = (**captured).clone();
@@ -4503,8 +4558,28 @@ fn run_vm_reuse(
                 let fn_val = if code.is_empty() {
                     Val::make_fn_with_sig(params.clone(), sig, (**body).clone(), new_cap)
                 } else {
-                    Val::Fn(params.clone(), (**body).clone(), new_cap,
-                            Arc::new({ let l = OnceLock::new(); let _ = l.set(Some((**code).clone())); l }),
+                    // The pool is resolved here, against the closure's real
+                    // captured map — the inner body was compiled against a hint
+                    // holding placeholders for `free_vars`, so resolving at
+                    // compile time would have frozen the placeholder. Only names
+                    // present in that hint were pooled, and the hint's names are
+                    // all present here, so a miss is a compiler bug and says so.
+                    let mut pool = Vec::with_capacity(pool_names.len());
+                    for n in pool_names {
+                        pool.push(new_cap.get(n.as_str())
+                            .ok_or_else(|| format!("vm: closure pool missing '{n}'"))?
+                            .clone());
+                    }
+                    Val::Fn(params.clone(), (**body).clone(), Arc::clone(&new_cap),
+                            Arc::new({
+                                let l = OnceLock::new();
+                                let _ = l.set(Some(CompiledFn {
+                                    code: (**code).clone(),
+                                    pool,
+                                    pool_names: pool_names.clone(),
+                                }));
+                                l
+                            }),
                             Arc::new(sig))
                 };
                 stack.push(fn_val);
@@ -4556,14 +4631,15 @@ fn eval_tensor_cells(f: &Val, shape: &[usize], ndim: usize, total: usize, env: &
 
     if let Val::Fn(params, body, captured, cache, sig) = f {
         if params.len() == ndim && sig.params.iter().all(|p| p.is_none()) && sig.ret.is_none() {
-            if let Some(code) = cache.get_or_init(|| compile_fn(params, body, captured)) {
+            if let Some(c) = cache.get_or_init(
+                || compile_fn(params, body, captured, sig.self_name.as_deref())) {
                 let mut stack:  Vec<Val> = Vec::with_capacity(16);
                 let mut locals: Vec<Val> = Vec::new();
                 let mut cell_args: Vec<Val> = vec![Val::Num(0.0); ndim];
                 for _ in 0..total {
                     for k in 0..ndim { cell_args[k] = Val::Num(indices[k] as f64); }
-                    let v = run_vm_reuse(code, &cell_args, captured, env, &mut stack, &mut locals,
-                                         sig.self_name.as_deref().map(|n| (n, f)))?;
+                    let v = run_vm_reuse(&c.code, &cell_args, captured, env, &mut stack, &mut locals,
+                                         sig.self_name.as_deref().map(|n| (n, f)), &c.pool)?;
                     match &v {
                         Val::Complex(..) => has_complex = true,
                         Val::Num(_) => {}
@@ -4668,7 +4744,7 @@ fn apply_fn_direct(
     sig:      &FnSig,
     body:     &Expr,
     captured: &Arc<HashMap<String, Val>>,
-    cache:    &Arc<OnceLock<Option<Vec<Instruction>>>>,
+    cache:    &Arc<OnceLock<Option<CompiledFn>>>,
     args:     Vec<Val>,
     env:      &Env,
     me:       &Val,
@@ -4696,9 +4772,9 @@ fn apply_fn_direct(
     // A recursive function reaches itself by name (see FnSig::self_name); bind it
     // in the frame the body runs in.
     let me_ref = sig.self_name.as_deref().map(|n| (n, me));
-    let code = cache.get_or_init(|| compile_fn(params, body, captured));
+    let code = cache.get_or_init(|| compile_fn(params, body, captured, sig.self_name.as_deref()));
     let result = match code {
-        Some(code) => run_vm(code, &args, captured, env, me_ref),
+        Some(c) => run_vm(&c.code, &args, captured, env, me_ref, &c.pool),
         None => {
             let mut local = make_local(env, captured);
             if let Some((n, v)) = me_ref { local.define(n.to_string(), v.clone()); }

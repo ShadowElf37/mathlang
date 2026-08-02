@@ -18,6 +18,22 @@ pub enum Instruction {
     PushComplex(f64, f64),
     LoadParam(usize),           // bind from args[i]
     LoadCaptured(String),       // live env lookup (Cells, Fns, Tensors)
+    /// Index into the function's constant pool — a captured name resolved to a
+    /// slot at compile time instead of hashing the string on every access.
+    ///
+    /// Sound because `captured` never changes for the life of a `Val::Fn`, so
+    /// `captured[name]` is the same value on every call. Scalars are already
+    /// inlined as literals, so this covers captured tensors, functions and cells,
+    /// measured at ~140 ns per access before pooling.
+    ///
+    /// Two names must NOT be pooled, and both fail silently with a wrong value
+    /// rather than an error (see TODO 1k):
+    ///   - the function's own `FnSig::self_name`, since the executor resolves
+    ///     that against the function being applied and a *previous* binding of
+    ///     the same name may sit in `captured`;
+    ///   - any name absent from `captured`, which stays `LoadCaptured(String)` so
+    ///     forward references keep resolving live.
+    LoadCapturedSlot(usize),
     BinOp(Op),                  // pop 2, push 1
     Neg,                        // pop 1, push 1
     CallBuiltin(String, usize), // pop argc args, call builtin, push result
@@ -79,6 +95,13 @@ pub enum Instruction {
         body:      Arc<Expr>,
         code:      Arc<Vec<Instruction>>, // eagerly pre-compiled; empty = lazy fallback
         free_vars: Vec<String>,           // names to pop from stack into captured env
+        /// Names backing `code`'s `LoadCapturedSlot` indices. Resolved against
+        /// the closure's *actual* captured map when the closure is built, not at
+        /// compile time — the inner body is compiled against a hint map holding
+        /// placeholders for `free_vars`, so a compile-time pool would freeze the
+        /// placeholder. Keeping names here (rather than values) is also what lets
+        /// this file stay free of any dependency on `Val`.
+        pool_names: Vec<String>,
         /// Set for a named local `f(x) = …`, so the closure can call itself
         /// (see FnSig::self_name). None for an anonymous lambda, which has no
         /// name to recurse through.

@@ -2268,6 +2268,37 @@ run "cap.record.private.fn" "v = (private eps=1e-12, mag(u)=norm(u), unit(u)=u/(
 run "cap.block.local"       "f(x) = { y = x*2; z -> z + y }; f(3)(10)" "16"
 run "cap.nested.param"      "f(a) = { g(y) = { z -> z + a + y }; g(2) }; f(100)(1)" "103"
 
+# A captured name is read through a compile-time pool slot rather than a string
+# lookup. Three names must be kept *out* of that pool, and each one would
+# produce a wrong value rather than an error — hence these tests.
+#
+# (1) The function's own name. A previous binding of it may sit in the captured
+# snapshot, so the body must resolve it against the function being applied.
+# Inlining a scalar one turned `f(n-1)` into implicit multiplication: `f = 100`
+# then `f(n) = … f(n-1) …` gave 201 instead of 3.
+run "pool.self.shadow.num"  "f = 100; f(n) = if(n<=0,0,f(n-1)+1); f(3)" "3"
+run "pool.self.shadow.tensor" "T=ones(2); f(n) = if(n<=0,0,f(n-1)+1); f(3)" "3"
+run "pool.self.shadow.local" "g = 7; f(n) = { g(x) = if(x<=0,0,x+g(x-1)); g(n) }; f(4)" "10"
+run "pool.self.shadow.fn"   "g(x) = 999; f(n) = { g(x) = if(x<=0,0,x+g(x-1)); g(n) }; f(4)" "10"
+
+# (2) A nested closure's free variables. Its body is compiled against a hint map
+# holding placeholders, so the pool is resolved when the closure is *built*, not
+# when it is compiled — otherwise every closure would freeze the placeholder,
+# and closures from one site would share one value.
+run "pool.closure.freevar"  "f(a) = { g = y -> y + a; g(1) }; f(100)" "101"
+run "pool.closure.distinct" "f(a) = { g = y -> y + a; g(0) }; f(1) + f(10)" "11"
+run "pool.closure.tensor"   "f(a) = { T = ones(3)*a; g = y -> sum(T) + y; g(0) }; f(2) + f(5)" "21"
+run "pool.closure.escaping" "mk(a) = { y -> y + a }; p = mk(1); q = mk(10); p(0) + q(0)" "11"
+
+# (3) Names absent when the body was compiled, which must stay live lookups.
+run "pool.absent.forward"   "f(x) = g(x)+1; g(x) = x*2; f(5)"          "11"
+run "pool.absent.mutual"    "even(n) = if(n<=0,1,odd(n-1)); odd(n) = if(n<=0,0,even(n-1)); even(7)" "0"
+# Pooling must not change *when* a value is read: it is the same snapshot the
+# captured map already held, so a later rebinding is still invisible, and a cell
+# is still shared.
+run "pool.snapshot"         "T=ones(3); f(x) = sum(T)+x; T=zeros(3); f(0)" "3"
+run "pool.cell.byref"       "c=cell(5); f(x) = get(c)+x; set(c,10); f(1)" "11"
+
 # ── GPU compute backend (only when built with --features gpu + a GPU present) ──
 section "GPU BACKEND"
 gpu_probe=$("$M" 'GPU { 1 + 1 }' 2>&1)
