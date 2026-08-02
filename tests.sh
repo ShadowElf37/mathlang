@@ -1182,6 +1182,16 @@ run "demag.conv_by_sym" "m=tensor((i,j,c)->[1,0,0][c],4,4,3); K=demagkernel(4,4,
 run "exch.separable_lap" "m=tensor((i,j,c)->[1,0,0][c],4,4,3); round(max(abs((shift(m,1,0)+shift(m,-1,0)-2*m)/9 + (shift(m,1,1)+shift(m,-1,1)-2*m)/16)),9)" "0"
 # the mag.world construction pattern: enrich a config record (unpack cell -> dx)
 run "world.record_enrich" "f(c) = (nx=c.nx, dx=c.cell[0], dy=c.cell[1]); w = f((nx=8, cell=(0.5,0.7,0.9))); (w.nx, w.dx, w.dy)" "(8, 0.5, 0.7)"
+# mag.world is a constructor: named args, a defaulted alpha, splat, and override.
+_file_check "world.named" "!include mag
+w = mag.world(nx=8, ny=4, cell=(1e-9,2e-9,3e-9), Msat=800e3, Aex=13e-12)
+!print nx={w.nx} dy={w.dy} alpha={w.alpha}"                            "nx=8 dy=0.000000002 alpha=0.02"
+_file_check "world.splat.vary" "!include mag
+c = (nx=8, ny=4, cell=(1e-9,1e-9,3e-9), Msat=800e3, Aex=13e-12)
+w = mag.world(..c)
+!print base={w.alpha} varied={(..w, alpha=0.05).alpha}"                "base=0.02 varied=0.05"
+_file_check "world.err.missing" "!include mag
+mag.world(nx=8)"                                                        "missing required argument 'ny'"
 
 # ── shape masks (geometry) ────────────────────────────────────────────────────
 section "SHAPE MASKS"

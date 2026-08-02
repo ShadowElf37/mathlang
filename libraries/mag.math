@@ -7,10 +7,12 @@
 # Two levels of API:
 #   * High-level, bundling geometry+material into a `world` record (like a mumax
 #     script, but the world is an explicit value, not hidden global state):
-#         w = mag.world((nx=128, ny=32, cell=(3.9e-9,3.9e-9,3e-9),
-#                        Msat=800e3, Aex=13e-12, alpha=0.02))
+#         w = mag.world(nx=128, ny=32, cell=(3.9e-9,3.9e-9,3e-9),
+#                       Msat=800e3, Aex=13e-12)         # alpha defaults to 0.02
 #         relaxed = mag.relax(w, m0)                    # damped LLG to equilibrium
 #         final   = mag.reverse(w, relaxed, Bext, 1e-9) # adaptive RK45 to t_end
+#     A sweep varies one parameter without respelling the rest:
+#         damped  = mag.reverse((..w, alpha = 0.05), relaxed, Bext, 1e-9)
 #   * Low-level building blocks (exchangeField, demagField, llg, step, run,
 #     adaptive) for full control.
 !namespace mag
@@ -122,11 +124,16 @@ adaptive(m0, heff, a, dt0, t_end, tol, maxsteps) =
 # ── High-level `world` API ──────────────────────────────────────────────────────
 
 # --- world: bundle geometry + material into an explicit record ---
-# cfg is a record with fields: nx, ny, cell=(dx,dy,dz), Msat, Aex, alpha.
-!helpdef mag.world bundle geometry+material into a world record. Pass a record cfg=(nx=, ny=, cell=(dx,dy,dz), Msat=, Aex=, alpha=); returns a world with dx,dy,dz unpacked, read by relax/reverse/effField.
-world(cfg) = (nx = cfg.nx, ny = cfg.ny,
-              dx = cfg.cell[0], dy = cfg.cell[1], dz = cfg.cell[2],
-              Msat = cfg.Msat, Aex = cfg.Aex, alpha = cfg.alpha)
+# A constructor: call it with named arguments in any order, or splat a config
+# record with `..cfg`. Omitting a required argument names the one you missed.
+#   w = mag.world(nx = 128, ny = 32, cell = (3.9e-9, 3.9e-9, 3e-9),
+#                 Msat = 800e3, Aex = 13e-12)          # alpha defaults to 0.02
+#   w2 = mag.world(..cfg, alpha = 0.05)                # vary one parameter
+!helpdef mag.world bundle geometry+material into a world record. Named args (nx, ny, cell=(dx,dy,dz), Msat, Aex, alpha=0.02); splat a config record with mag.world(..cfg). Returns a world with dx,dy,dz unpacked, read by relax/reverse/effField.
+world(nx: nat, ny: nat, cell, Msat: real, Aex: real, alpha: real = 0.02) =
+    (nx = nx, ny = ny,
+     dx = cell[0], dy = cell[1], dz = cell[2],
+     Msat = Msat, Aex = Aex, alpha = alpha)
 
 # --- effective field (Tesla) for a world: exchange + demag + applied field Bext ---
 !helpdef mag.effField effective field (Tesla) for a world w: exchange + demag + the applied field Bext ([nx,ny,3]). Args (w, m, Bext).

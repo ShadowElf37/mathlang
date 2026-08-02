@@ -6,7 +6,8 @@
 src/
   main.rs          — CLI entry point; dispatches to REPL or file mode
   lexer.rs         — Tokenizer (Token enum, Lexer struct)
-  ast.rs           — AST nodes: Expr, Def, BlockStmt, TypeHint, Param, Op
+  ast.rs           — AST nodes: Expr, Def, BlockStmt, Assign/LValue/PathSeg,
+                     TypeHint, Param, Field, Op
   parser.rs        — Recursive descent parser (Parser struct)
   eval.rs          — Evaluator, builtins, VM, type inference (largest file ~5000 lines)
   ns/              — Standard namespaces (`.` access), each in its own module:
@@ -43,40 +44,56 @@ docs/              — This file and other documentation
 
 Defines all AST node types. Key enums:
 
-- **`Expr`** — expression nodes: `Num`, `ImagLit`, `Var`, `BinOp`, `Neg`, `Apply`, `Lambda`, `Tuple`, `Array`, `TensorLit`, `Index`, `Slice`, `Range`, `Block`
+- **`Expr`** — expression nodes: `Num`, `ImagLit`, `Var`, `BinOp`, `Neg`, `Not`, `Apply`, `Lambda`, `Tuple`, `Record`, `Array`, `TensorLit`, `Index`, `Member`, `Slice`, `Range`, `Block`, `GpuBlock`, `Named`, `Splat`
 - **`Def`** — `Var(name, expr)` or `Func(name, params, ret_hint, body)`
-- **`BlockStmt`** — `Def(Def)` or `Expr(Expr)` (statements inside `{...}`)
+- **`BlockStmt`** — `Def(Def)`, `Assign(Assign)`, or `Expr(Expr)` (statements inside `{...}` and at the top level)
 - **`TypeHint`** — `Any | Num | Real | Complex | Int | Nat | Tensor | RealTensor | ComplexTensor | Fn | Cell | Tuple`
-- **`Param`** — `{ name: String, hint: Option<TypeHint> }`
+- **`Param`** — `{ name, hint: Option<TypeHint>, default: Option<Expr> }`
+- **`Field`** — one item of a record literal: `{ name: Option<String>, value: Expr, private: bool, func: bool }`
+- **`Assign` / `LValue` / `PathSeg`** — `root[i].f = v`: a root name plus `Index(Expr)` / `Field(String)` steps, with `op: Option<Op>` for the compound forms
+
+### Two nodes that are only legal in a list
+
+`Splat(e)` (`..x`) and `Named(name, e)` (`x = 1`) are argument/item wrappers, not
+standalone expressions. Wrapping rather than changing `Apply`'s or `Tuple`'s
+shape keeps every generic traversal working; evaluating one directly is an
+error, and the parser only produces them where they mean something —
+`Splat` in paren lists, array literals and call arguments (never inside `T[…]`,
+where `..` is a slice); `Named` only in call arguments.
 
 ## src/lexer.rs
 
-`Lexer::new(src).tokenize()` → `Vec<Token>`.  Token variants include: `Num(f64)`, `Imag(f64)`, `Ident(String)`, `Arrow`, `Colon`, `LParen`/`RParen`, `LBracket`/`RBracket`, `LBrace`/`RBrace`, `Comma`, `Semicolon`, `DotDot`, `Bang`, `Eq`/`EqEq`/`BangEq`, arithmetic operators, `Eof`.
+`Lexer::new(src).tokenize()` → `Vec<Token>`.  Token variants include: `Num(f64)`, `Imag(f64)`, `Ident(String)`, `Arrow`, `Colon`, `LParen`/`RParen`, `LBracket`/`RBracket`, `LBrace`/`RBrace`, `Comma`, `Semicolon`, `DotDot`, `Bang`, `Eq`/`EqEq`/`BangEq`, `PlusEq`/`MinusEq`/`StarEq`/`SlashEq`, arithmetic operators, `Eof`.
 
 ## src/parser.rs
 
-`Parser::new(toks).parse_repl()` → `(Vec<Def>, Vec<Expr>)`.
+`Parser::new(toks).parse_repl()` → `Vec<BlockStmt>`.
 
 Key parsing methods:
 
-- **`parse_repl()`** — parses one REPL line: zero or more `Def`s (separated by `;`), then zero or more `Expr`s
+- **`parse_repl()`** — parses one REPL line into `BlockStmt`s (defs, assignments and expressions interleaved, separated by `;`)
 - **`parse_def()`** — `name = expr` (Var) or `name(params) [: ret] = expr` (Func)
+- **`is_assign_start()` / `parse_assign()`** — an assignment statement: a root name, a balanced path of `[…]`/`.name` steps, then `=` or a compound `+= -= *= /=`. Distinct from `is_def_start`, which owns the bare `name = …` and `name(params) = …` forms
+- **`parse_index_brackets()`** — `[ … ]` → the index expression; shared by `postfix` (reads) and `parse_assign` (writes) so both resolve indices identically
+- **`parse_call_arg()`** — one call argument: `..x` splat, `name = expr` named argument, or positional
+- **`parse_paren_item()`** — one paren-list item: `..x` splat, a `private`-marked definition, a named field, or positional
 - **`expr()`** / **`cmp()`** / **`add()`** / **`mul()`** / **`pow()`** / **`postfix()`** / **`primary()`** — operator precedence chain
 - **`primary()`** handles: numeric literals, imaginary literals, `(...)` tuples/lambdas/matrices, `[...]` array/matrix literals, `{...}` blocks, identifiers (variables, function calls, single-arg lambdas `x ->`, typed single-arg lambdas `x: type ->`)
 - **`looks_like_paren_lambda()`** / **`is_multi_lambda()`** — lookahead helpers that determine whether to parse as lambda vs tuple/call
-- **`parse_param()`** — `name [: type_hint]`
+- **`parse_param()`** — `name [: type_hint] [= default]`
+- **`skip_param_default()`** — lookahead helper so the paren-lambda scan steps over a default
 
 Lambda forms supported:
 - `x -> body` — bare single-arg
 - `x: type -> body` — bare single-arg with type hint
 - `(x, y) -> body` — paren multi-arg
 - `(x: type, y) -> body` — paren multi-arg with hints
-- `x, y -> body` — multi-arg without parens (via `is_multi_lambda`)
+- `x, y -> body` — multi-arg without parens (via `is_multi_lambda`); no defaults in this form
 - `() -> body` — zero-arg
 
 ## src/eval.rs
 
-The core module (~4100 lines). Divided into:
+The core module (~5800 lines). Divided into:
 
 ### Value types
 
@@ -88,18 +105,23 @@ enum Val {
     Builtin(name: String),
     Tensor { data: TData, shape: Vec<usize> },
     ComplexTensor { re: TData, im: TData, shape: Vec<usize> },
-    Tuple(Vec<Val>),
-    Cell(RefCell<Val>),
-    Namespace(Arc<HashMap<String, Val>>),   // ns.member access
+    Tuple(Tup),                             // positional or named (records, namespaces)
+    Cell(Arc<RefCell<Val>>),                // shared mutable container (identity semantics)
+    Field(Arc<FieldVal>),                   // k-form / vector field on a grid
 }
 ```
+
+`Tup` is `{ items: Vec<Val>, names: Option<Arc<Vec<Option<String>>>> }` — it
+collapses to positional when no slot is named, so "record" and "tuple" are one
+type and a namespace is just a named tuple. There is no separate `Namespace`
+variant.
 
 `TData` is `Arc<Vec<f64>>` with copy-on-write semantics — O(1) clone.
 
 ### Namespaces
 
 `Expr::Member(base, field)` (parsed from `base.field` — `Token::Dot` in the postfix
-loop) evaluates `base` to a `Val::Namespace` and looks up `field`. Standard
+loop) evaluates `base` to a named `Val::Tuple` and looks up `field`. Standard
 namespaces are registered in `Env::new` via `crate::ns::register_all`. Relocated
 builtins are exposed as `Val::Builtin("<bare>")` so they dispatch through the
 unchanged `eval_builtin` match; new PDE functions (ops/solver) route from
@@ -123,7 +145,43 @@ on entry to `eval_builtin`. `ops::dispatch` checks for a leading `Val::Field` an
 routes to its field-polymorphic branch (`field_dispatch`), reading dx/bc from the
 field and returning a field.
 
-`FnSig { params: Vec<Option<TypeHint>>, ret: Option<TypeHint> }` stored with each `Val::Fn`.
+`FnSig { params: Vec<Option<TypeHint>>, defaults: Vec<Option<Expr>>, ret: Option<TypeHint> }`
+stored with each `Val::Fn`. `defaults` is empty when the function has none.
+`sig.required(n)` is the index of the first defaulted parameter — how many
+arguments a call must supply.
+
+### Updates: two axes, one writer
+
+Both update forms share `resolve_path` → `Vec<Step>` (indices already evaluated)
+and `write_steps`, in the "Paths" section of eval.rs:
+
+| | whole value | part of a value | semantics |
+|---|---|---|---|
+| binding | `T = v` | `T[i] = v`, `w.f = v` | `eval_assign` rebinds the name in the current scope |
+| cell | `set(c, v)` | `set(c[i], v)`, `update(c.f, g)` | `eval_cell_write` writes through the `Arc<RefCell<Val>>` |
+
+Neither dispatches on a runtime type: the syntax decides. Key invariants —
+
+- `resolve_index_item` splits into `eval_index_item` + `resolve_idx_item`, so an
+  assignment evaluates its whole path **before** taking the root out of the
+  environment (`T[T[0]] = 1` still sees `T`).
+- `set`/`update` are special forms in the `Expr::Apply` arm (they need the
+  unevaluated path); the `eval_builtin` arms remain for their first-class-value
+  use. `Compiler::compile` declines `set`/`update` whose first argument is an
+  `Index`/`Member`, and any body containing a `BlockStmt::Assign`.
+- Cell writes evaluate every argument before borrowing, and `update` applies its
+  function with the borrow released, so a cell can be read inside its own update.
+- Tensor stores go through `TData`'s `Arc::make_mut` once per store: in place
+  when the buffer is unshared, one copy when it is not.
+
+### Argument binding
+
+`fill_defaults` runs at the top of `apply_fn_direct`, before hint coercion and
+before the VM/tree-walk split, so `LoadParam` indices are unaffected and every
+call path (VM, `map`, `iterate`) gets defaults. Named arguments are resolved
+separately in the `Expr::Apply` arm by `eval_call_args` + `bind_named_args`,
+where the callee's parameter names are known; they produce a complete positional
+vector, so the positional path in `apply_val` is untouched.
 
 ### Bytecode VM
 
@@ -147,7 +205,7 @@ field and returning a field.
 
 ### Builtin categories
 
-Arithmetic/algebra, trig, complex, stats, higher-order (`map`, `filter`, `reduce`, `compose`, `partial`), aggregates (`sum`, `prod`, `integral`, `deriv`), linspace/range, rand, bitwise, FFT/IFFT, tensor constructors (`zeros`, `ones`, `eye`, `diag`, `tensor`, `matrix`), tensor ops (reshape, permute, cat, squeeze, unsqueeze, outer, tensordot, matmul, etc.), linear algebra (det, inv, solve, eig, QR, diagonalize), shift/roll, lerp/clamp, lingrid, cell/get/set.
+Arithmetic/algebra, trig, complex, stats, higher-order (`map`, `filter`, `reduce`, `compose`, `partial`), aggregates (`sum`, `prod`, `integral`, `deriv`), linspace/range, rand, bitwise, FFT/IFFT, tensor constructors (`zeros`, `ones`, `eye`, `diag`, `tensor`, `matrix`), tensor ops (reshape, permute, cat, squeeze, unsqueeze, outer, tensordot, matmul, etc.), linear algebra (det, inv, solve, eig, QR, diagonalize), shift/roll, lerp/clamp, lingrid, cell/get/set/update.
 
 ### apply_val destructuring
 
@@ -192,6 +250,7 @@ Handles all `!`-prefixed REPL commands:
 | `!savenpy`/`!loadnpy` | NumPy `.npy` format |
 | `!savehdf5`/`!loadhdf5` | HDF5 (feature-gated) |
 | `!version` | Print version |
+| `!helpdef <ns>[.<member>] <text>` | Set help text for a user namespace/member |
 
 ### MathHelper
 

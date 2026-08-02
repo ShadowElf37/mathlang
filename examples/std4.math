@@ -9,10 +9,11 @@
 # View the result live with:  !animateField final
 !include mag
 
-# geometry + material bundled into a world record
-w = mag.world((nx = 128, ny = 32,
-               cell = (500e-9/128, 125e-9/32, 3e-9),
-               Msat = 800e3, Aex = 13e-12, alpha = 0.02))
+# geometry + material bundled into a world record. `alpha` defaults to 0.02;
+# a sweep would vary it in place with mag.reverse((..w, alpha = 0.05), …).
+w = mag.world(nx = 128, ny = 32,
+              cell = (500e-9/128, 125e-9/32, 3e-9),
+              Msat = 800e3, Aex = 13e-12)
 
 # relax an almost-uniform state to the S-state
 m0      = vec.normalize(mag.bcast([1, 0.1, 0], w.nx, w.ny))
