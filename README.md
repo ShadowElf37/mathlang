@@ -330,6 +330,78 @@ complex
 
 ---
 
+## Default and named parameters
+
+A parameter may carry a default value, and a call may name its arguments. Between
+them, a function becomes a **constructor**: it states what it needs, fills in what
+it can, and names what it got.
+
+```
+> f(a, b = 10) = a + b
+> f(1)
+result = 11
+> f(1, 2)
+result = 3
+```
+
+Defaults are evaluated **at call time**, in the function's own scope extended with
+the parameters already bound — so a default may refer to an earlier parameter:
+
+```
+> f(a, b = a * 2) = a + b
+> f(5)
+result = 15
+```
+
+Naming an argument lets you pass it out of order, skip over an earlier default, and
+say at the call site what each value means:
+
+```
+> f(a, b, c) = a*100 + b*10 + c
+> f(1, c = 3, b = 2)
+result = 123
+```
+
+Together with a [splat](#splat-x) this is what makes a record a first-class config:
+`..cfg` spreads a record's fields into named arguments, and an explicit argument
+overrides one that was spliced.
+
+```
+> world(nx, ny, cell, Msat, Aex, alpha = 0.02) =
+    (nx = nx, ny = ny, dx = cell[0], Msat = Msat, Aex = Aex, alpha = alpha)
+> cfg = (nx = 128, ny = 32, cell = (3.9e-9, 3.9e-9, 3e-9), Msat = 800e3, Aex = 13e-12)
+> w  = world(..cfg)                    # alpha takes its default
+> w2 = world(..cfg, alpha = 0.05)      # …or is overridden for one run
+```
+
+A parameter with no default is required, and the error says which one is missing:
+
+```
+> world(nx = 128)
+error: missing required argument 'ny'
+```
+
+`!type` shows which parameters may be omitted:
+
+```
+> f(a: real, b: nat = 3) = a + b
+> !type f
+f(real, b: nat = …) -> real
+```
+
+Notes:
+
+- Required parameters must come before defaulted ones.
+- Named arguments need a **user function** — a builtin has no parameter names,
+  so `sin(x = 1)` is an error.
+- Names are resolved at the call site, so they do not survive being passed
+  through `map`/`compose`. Defaults do: they are filled on every call path.
+- The bare multi-argument lambda `n, r -> …` has no defaults, because `r = 2 -> …`
+  could not be told from a default whose value is a lambda. Use parens:
+  `(n, r = 2) -> …`.
+
+---
+
 ## Arrays `[...]` vs. tuple trees `(...)`
 
 There are two container syntaxes, and they mean different things:
@@ -412,7 +484,9 @@ Notes:
   `(f = (a, b) -> a + b)` — otherwise the comma would be read as a field
   separator.
 - Duplicate field names are an error.
-- `f(x = 1)` is **not** a keyword argument. Pass a record explicitly: `f((x = 1))`.
+- `f(x = 1)` is a **named argument** (see
+  [Default and named parameters](#default-and-named-parameters)), not a 1-field
+  record. To pass a record, give it its own parens: `f((x = 1))`.
 - Field names are a syntax and display concept only. mathlang has no string type,
   so there is no way to obtain a field name as a *value*, and no dynamic key
   lookup. Use `!type` or just print the record to see them.

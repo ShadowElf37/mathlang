@@ -204,6 +204,10 @@ fn hoist_gets(
         // list — neither of which this backend has any representation for.
         Expr::Splat(_) =>
             return Err("GPU: '..' splat is not supported inside a GPU block".into()),
+        // Named arguments are resolved against a user function's parameter
+        // names; this backend inlines calls and has no such binding step.
+        Expr::Named(n, _) =>
+            return Err(format!("GPU: named argument '{n} = …' is not supported inside a GPU block")),
         leaf @ (Expr::Num(_) | Expr::ImagLit(_) | Expr::Var(_)) => leaf.clone(),
     })
 }

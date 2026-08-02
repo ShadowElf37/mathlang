@@ -1860,7 +1860,8 @@ _file_check "rec.file.multiline" "physics = (
 
 run_err "rec.err.semicolon"   "(x=1; y=2)"
 run_err "rec.err.range"       "(a = 1..3)"
-run_err "rec.err.kwarg"       "f(x) = x; f(x = 1)"
+# `f(x = 1)` used to be rejected; it is now a named argument (see DEFAULTS).
+run "rec.kwarg.now.named"     "f(x) = x; f(x = 1)"                     "1"
 run_err "rec.err.bracket"     "[x = 1]"
 run_err "rec.err.name.mismatch" "(x=1,y=2)+(a=3,b=4)"
 run_err "rec.err.arity"       "(x=1)+(x=1,y=2)"
@@ -2034,6 +2035,45 @@ run_err "cell.err.noncell.u"  "x=5; update(x,y->y)"
 run_err "cell.err.range"      "c=cell([1,2]); set(c[5],1)"
 run_err "cell.err.nofield"    "c=cell((x=1)); set(c.z,1)"
 run_err "cell.err.arity"      "c=cell(1); set(c)"
+
+# ── Default and named parameters ─────────────────────────────────────────────
+section "DEFAULTS"
+
+run "def.used"             "f(a, b=10) = a+b; f(1)"                 "11"
+run "def.overridden"       "f(a, b=10) = a+b; f(1,2)"               "3"
+run "def.two"              "f(a,b=2,c=3) = a*100+b*10+c; f(1)"      "123"
+run "def.partial"          "f(a,b=2,c=3) = a*100+b*10+c; f(1,9)"    "193"
+run "def.all"              "f(a=1,b=2) = a*10+b; f()"               "12"
+run "def.sees.earlier"     "f(a, b = a*2) = a+b; f(5)"              "15"
+run "def.typed"            "f(n: nat = 3) = n*2; f()"               "6"
+run "def.expr"             "f(a, b = 2^3) = a+b; f(1)"              "9"
+run "def.captures"         "k=7; f(a, b=k) = a+b; f(1)"             "8"
+run "def.lambda"           "g = (a, b=7) -> a+b; g(1)"              "8"
+run "def.tensor"           "f(a, v=[1,2]) = a+sum(v); f(1)"         "4"
+# Defaults reach every call path, not just direct calls.
+run "def.via.map"          "f(a, b=10)=a+b; map(f, (1,2))"          "(11, 12)"
+run "def.via.iterate"      "f(a, b=1)=a+b; iterate(f, 0, 3)"        "3"
+
+run "named.reorder"        "f(a,b) = a-b; f(b=1, a=10)"             "9"
+run "named.mixed"          "f(a,b,c)=a*100+b*10+c; f(1, c=3, b=2)"  "123"
+run "named.with.default"   "f(a,b,c=3)=a*100+b*10+c; f(b=2, a=1)"   "123"
+run "named.single"         "f(x) = x*2; f(x = 4)"                   "8"
+# A record splatted into a call becomes named arguments.
+run "named.splat"          "f(a,b)=a-b; cfg=(b=1,a=10); f(..cfg)"   "9"
+run "named.splat.override" "f(a,b)=a-b; cfg=(b=1,a=10); f(..cfg, b=5)" "5"
+run "named.splat.default"  "w(nx,ny,al=0.02)=(nx=nx,ny=ny,al=al); c=(nx=8,ny=4); w(..c)" "(nx = 8, ny = 4, al = 0.02)"
+run "named.splat.pos"      "f(a,b)=a*10+b; f(..(b=3), 2)"           "23"
+
+run_err "def.err.missing"     "f(a,b)=a+b; f(a=1)"
+run_err "def.err.unknown"     "f(a,b)=a+b; f(a=1, z=2)"
+run_err "def.err.splat.unknown" "f(a,b)=a+b; f(..(x=2))"
+run_err "def.err.twice"       "f(a,b)=a+b; f(a=1, a=2)"
+run_err "def.err.name.pos"    "f(a,b)=a+b; f(1, a=2)"
+run_err "def.err.builtin"     "sin(x=1)"
+run_err "def.err.toomany"     "f(a,b)=a+b; f(1,2,c=3)"
+run_err "def.err.arity"       "f(a,b)=a+b; f(1)"
+# A record argument still needs its own parens, and is not a named argument.
+run "def.record.arg"       "f(r) = r.x + r.y; f((x = 1, y = 2))"    "3"
 
 # ── GPU compute backend (only when built with --features gpu + a GPU present) ──
 section "GPU BACKEND"

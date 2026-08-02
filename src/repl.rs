@@ -381,10 +381,7 @@ pub fn eval_line(line: &str, env: &mut Env, repl: bool) -> bool {
                     return false;
                 }
                 let names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
-                let sig = FnSig {
-                    params: params.iter().map(|p| p.hint.clone()).collect(),
-                    ret: ret_hint.clone(),
-                };
+                let sig = FnSig::from_params(params, ret_hint.clone());
                 let mut captured = (*env.vars).clone();
                 let fn_val = Val::make_fn_with_sig(names.clone(), sig.clone(), body.clone(), std::sync::Arc::new(captured.clone()));
                 captured.insert(name.clone(), fn_val);
@@ -1178,7 +1175,10 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     "Init:      ~/.mathlangrc  ($MATHLANG_INIT to override)\n\n",
                     "Syntax:    x = 3           f(x) = x^2        f = x -> x^2\n",
                     "           g = n,r -> n+r  f(x:real) = ...   f(x:nat)->real = ...\n",
-                    "           {{x=3; y=4; x^2+y^2}}  block (local scope)\n\n",
+                    "           {{x=3; y=4; x^2+y^2}}  block (local scope)\n",
+                    "Params:    f(a, b = 10) = a+b   default, evaluated at call time and may\n",
+                    "           use an earlier param.  Call by name in any order: f(b=1, a=2),\n",
+                    "           f(..cfg) spreads a record's fields (an explicit arg overrides).\n\n",
                     "Assign:    T[i] = v  T[i,j] = v  T[a..b] = v  w.field = v  s.q[i] = v\n",
                     "           += -= *= /=   rebinds the name in *this* scope — a caller, an\n",
                     "           outer scope and any closure never see the write. For shared\n",
@@ -1675,9 +1675,15 @@ fn bang_command(cmd: &str, env: &mut Env) {
             if let Some(val) = env.vars.get(name) {
                 match val {
                     Val::Fn(params, body, _, _, sig) => {
-                        let param_strs: Vec<String> = params.iter().enumerate().map(|(i, _)| {
-                            sig.params.get(i).and_then(|h| h.clone())
-                                .map_or_else(|| "any".to_string(), |h| h.display().to_string())
+                        // A parameter with a default shows as `name: type = …`,
+                        // so `!type` tells you what a call may leave out.
+                        let param_strs: Vec<String> = params.iter().enumerate().map(|(i, pn)| {
+                            let ty = sig.params.get(i).and_then(|h| h.clone())
+                                .map_or_else(|| "any".to_string(), |h| h.display().to_string());
+                            match sig.default_at(i) {
+                                Some(_) => format!("{pn}: {ty} = …"),
+                                None    => ty,
+                            }
                         }).collect();
                         let mut pmap = std::collections::HashMap::new();
                         for (i, pn) in params.iter().enumerate() {

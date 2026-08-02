@@ -98,8 +98,35 @@ impl IntoIterator for TData {
 /// Empty (all None) for functions created without hints.
 #[derive(Debug, Clone, Default)]
 pub struct FnSig {
-    pub params: Vec<Option<TypeHint>>,  // parallel to Val::Fn params Vec<String>
-    pub ret:    Option<TypeHint>,
+    pub params:   Vec<Option<TypeHint>>,  // parallel to Val::Fn params Vec<String>
+    /// Parallel to `params`: the default expression for each slot, if any.
+    /// Empty when the function has no defaults at all, so the common case
+    /// stays a zero-length vec.
+    pub defaults: Vec<Option<Expr>>,
+    pub ret:      Option<TypeHint>,
+}
+
+impl FnSig {
+    /// Build the hint/default vectors from a parsed parameter list.
+    pub fn from_params(params: &[crate::ast::Param], ret: Option<TypeHint>) -> Self {
+        let defaults: Vec<Option<Expr>> = params.iter().map(|p| p.default.clone()).collect();
+        FnSig {
+            params: params.iter().map(|p| p.hint.clone()).collect(),
+            defaults: if defaults.iter().all(Option::is_none) { vec![] } else { defaults },
+            ret,
+        }
+    }
+    /// Index of the first parameter with a default — i.e. how many arguments a
+    /// call must supply.
+    pub fn required(&self, nparams: usize) -> usize {
+        match self.defaults.iter().position(Option::is_some) {
+            Some(i) => i,
+            None    => nparams,
+        }
+    }
+    pub fn default_at(&self, i: usize) -> Option<&Expr> {
+        self.defaults.get(i).and_then(Option::as_ref)
+    }
 }
 
 /// Boundary condition for a grid axis (governs the finite-difference stencil in `d`).
@@ -582,6 +609,7 @@ pub fn infer_type(expr: &Expr, params: &HashMap<String, TypeHint>, env: &Env) ->
         },
         Expr::Slice(..)  => Any,
         Expr::Splat(..)  => Any,
+        Expr::Named(_, e) => infer_type(e, params, env),
         Expr::Member(..) => Any,
         Expr::GpuBlock(body) => infer_type(body, params, env),
         Expr::Lambda(..) => Fn,
@@ -2244,8 +2272,9 @@ pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, St
                     let mut new_cap = (*captured).clone();
                     new_cap.insert(first, a);
                     let new_sig = Arc::new(FnSig {
-                        params: sig.params.get(1..).unwrap_or(&[]).to_vec(),
-                        ret:    sig.ret.clone(),
+                        params:   sig.params.get(1..).unwrap_or(&[]).to_vec(),
+                        defaults: sig.defaults.get(1..).unwrap_or(&[]).to_vec(),
+                        ret:      sig.ret.clone(),
                     });
                     Ok(Val::Fn(rest, body, Arc::new(new_cap), Arc::new(OnceLock::new()), new_sig))
                 }
@@ -3661,6 +3690,7 @@ fn cfv(
         }
         Expr::GpuBlock(body) => cfv(body, inner_params, outer_params, outer_locals, outer_captured, vars, seen),
         Expr::Splat(inner)   => cfv(inner, inner_params, outer_params, outer_locals, outer_captured, vars, seen),
+        Expr::Named(_, e)    => cfv(e, inner_params, outer_params, outer_locals, outer_captured, vars, seen),
     }
 }
 
@@ -3710,6 +3740,7 @@ fn expr_contains_var(expr: &Expr, target: &str) -> bool {
                              || hi.as_ref().map_or(false, |e| expr_contains_var(e, target)),
         Expr::GpuBlock(body) => expr_contains_var(body, target),
         Expr::Splat(inner)   => expr_contains_var(inner, target),
+        Expr::Named(_, e)    => expr_contains_var(e, target),
     }
 }
 
@@ -4331,6 +4362,10 @@ fn apply_fn_direct(
 ) -> Result<Val, String> {
     // Guard against runaway recursion (catchable error, not a stack overflow).
     let _depth = DepthGuard::enter()?;
+    // Omitted trailing arguments come from their defaults *before* the hint
+    // coercion and before the VM/tree-walk split, so `LoadParam` indices are
+    // unaffected and every call path — VM, map, iterate — gets them too.
+    let args = fill_defaults(params, sig, args, captured, env)?;
     // Coerce args per param hints
     let args = if sig.params.is_empty() {
         args
@@ -4369,6 +4404,12 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
         Val::Fn(ref params, ref body, ref captured, ref cache, ref sig) => {
             let n = params.len();
             let k = args.len();
+            // How many arguments the call must supply; the rest have defaults
+            // and `apply_fn_direct` fills them in.
+            let req = sig.required(n);
+            if k >= req && k < n {
+                return apply_fn_direct(params, sig, body, captured, cache, args, env);
+            }
             // BUG-6: a zero-arg call to an arity>0 function previously fell through
             // to the mapping branch and vacuously returned an empty tensor. Error
             // cleanly instead (the n>1 case already did; this closes n==1).
@@ -4514,6 +4555,107 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
 
 // Three-layer env merge: global scope → closure's captured env → param bindings.
 // Global scope provides forward-declared names; captured env provides lexical closure.
+/// Append the defaults for any trailing parameters the call left out. Each is
+/// evaluated in the closure's scope extended with the parameters already bound,
+/// left to right, so `f(a, b = a * 2)` works.
+fn fill_defaults(
+    params:   &[String],
+    sig:      &FnSig,
+    mut args: Vec<Val>,
+    captured: &Arc<HashMap<String, Val>>,
+    env:      &Env,
+) -> Result<Vec<Val>, String> {
+    if sig.defaults.is_empty() || args.len() >= params.len() { return Ok(args); }
+    let mut local = make_local(env, captured);
+    for (p, v) in params.iter().zip(&args) { local.define(p.clone(), v.clone()); }
+    for i in args.len()..params.len() {
+        // Stop at the first slot with no default; the arity check reports it.
+        let Some(d) = sig.default_at(i) else { break };
+        let v = eval(d, &local)?;
+        local.define(params[i].clone(), v.clone());
+        args.push(v);
+    }
+    Ok(args)
+}
+
+/// Evaluate a call's arguments, keeping the names: `x = v` names one slot, and
+/// `..r` contributes a record's field names along with its values.
+/// The third field records whether the slot came from a `..` splat, which is
+/// what lets `f(..cfg, alpha = 0.05)` override one spliced argument — the same
+/// rule a record literal uses.
+fn eval_call_args(exprs: &[Expr], env: &Env) -> Result<Vec<(Option<String>, Val, bool)>, String> {
+    let mut out = Vec::with_capacity(exprs.len());
+    for e in exprs {
+        match e {
+            Expr::Splat(inner) =>
+                out.extend(splat_slots(eval(inner, env)?)?.into_iter().map(|(n, v)| (n, v, true))),
+            Expr::Named(n, v) => out.push((Some(n.clone()), eval(v, env)?, false)),
+            _                 => out.push((None, eval(e, env)?, false)),
+        }
+    }
+    Ok(out)
+}
+
+/// Reorder named arguments into parameter order and fill the gaps from
+/// defaults. Only reached when a call actually names something, so the
+/// positional path — with its tuple-destructuring and mapping rules — is
+/// untouched.
+fn bind_named_args(f: &Val, args: Vec<(Option<String>, Val, bool)>, env: &Env) -> Result<Vec<Val>, String> {
+    let (params, captured, sig) = match f {
+        Val::Fn(p, _, c, _, s) => (p, c, s),
+        Val::Builtin(n) => return Err(format!(
+            "builtin '{n}' takes positional arguments only (it has no parameter names)")),
+        other => return Err(format!(
+            "named arguments need a user function, got {}", fmt_val(other))),
+    };
+    let mut slots:   Vec<Option<Val>> = vec![None; params.len()];
+    let mut spliced: Vec<bool>        = vec![false; params.len()];
+    let mut next = 0usize;
+    for (name, v, from_splat) in args {
+        let i = match name {
+            // A positional argument fills the next slot by position. If a name
+            // already claimed that slot, the call is contradictory.
+            None => {
+                if next >= params.len() {
+                    return Err(format!("function expects {} arg(s), got more", params.len()));
+                }
+                let i = next;
+                next += 1;
+                if slots[i].is_some() && !spliced[i] && !from_splat {
+                    return Err(format!("argument '{}' given both by name and by position", params[i]));
+                }
+                i
+            }
+            Some(n) => {
+                let i = params.iter().position(|p| *p == n).ok_or_else(|| format!(
+                    "no parameter '{n}'; this function takes ({})", params.join(", ")))?;
+                // Same override rule as a record literal: an explicit argument
+                // replaces a spliced one, two explicit ones are a mistake.
+                if slots[i].is_some() && !spliced[i] && !from_splat {
+                    return Err(format!("argument '{n}' given twice"));
+                }
+                i
+            }
+        };
+        slots[i]   = Some(v);
+        spliced[i] = from_splat;
+    }
+    let mut local = make_local(env, captured);
+    let mut out = Vec::with_capacity(params.len());
+    for (i, slot) in slots.into_iter().enumerate() {
+        let v = match slot {
+            Some(v) => v,
+            None    => match sig.default_at(i) {
+                Some(d) => eval(d, &local)?,
+                None    => return Err(format!("missing required argument '{}'", params[i])),
+            },
+        };
+        local.define(params[i].clone(), v.clone());
+        out.push(v);
+    }
+    Ok(out)
+}
+
 fn make_local(global: &Env, captured: &Arc<HashMap<String, Val>>) -> Env {
     let mut vars = (*global.vars).clone();
     vars.extend(captured.iter().map(|(k, v)| (k.clone(), v.clone())));
@@ -4766,10 +4908,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
         Expr::ImagLit(n)  => Ok(if *n == 0.0 { Val::Num(0.0) } else { Val::Complex(0.0, *n) }),
         Expr::Lambda(params, ret_hint, body) => {
             let names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
-            let sig = FnSig {
-                params: params.iter().map(|p| p.hint.clone()).collect(),
-                ret:    ret_hint.clone(),
-            };
+            let sig = FnSig::from_params(params, ret_hint.clone());
             Ok(Val::make_fn_with_sig(names, sig, *body.clone(), Arc::clone(&env.vars)))
         }
         Expr::Tuple(exprs) => {
@@ -4858,6 +4997,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
         }
         Expr::Slice(..) => Err("slice expression can only appear inside T[…]".into()),
         Expr::Splat(..) => Err("'..' can only splice into (…), […], or a call's arguments".into()),
+        Expr::Named(n, _) => Err(format!("'{n} = …' is a named argument and can only appear in a call's arguments")),
 
         Expr::Index(expr, idx) => {
             let v = eval(expr, env)?;
@@ -4889,10 +5029,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                                 return Err(format!("cannot redefine built-in '{name}'"));
                             }
                             let names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
-                            let sig = FnSig {
-                                params: params.iter().map(|p| p.hint.clone()).collect(),
-                                ret:    ret_hint.clone(),
-                            };
+                            let sig = FnSig::from_params(params, ret_hint.clone());
                             let mut captured = (*child.vars).clone();
                             let fn_val = Val::make_fn_with_sig(names.clone(), sig.clone(), body.clone(), Arc::new(captured.clone()));
                             captured.insert(name.clone(), fn_val);
@@ -5027,6 +5164,18 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                 }
             }
             let f_val = eval(f_expr, env)?;
+            // A named argument (`f(x = 1)`, or a record spliced with `..r`)
+            // is resolved here, where the callee's parameter names are known.
+            if arg_exprs.iter().any(|a| matches!(a, Expr::Named(..)))
+                || arg_exprs.iter().any(|a| matches!(a, Expr::Splat(_)))
+            {
+                let args = eval_call_args(arg_exprs, env)?;
+                if args.iter().any(|(n, _, _)| n.is_some()) {
+                    let bound = bind_named_args(&f_val, args, env)?;
+                    return apply_val(f_val, bound, env);
+                }
+                return apply_val(f_val, args.into_iter().map(|(_, v, _)| v).collect(), env);
+            }
             apply_val(f_val, eval_spliced(arg_exprs, env)?, env)
         }
         Expr::Range(start, end) => {

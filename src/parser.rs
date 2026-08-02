@@ -38,6 +38,27 @@ impl Parser {
         Self::skip_type_ident(toks, pos + 1)
     }
 
+    /// Skip a `= expr` parameter default in a lookahead scan: from the `=`, run
+    /// to the next top-level `,` or `)`. Only the parenthesised param list is
+    /// bounded well enough for this — a bare `n, r = 2 -> …` could not tell the
+    /// default from the body, so the bare multi-arg lambda has no defaults.
+    fn skip_param_default(toks: &[Token], pos: usize) -> usize {
+        if !matches!(toks.get(pos), Some(Token::Eq)) { return pos; }
+        let mut q = pos + 1;
+        let mut depth = 0usize;
+        loop {
+            match toks.get(q) {
+                Some(Token::LParen | Token::LBracket | Token::LBrace) => depth += 1,
+                Some(Token::RParen | Token::RBracket | Token::RBrace) if depth > 0 => depth -= 1,
+                Some(Token::RParen) => return q,
+                Some(Token::Comma) if depth == 0 => return q,
+                Some(Token::Eof) | None => return q,
+                _ => {}
+            }
+            q += 1;
+        }
+    }
+
     // Ident (Comma Ident)+ Arrow — bare multi-arg lambda: n, r -> expr
     // Also handles type hints: n: real, r: int -> expr
     fn is_multi_lambda(&self) -> bool {
@@ -64,6 +85,7 @@ impl Parser {
         if !matches!(self.toks.get(p), Some(Token::Ident(_))) { return false; }
         p += 1;
         p = Self::skip_colon_hint(&self.toks, p);
+        p = Self::skip_param_default(&self.toks, p);
         let mut count = 0;
         loop {
             match self.toks.get(p) {
@@ -78,6 +100,7 @@ impl Parser {
                     if !matches!(self.toks.get(p), Some(Token::Ident(_))) { return false; }
                     p += 1;
                     p = Self::skip_colon_hint(&self.toks, p);
+                    p = Self::skip_param_default(&self.toks, p);
                     count += 1;
                 }
                 _ => return false,
@@ -170,7 +193,15 @@ impl Parser {
         } else {
             None
         };
-        Ok(Param { name, hint })
+        // `n = 10` — a default value. Parsed with `expr()`, so a multi-arg
+        // lambda default needs parens for the same reason a record field does.
+        let default = if *self.peek() == Token::Eq {
+            self.bump();
+            Some(self.expr()?)
+        } else {
+            None
+        };
+        Ok(Param { name, hint, default })
     }
 
     /// Parse a top-level input as a sequence of `;`-separated statements, each a
@@ -256,15 +287,20 @@ impl Parser {
         Ok(Expr::Block(stmts))
     }
 
-    /// Call arguments are positional only. `f(x = 1)` is ambiguous between a
-    /// keyword argument and "call f with a 1-field record", so it stays an
-    /// error — but point at the unambiguous spelling.
-    fn check_not_kwarg(&self) -> Result<(), String> {
-        if *self.peek() == Token::Eq {
-            return Err("named arguments are not supported; \
-                        to pass a record, wrap it: f((x = 1))".into());
+    /// Parse one call argument: `..x` splat, `name = expr` named argument, or a
+    /// plain positional expression. A 1-field record still needs its own parens,
+    /// `f((x = 1))`, exactly as before — that spelling is unchanged, it is only
+    /// no longer the *only* thing `f(x = 1)` could have meant.
+    fn parse_call_arg(&mut self) -> Result<Expr, String> {
+        if *self.peek() == Token::DotDot {
+            return self.parse_splat();
         }
-        Ok(())
+        if let (Some(Token::Ident(n)), Some(Token::Eq)) = (self.toks.get(self.pos), self.toks.get(self.pos + 1)) {
+            let name = n.clone();
+            self.pos += 2;
+            return Ok(Expr::Named(name, Box::new(self.expr()?)));
+        }
+        self.expr()
     }
 
     /// Parse one item of a paren list, which may be a `..x` splat, a named
@@ -603,11 +639,10 @@ impl Parser {
                 let mut args = vec![];
                 if *self.peek() != Token::RParen {
                     loop {
-                        args.push(self.parse_list_item()?);
+                        args.push(self.parse_call_arg()?);
                         if *self.peek() == Token::Comma { self.bump(); } else { break; }
                     }
                 }
-                self.check_not_kwarg()?;
                 self.eat(&Token::RParen)?;
                 e = Expr::Apply(Box::new(e), args);
             } else {
@@ -812,7 +847,7 @@ impl Parser {
                 }
                 if *self.peek() == Token::Arrow {
                     self.bump();
-                    Ok(Expr::Lambda(vec![Param { name, hint: None }], None, self.expr()?.into()))
+                    Ok(Expr::Lambda(vec![Param { name, hint: None, default: None }], None, self.expr()?.into()))
                 } else if *self.peek() == Token::Colon {
                     // `name: type -> body` — bare single-arg typed lambda
                     let after_hint = Self::skip_colon_hint(&self.toks, self.pos);
@@ -820,7 +855,7 @@ impl Parser {
                         self.bump(); // consume ':'
                         let hint = self.parse_type_hint()?;
                         self.bump(); // consume '->'
-                        Ok(Expr::Lambda(vec![Param { name, hint: Some(hint) }], None, self.expr()?.into()))
+                        Ok(Expr::Lambda(vec![Param { name, hint: Some(hint), default: None }], None, self.expr()?.into()))
                     } else {
                         Ok(Expr::Var(name))
                     }
@@ -829,11 +864,10 @@ impl Parser {
                     let mut args = vec![];
                     if *self.peek() != Token::RParen {
                         loop {
-                            args.push(self.parse_list_item()?);
+                            args.push(self.parse_call_arg()?);
                             if *self.peek() == Token::Comma { self.bump(); } else { break; }
                         }
                     }
-                    self.check_not_kwarg()?;
                     self.eat(&Token::RParen)?;
                     Ok(Expr::Apply(Box::new(Expr::Var(name)), args))
                 } else {

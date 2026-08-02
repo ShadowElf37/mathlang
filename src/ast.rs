@@ -37,6 +37,10 @@ impl TypeHint {
 pub struct Param {
     pub name: String,
     pub hint: Option<TypeHint>,
+    /// `f(x, n = 10)` — evaluated at call time when the argument is omitted,
+    /// in the closure's scope extended with the parameters already bound, so a
+    /// default may refer to an earlier one.
+    pub default: Option<Expr>,
 }
 
 /// One item of a record literal. `name: None` is a positional item.
@@ -76,6 +80,10 @@ pub enum Expr {
     /// Index-position slice: T[lo..hi]  T[lo..]  T[..hi]  T[..]
     /// Only produced by parse_index_item; never appears outside Index children.
     Slice(Option<Box<Expr>>, Option<Box<Expr>>),
+    /// `f(x = 1)` — a named argument. Legal only in a call's argument list;
+    /// a record field is a `Field`, not this. Wrapping the argument rather than
+    /// changing `Apply`'s shape keeps every generic traversal unchanged.
+    Named(String, Box<Expr>),
     /// `..x` — splice a value's slots into the enclosing list.
     ///
     /// Legal only as an item of a paren list, an array literal, or a call
