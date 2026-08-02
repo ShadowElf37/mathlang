@@ -1205,6 +1205,38 @@ fn bang_command(cmd: &str, env: &mut Env) {
                 Err(e) => eprintln!("!animate2D_raw: {e}"),
             }
         }
+        "animateField" => {
+            if arg.is_empty() {
+                eprintln!("usage: !animateField T [fps]  (T: [nx,ny,3] or [nf,nx,ny,3]) | !animateField f n [fps] | !animateField f t0 t1 n [fps]");
+                return;
+            }
+            let toks = Lexer::new(arg).tokenize();
+            match Parser::new(toks).parse_args() {
+                Ok(exprs) if !exprs.is_empty() => {
+                    if let Err(e) = crate::animate::eval_animate_field(&exprs, env) {
+                        eprintln!("animateField: {e}");
+                    }
+                }
+                Ok(_) => eprintln!("usage: !animateField T [fps] | !animateField f n [fps] | ..."),
+                Err(e) => eprintln!("!animateField: {e}"),
+            }
+        }
+        "animateField_raw" => {
+            if arg.is_empty() {
+                eprintln!("usage: !animateField_raw T | !animateField_raw f n | !animateField_raw f t0 t1 n");
+                return;
+            }
+            let toks = Lexer::new(arg).tokenize();
+            match Parser::new(toks).parse_args() {
+                Ok(exprs) if !exprs.is_empty() => {
+                    if let Err(e) = crate::animate::eval_animate_field_raw(&exprs, env) {
+                        eprintln!("animateField_raw: {e}");
+                    }
+                }
+                Ok(_) => eprintln!("usage: !animateField_raw T | !animateField_raw f n | ..."),
+                Err(e) => eprintln!("!animateField_raw: {e}"),
+            }
+        }
         "version" => println!("mathlang v{}", env!("CARGO_PKG_VERSION")),
         "print" => {
             let mut out = String::new();

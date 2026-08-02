@@ -397,3 +397,253 @@ pub fn eval_animate2d(args: &[Expr], env: &Env) -> Result<Val, String> {
 
     Ok(Val::Num(n as f64))
 }
+
+// ── Vector-field animation (animateField) ──────────────────────────────────────
+//
+// Renders a 2-D grid of 3-component vectors (e.g. a magnetization field) using the
+// standard micromagnetics colour scheme, streamed to the animator as C=3 RGB MXFR
+// frames (the animator's existing RGB-passthrough path — no animator changes needed):
+//   hue        = in-plane angle atan2(m_y, m_x)   (+x → red, rotating through the wheel)
+//   lightness  = (m_z + 1)/2                       (m_z=+1 → white, 0 → full colour, −1 → black)
+//
+// Accepted shapes (this command is vector-only, so the trailing axis must be 3):
+//   !animateField T           — T: 3-D Tensor [nx,ny,3] (single frame)
+//                             — T: 4-D Tensor [nf,nx,ny,3] (animation)
+//   !animateField T fps
+//   !animateField f n [fps]           — f: t→[nx,ny,3]
+//   !animateField f t0 t1 n [fps]
+
+// HSL (h in degrees, s/l in [0,1]) → RGB in [0,1].
+fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (f32, f32, f32) {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = (h.rem_euclid(360.0)) / 60.0;
+    let x = c * (1.0 - (hp.rem_euclid(2.0) - 1.0).abs());
+    let (r1, g1, b1) = match hp as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m0 = l - c / 2.0;
+    let clamp01 = |v: f64| v.clamp(0.0, 1.0) as f32;
+    (clamp01(r1 + m0), clamp01(g1 + m0), clamp01(b1 + m0))
+}
+
+// Map a single 3-vector to the micromagnetics-standard RGB colour.
+fn mag_to_rgb(mx: f64, my: f64, mz: f64) -> (f32, f32, f32) {
+    let n = (mx * mx + my * my + mz * mz).sqrt();
+    if n < 1e-12 {
+        return (0.0, 0.0, 0.0);
+    }
+    let (mx, my, mz) = (mx / n, my / n, mz / n);
+    let hue = my.atan2(mx).to_degrees();      // +x → 0° (red)
+    let l = 0.5 * (mz + 1.0);                  // −z → black, +z → white
+    hsl_to_rgb(hue, 1.0, l)
+}
+
+// data is a [nx,ny,3] tensor stored row-major: m[x,y,c] = data[(x*ny + y)*3 + c].
+// MXFR wants row-major with y outer and RGB interleaved: pixel(y,x) = (R,G,B).
+fn write_vector_frame_xy(out: &mut impl Write, data: &[f64], nx: usize, ny: usize, t: f64)
+    -> std::io::Result<()>
+{
+    let mut buf: Vec<u8> = Vec::with_capacity(24 + nx * ny * 3 * 4);
+    buf.extend_from_slice(b"MXFR");
+    buf.extend_from_slice(&(nx as u32).to_le_bytes());  // width  = nx
+    buf.extend_from_slice(&(ny as u32).to_le_bytes());  // height = ny
+    buf.extend_from_slice(&3u32.to_le_bytes());          // channels = RGB
+    buf.extend_from_slice(&t.to_le_bytes());
+    for y in 0..ny {
+        for x in 0..nx {
+            let base = (x * ny + y) * 3;
+            let (r, g, b) = mag_to_rgb(data[base], data[base + 1], data[base + 2]);
+            buf.extend_from_slice(&r.to_le_bytes());
+            buf.extend_from_slice(&g.to_le_bytes());
+            buf.extend_from_slice(&b.to_le_bytes());
+        }
+    }
+    out.write_all(&buf)?;
+    out.flush()?;
+    Ok(())
+}
+
+// Call f(t), expect a [nx,ny,3] tensor. Returns (data, nx, ny), data row-major.
+fn call_for_vector_frame(f: &Val, t: f64, env: &Env) -> Result<(Vec<f64>, usize, usize), String> {
+    match apply_val(f.clone(), vec![Val::Num(t)], env)? {
+        Val::Tensor { data, shape } if shape.len() == 3 && shape[2] == 3 =>
+            Ok((data.into_vec(), shape[0], shape[1])),
+        other => Err(format!(
+            "animateField: f(t) must return a [nx,ny,3] tensor, got {}",
+            crate::eval::fmt_val(&other)
+        )),
+    }
+}
+
+fn stream_vector_frames(
+    first: Val,
+    rest: &[Expr],
+    env: &Env,
+    out: &mut impl Write,
+) -> Result<usize, String> {
+    match first {
+        // [nf, nx, ny, 3] — finite animation
+        Val::Tensor { ref data, ref shape } if shape.len() == 4 && shape[3] == 3 => {
+            if !rest.is_empty() {
+                return Err(format!("animateField: tensor form takes no extra args after T (got {})", rest.len()));
+            }
+            let (nf, nx, ny) = (shape[0], shape[1], shape[2]);
+            let frame_size = nx * ny * 3;
+            eprintln!("animateField: streaming {nf} frames ({nx}×{ny} vectors)");
+            for f in 0..nf {
+                let slice = &data[f * frame_size .. (f + 1) * frame_size];
+                write_vector_frame_xy(out, slice, nx, ny, f as f64)
+                    .map_err(|e| format!("animateField: write error: {e}"))?;
+            }
+            Ok(nf)
+        }
+        // [nx, ny, 3] — single frame
+        Val::Tensor { ref data, ref shape } if shape.len() == 3 && shape[2] == 3 => {
+            if !rest.is_empty() {
+                return Err(format!("animateField: single-frame form takes no extra args (got {})", rest.len()));
+            }
+            let (nx, ny) = (shape[0], shape[1]);
+            write_vector_frame_xy(out, data, nx, ny, 0.0)
+                .map_err(|e| format!("animateField: write error: {e}"))?;
+            Ok(1)
+        }
+        // f(t) → [nx, ny, 3] — function form (same timestamp logic as stream_frames)
+        f_val @ (Val::Fn(..) | Val::Builtin(..)) => {
+            let t_vals: Vec<f64> = match rest.len() {
+                1 => {
+                    match eval(&rest[0], env)? {
+                        Val::Tensor { data, shape } if shape.len() == 1 => data.into_vec(),
+                        Val::Num(n) => (0..n as usize).map(|k| k as f64).collect(),
+                        other => return Err(format!(
+                            "animateField: 2nd arg must be a 1-D tensor of timestamps or a count, got {}",
+                            crate::eval::fmt_val(&other)
+                        )),
+                    }
+                }
+                3 => {
+                    let t0 = eval(&rest[0], env)?.num("animateField t0")?;
+                    let t1 = eval(&rest[1], env)?.num("animateField t1")?;
+                    let n  = eval(&rest[2], env)?.num("animateField n")? as usize;
+                    if n < 2 { return Err("animateField: n must be >= 2".into()); }
+                    (0..n).map(|k| t0 + (t1 - t0) * k as f64 / (n - 1) as f64).collect()
+                }
+                n => return Err(format!(
+                    "animateField: function form expects 1 or 3 timestamp args (after fps strip), got {n}"
+                )),
+            };
+            if t_vals.is_empty() {
+                return Err("animateField: no frames to animate (count is 0 / empty timestamp list)".into());
+            }
+            let n_frames = t_vals.len();
+            eprintln!("animateField: computing and streaming {n_frames} frames …");
+            let (first_data, nx, ny) = call_for_vector_frame(&f_val, t_vals[0], env)?;
+            eprintln!("animateField: grid {nx}×{ny}");
+            write_vector_frame_xy(out, &first_data, nx, ny, t_vals[0])
+                .map_err(|e| format!("animateField: write error: {e}"))?;
+            for &t in &t_vals[1..] {
+                let (frame_data, fnx, fny) = call_for_vector_frame(&f_val, t, env)?;
+                if fnx != nx || fny != ny {
+                    return Err(format!(
+                        "animateField: frame at t={t} has shape [{fnx},{fny},3], expected [{nx},{ny},3]"
+                    ));
+                }
+                write_vector_frame_xy(out, &frame_data, fnx, fny, t)
+                    .map_err(|e| format!("animateField: write error: {e}"))?;
+            }
+            Ok(n_frames)
+        }
+        other => Err(format!(
+            "animateField: first arg must be a [nx,ny,3] / [nf,nx,ny,3] tensor or a function, got {}",
+            crate::eval::fmt_val(&other)
+        )),
+    }
+}
+
+// fps sits at the tail; core_rest is the slice without it. Default 30.
+fn extract_fps_vec<'a>(first: &Val, rest: &'a [Expr], env: &Env)
+    -> Result<(f64, &'a [Expr]), String>
+{
+    const DEFAULT: f64 = 30.0;
+    match first {
+        Val::Tensor { shape, .. }
+            if (shape.len() == 4 && shape[3] == 3) || (shape.len() == 3 && shape[2] == 3) =>
+        match rest.len() {
+            0 => Ok((DEFAULT, &rest[..0])),
+            1 => Ok((eval(&rest[0], env)?.num("animateField fps")?, &rest[..0])),
+            n => Err(format!("animateField: tensor form takes 0 or 1 extra args (fps), got {n}")),
+        },
+        Val::Fn(..) | Val::Builtin(..) => match rest.len() {
+            1 => Ok((DEFAULT, rest)),
+            2 => Ok((eval(&rest[1], env)?.num("animateField fps")?, &rest[..1])),
+            3 => Ok((DEFAULT, rest)),
+            4 => Ok((eval(&rest[3], env)?.num("animateField fps")?, &rest[..3])),
+            n => Err(format!("animateField: function form expects 1–4 extra args, got {n}")),
+        },
+        other => Err(format!(
+            "animateField: first arg must be a [nx,ny,3] / [nf,nx,ny,3] tensor or a function, got {}",
+            crate::eval::fmt_val(other)
+        )),
+    }
+}
+
+/// animateField — spawn wgpu_animator (in --bare RGB mode) and stream vector-field frames.
+pub fn eval_animate_field(args: &[Expr], env: &Env) -> Result<Val, String> {
+    if args.is_empty() {
+        return Err(concat!(
+            "animateField(T [,fps]) — T: [nx,ny,3] or [nf,nx,ny,3] | ",
+            "animateField(f, n [,fps]) | animateField(f, t0, t1, n [,fps]) — f: t→[nx,ny,3]"
+        ).into());
+    }
+    let first = eval(&args[0], env)?;
+    let (fps, core_rest) = extract_fps_vec(&first, &args[1..], env)?;
+
+    let animator = find_animator();
+    let mut cmd_args: Vec<String> = vec![
+        "--stdin".into(), "--bare".into(),
+        "--fps".into(), format!("{}", fps as u32),
+    ];
+    if let Ok(title) = std::env::var("WGPU_TITLE") {
+        cmd_args.push("--title".into());
+        cmd_args.push(title);
+    }
+    eprintln!("animateField: spawning '{animator}'");
+
+    let mut child = std::process::Command::new(&animator)
+        .args(&cmd_args)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!(
+            "animateField: failed to spawn '{animator}': {e}\n  hint: set WGPU_ANIMATOR=/path/to/wgpu_animator"
+        ))?;
+
+    let n = {
+        let child_stdin = child.stdin.take()
+            .ok_or_else(|| "animateField: could not get animator stdin".to_string())?;
+        let mut out = std::io::BufWriter::new(child_stdin);
+        stream_vector_frames(first, core_rest, env, &mut out)?
+    };
+
+    let status = child.wait()
+        .map_err(|e| format!("animateField: error waiting for animator: {e}"))?;
+    if !status.success() {
+        eprintln!("animateField: animator exited with {status}");
+    }
+    Ok(Val::Num(n as f64))
+}
+
+/// animateField_raw — write vector-field MXFR (C=3) frames to stdout, for piping/testing.
+pub fn eval_animate_field_raw(args: &[Expr], env: &Env) -> Result<Val, String> {
+    if args.is_empty() {
+        return Err("animateField_raw(T) | animateField_raw(f, n) | animateField_raw(f, t0, t1, n)".into());
+    }
+    let first = eval(&args[0], env)?;
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let n = stream_vector_frames(first, &args[1..], env, &mut out)?;
+    Ok(Val::Num(n as f64))
+}

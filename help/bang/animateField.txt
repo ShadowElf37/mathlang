@@ -1,0 +1,22 @@
+[1;4m!animateField[0m
+
+Animate a 2D VECTOR field (a grid of 3-component vectors, e.g. a magnetization)
+and display it in the wgpu animator window. Uses the standard micromagnetics
+colour scheme, streamed as RGB frames:
+  hue        = in-plane angle atan2(m_y, m_x)   (+x → red, rotating the colour wheel)
+  lightness  = (m_z + 1)/2                       (+z → white, in-plane → full colour, −z → black)
+
+Vectors are normalised per cell before colouring. Uses T[x, y] axis convention;
+the trailing axis (length 3) holds the vector components.
+
+[1mUsage:[0m
+- [33m!animateField T [fps][0m — T: [nx, ny, 3] (single frame) or [nf, nx, ny, 3] (animation)
+- [33m!animateField f n [fps][0m — call f(t) for t = 0..n-1; each returns an [nx, ny, 3] tensor
+- [33m!animateField f t0 t1 n [fps][0m — call f(t) for t in linspace(t0, t1, n)
+
+[1mExamples:[0m
+[0m> m = reshape([1,0,0, 0,1,0, 0,0,1, 0,0,-1], 2, 2, 3)
+> !animateField m
+> !animateField t -> tensor((x,y,c) -> [cos(t),sin(t),0][c], 50, 50, 3), 0, 2pi, 60, 24
+[0m
+[1mSee also:[0m  animate2D  animate2D_raw  animateField_raw
