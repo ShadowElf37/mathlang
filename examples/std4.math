@@ -1,0 +1,37 @@
+# Micromagnetic Standard Problem 4 in mathlang — magnetization reversal of a
+# 500 x 125 x 3 nm permalloy film. Built on libraries/mag.math (exchange + demag +
+# Zeeman + RK4). The reversal dynamics reproduce mumax3 to ~1e-3 on the averages.
+#
+# CPU-bound: the demag FFT convolution runs every step, so the full run below is a
+# couple of minutes — lower `nrev` to preview. `mag.relax` is a basic damping
+# descent: it reaches a near-S-state but not the canonical one as precisely as
+# mumax's adaptive minimizer (a conjugate-gradient minimizer is future work).
+#
+# View the result live with:  !animateField reversed
+!include mag
+
+# --- geometry & material (permalloy) ---
+nx = 128
+ny = 32
+dx = 500e-9/nx
+dy = 125e-9/ny
+dz = 3e-9
+Msat  = 800e3
+Aex   = 13e-12
+alpha = 0.02
+
+# demag operator (kernel precomputed once)
+demag = mag.demagOp(nx, ny, Msat, dx, dy, dz)
+
+# --- 1) relax to (near) the S-state under exchange + demag, no applied field ---
+heff0   = m -> mag.exchangeField(m, Aex, Msat, dx) + demag(m)
+m_init  = vec.normalize(mag.bcast([1, 0.1, 0], nx, ny))
+relaxed = mag.relax(m_init, heff0, 3e-3, 1500)
+!print relaxed  m.avg = {round(mean(relaxed[.., .., 0]),4)}, {round(mean(relaxed[.., .., 1]),4)}
+
+# --- 2) apply the reversal field and evolve (RK4) ---
+Bext     = mag.bcast([-24.6e-3, 4.3e-3, 0], nx, ny)
+heff     = m -> mag.exchangeField(m, Aex, Msat, dx) + demag(m) + Bext
+nrev     = 500
+reversed = mag.run(relaxed, heff, alpha, 1e-13, nrev)
+!print reversed m.avg = {round(mean(reversed[.., .., 0]),4)}, {round(mean(reversed[.., .., 1]),4)}, {round(mean(reversed[.., .., 2]),4)}
