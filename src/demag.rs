@@ -181,3 +181,124 @@ pub fn demag_kernel(size_in: [usize; 3], cellsize: [f64; 3]) -> (Vec<Vec<f64>>, 
 
     (arr, [kz, ky, kx])
 }
+
+// ── Compiled demag field (FFT convolution, kernel FFTs cached) ──────────────────
+// Replaces the interpreted .math pad/crop/FFT orchestration (which evaluated the
+// padding lambda per cell, ~10^8 interpreted calls for a std4 run). Everything here
+// is compiled; the geometry-only kernel FFTs are cached across time steps.
+
+use std::cell::RefCell;
+use crate::eval::fft_axis_inplace;
+
+struct DemagCache {
+    key: u64,
+    kx: usize,
+    ky: usize,
+    xx: (Vec<f64>, Vec<f64>),
+    xy: (Vec<f64>, Vec<f64>),
+    yy: (Vec<f64>, Vec<f64>),
+    zz: (Vec<f64>, Vec<f64>),
+}
+
+thread_local! {
+    static CACHE: RefCell<Option<DemagCache>> = const { RefCell::new(None) };
+}
+
+fn fft2(re: &mut [f64], im: &mut [f64], ky: usize, kx: usize, forward: bool) {
+    let shape = [ky, kx];
+    fft_axis_inplace(re, im, &shape, 0, forward);
+    fft_axis_inplace(re, im, &shape, 1, forward);
+}
+
+fn geom_key(nx: usize, ny: usize, dx: f64, dy: f64, dz: f64) -> u64 {
+    let mut h = 1469598103934665603u64;
+    for v in [nx as u64, ny as u64, dx.to_bits(), dy.to_bits(), dz.to_bits()] {
+        h ^= v;
+        h = h.wrapping_mul(1099511628211);
+    }
+    h
+}
+
+/// Full demag field B_demag (Tesla) for a 2-D magnetization m of shape [nx,ny,3]
+/// (flat, row-major, component-fastest). Kernel FFTs cached by geometry.
+pub fn demag_field(m: &[f64], nx: usize, ny: usize, msat: f64, dx: f64, dy: f64, dz: f64) -> Vec<f64> {
+    let key = geom_key(nx, ny, dx, dy, dz);
+    CACHE.with(|c| {
+        {
+            let mut cache = c.borrow_mut();
+            if cache.as_ref().map_or(true, |k| k.key != key) {
+                let (comps, k) = demag_kernel([nx, ny, 1], [dx, dy, dz]);
+                let (ky, kx) = (k[1], k[2]);
+                let mkfft = |src: &Vec<f64>| -> (Vec<f64>, Vec<f64>) {
+                    let mut re = src.clone();
+                    let mut im = vec![0.0; re.len()];
+                    fft2(&mut re, &mut im, ky, kx, true);
+                    (re, im)
+                };
+                *cache = Some(DemagCache {
+                    key, kx, ky,
+                    xx: mkfft(&comps[0]), xy: mkfft(&comps[1]),
+                    yy: mkfft(&comps[3]), zz: mkfft(&comps[5]),
+                });
+            }
+        }
+        let cache = c.borrow();
+        let cache = cache.as_ref().unwrap();
+        let (kx, ky) = (cache.kx, cache.ky);
+        let np = kx * ky;
+
+        // pad + transpose m components into the kernel's (y,x) layout
+        let mut mxr = vec![0.0; np]; let mut mxi = vec![0.0; np];
+        let mut myr = vec![0.0; np]; let mut myi = vec![0.0; np];
+        let mut mzr = vec![0.0; np]; let mut mzi = vec![0.0; np];
+        for x in 0..nx {
+            for y in 0..ny {
+                let base = (x * ny + y) * 3;
+                let p = y * kx + x;
+                mxr[p] = m[base];
+                myr[p] = m[base + 1];
+                mzr[p] = m[base + 2];
+            }
+        }
+        fft2(&mut mxr, &mut mxi, ky, kx, true);
+        fft2(&mut myr, &mut myi, ky, kx, true);
+        fft2(&mut mzr, &mut mzi, ky, kx, true);
+
+        // frequency-space multiply: B_i = Σ_j K_ij m_j (complex)
+        let mut bxr = vec![0.0; np]; let mut bxi = vec![0.0; np];
+        let mut byr = vec![0.0; np]; let mut byi = vec![0.0; np];
+        let mut bzr = vec![0.0; np]; let mut bzi = vec![0.0; np];
+        for i in 0..np {
+            let (xxr, xxi) = (cache.xx.0[i], cache.xx.1[i]);
+            let (xyr, xyi) = (cache.xy.0[i], cache.xy.1[i]);
+            let (yyr, yyi) = (cache.yy.0[i], cache.yy.1[i]);
+            let (zzr, zzi) = (cache.zz.0[i], cache.zz.1[i]);
+            // Bx = Kxx*mx + Kxy*my
+            bxr[i] = xxr*mxr[i]-xxi*mxi[i] + xyr*myr[i]-xyi*myi[i];
+            bxi[i] = xxr*mxi[i]+xxi*mxr[i] + xyr*myi[i]+xyi*myr[i];
+            // By = Kxy*mx + Kyy*my
+            byr[i] = xyr*mxr[i]-xyi*mxi[i] + yyr*myr[i]-yyi*myi[i];
+            byi[i] = xyr*mxi[i]+xyi*mxr[i] + yyr*myi[i]+yyi*myr[i];
+            // Bz = Kzz*mz
+            bzr[i] = zzr*mzr[i]-zzi*mzi[i];
+            bzi[i] = zzr*mzi[i]+zzi*mzr[i];
+        }
+        fft2(&mut bxr, &mut bxi, ky, kx, false);
+        fft2(&mut byr, &mut byi, ky, kx, false);
+        fft2(&mut bzr, &mut bzi, ky, kx, false);
+
+        // crop + scale back to [nx,ny,3]
+        let scl = 4e-7 * std::f64::consts::PI * msat; // mu0 * Msat
+        let mut out = vec![0.0; nx * ny * 3];
+        for x in 0..nx {
+            for y in 0..ny {
+                let p = y * kx + x;
+                let base = (x * ny + y) * 3;
+                out[base]     = scl * bxr[p];
+                out[base + 1] = scl * byr[p];
+                out[base + 2] = scl * bzr[p];
+            }
+        }
+        out
+    })
+}

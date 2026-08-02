@@ -444,7 +444,7 @@ impl Env {
             "lingrid",
             "reshape", "permute", "cat", "squeeze", "unsqueeze",
             "dim",
-            "demagkernel",
+            "demagkernel", "demagfield",
         ] {
             vars.insert(name.to_string(), Val::Builtin(name.to_string()));
         }
@@ -3224,6 +3224,27 @@ pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, St
             let mut data = Vec::with_capacity(6 * per);
             for c in &comps { data.extend_from_slice(c); }
             Ok(Val::Tensor { data: TData::new(data), shape: vec![6, k[0], k[1], k[2]] })
+        }
+
+        // ── demagfield(m, Msat, dx, dy, dz) — full demag field (Tesla) ───────
+        // Compiled FFT convolution of the demag tensor with m ([nx,ny,3]); kernel
+        // FFTs are cached by geometry, so this is fast to call every time step.
+        "demagfield" => {
+            arity("demagfield", 5, vals.len())?;
+            let mut it = vals.into_iter();
+            let (m, shape) = match it.next().unwrap() {
+                Val::Tensor { data, shape } => (data.into_vec(), shape),
+                other => return Err(format!("demagfield: m must be a [nx,ny,3] tensor, got {}", fmt_val(&other))),
+            };
+            if shape.len() != 3 || shape[2] != 3 {
+                return Err(format!("demagfield: m must be shaped [nx,ny,3], got {shape:?}"));
+            }
+            let msat = it.next().unwrap().num("demagfield Msat")?;
+            let dx = it.next().unwrap().num("demagfield dx")?;
+            let dy = it.next().unwrap().num("demagfield dy")?;
+            let dz = it.next().unwrap().num("demagfield dz")?;
+            let out = crate::demag::demag_field(&m, shape[0], shape[1], msat, dx, dy, dz);
+            Ok(Val::Tensor { data: TData::new(out), shape })
         }
 
         // ── shift(T, n, axis) — shift along axis with edge replication ───────
