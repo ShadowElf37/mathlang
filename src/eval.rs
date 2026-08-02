@@ -444,6 +444,7 @@ impl Env {
             "lingrid",
             "reshape", "permute", "cat", "squeeze", "unsqueeze",
             "dim",
+            "demagkernel",
         ] {
             vars.insert(name.to_string(), Val::Builtin(name.to_string()));
         }
@@ -3205,6 +3206,24 @@ pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, St
             } else {
                 Ok(Val::Tensor { data: TData::new(out), shape: outshape })
             }
+        }
+
+        // ── demagkernel(nx,ny,nz, dx,dy,dz) — magnetostatic demag tensor ─────
+        // Returns the 6 unique components [xx,xy,xz,yy,yz,zz] of the symmetric
+        // demag tensor N on the padded kernel grid, shape [6, Kz, Ky, Kx], in
+        // mumax's wrapped FFT layout. Geometry-only; feeds the demag convolution.
+        "demagkernel" => {
+            arity("demagkernel", 6, vals.len())?;
+            let a: Vec<f64> = vals.into_iter().map(|v| v.num("demagkernel")).collect::<Result<_, _>>()?;
+            let (nx, ny, nz) = (a[0] as usize, a[1] as usize, a[2] as usize);
+            if nx == 0 || ny == 0 || nz == 0 {
+                return Err("demagkernel: grid dims must be >= 1".into());
+            }
+            let (comps, k) = crate::demag::demag_kernel([nx, ny, nz], [a[3], a[4], a[5]]);
+            let per = k[0] * k[1] * k[2];
+            let mut data = Vec::with_capacity(6 * per);
+            for c in &comps { data.extend_from_slice(c); }
+            Ok(Val::Tensor { data: TData::new(data), shape: vec![6, k[0], k[1], k[2]] })
         }
 
         // ── shift(T, n, axis) — shift along axis with edge replication ───────

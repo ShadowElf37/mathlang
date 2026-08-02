@@ -1163,6 +1163,18 @@ run "llg.macrospin_damp" "g=1.7595e11; B=[0,0,0.1]; a=0.5; f=x->vec.normalize(x 
 # validated out-of-band with libraries/mag.math against a mumax reference run.)
 run "exch.uniform_zero" "m=tensor((i,j,c)->[1,0,0][c],4,4,3); round(max(abs(shift(m,1,0)+shift(m,-1,0)+shift(m,1,1)+shift(m,-1,1)-4*m)),9)" "0"
 
+# ── demag tensor kernel (magnetostatics) ──────────────────────────────────────
+section "DEMAG KERNEL"
+# self-demag factors: a cube cell has Nxx=Nyy=Nzz=1/3 (trace 1; sign = mumax's
+# demagnetizing convention). Validates the brute-force Newell integration.
+run "demag.cube_isotropic" "K=demagkernel(4,4,4,1,1,1); round(K[0,0,0,0],3)" "-0.333"
+run "demag.cube_trace"     "K=demagkernel(4,4,4,1,1,1); round(K[0,0,0,0]+K[3,0,0,0]+K[5,0,0,0],3)" "-1"
+# thin-film cell: out-of-plane factor dominates, trace still 1
+run "demag.film_zz"        "K=demagkernel(4,4,1,4e-9,4e-9,1e-9); round(K[5,0,0,0],3)" "-0.65"
+run "demag.shape2d"        "shape(demagkernel(8,8,1,4e-9,4e-9,4e-9))" "[6, 1, 16, 16]"
+# 2-D out-of-plane cross terms vanish
+run "demag.2d_xz_zero"     "round(max(abs(demagkernel(4,4,1,4e-9,4e-9,1e-9)[2])),9)" "0"
+
 # ── !savetensor / !loadtensor ─────────────────────────────────────────────────
 section "SAVETENSOR / LOADTENSOR"
 _TMLT=$(mktemp /tmp/mlt_test_XXXXXX.mlt)

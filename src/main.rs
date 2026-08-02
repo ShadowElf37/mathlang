@@ -7,6 +7,7 @@ mod ns;
 mod repl;
 mod graph;
 mod animate;
+mod demag;
 #[cfg(feature = "gpu")]
 mod gpu;
 
