@@ -93,6 +93,8 @@ fn emit_and_run(w: &Tup, m0: &Val, drive: &str, op: &str) -> Result<Val, String>
     let mut s = String::new();
     s += &format!("SetGridSize({nx}, {ny}, {nz})\n");
     s += &format!("SetCellSize({dx:e}, {dy:e}, {dz:e})\n");
+    // edge smoothing (sub-cell geometry averaging) — set BEFORE SetGeom
+    if let Some(es) = opt(w, "EdgeSmooth")? { s += &format!("EdgeSmooth = {}\n", es as i64); }
     // geometry mask (optional)
     if let Some(g) = w.lookup("geom") {
         let (gdata, _gshape) = tensor_parts(g, "world.geom")?;

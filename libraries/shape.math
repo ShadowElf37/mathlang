@@ -49,8 +49,19 @@ scale(s, sx, sy)     = (x, y) -> s(x/sx, y/sy)
 
 # ── rasterize a shape predicate onto a grid -> 0/1 mask tensor ────────────────
 # lo, hi, counts are scalars (1-D) or same-length tuples per axis (n-D), as in lingrid.
-!helpdef shape.mask rasterize a shape predicate onto a grid -> a 0/1 mask tensor. Args (s, lo, hi, counts); lo/hi/counts scalars (1-D) or tuples per axis (n-D), like lingrid.
+!helpdef shape.mask rasterize a shape predicate onto a grid -> a hard 0/1 mask tensor (one center sample per cell). Args (s, lo, hi, counts); lo/hi/counts scalars (1-D) or tuples per axis (n-D), like lingrid.
 mask(s, lo, hi, counts) = lingrid(lo, hi, counts, s)
+
+# ── anti-aliased mask: per-cell fill FRACTION in [0,1], by sub x sub supersampling ──
+# 2-D. Smooth edges instead of a hard staircase — better for geometry (e.g. with
+# DMI, where hard edges spawn spurious edge textures) and for nicer rendering.
+!helpdef shape.coverage anti-aliased 2-D mask: the fraction of each cell inside the shape, by sub-by-sub supersampling. Args (s, lo, hi, counts, sub); returns an [nx,ny] tensor in [0,1]. Use instead of shape.mask for smooth edges (geometry with DMI, rendering).
+coverage(s, lo, hi, counts, sub) = {
+    nx = counts[0];
+    ny = counts[1];
+    fine = mask(s, lo, hi, (nx*sub, ny*sub));            # sub x finer 0/1 grid
+    sum(sum(reshape(fine, nx, sub, ny, sub), 3), 1) / (sub*sub)   # average sub-blocks
+}
 
 # ── combine masks (elementwise; 0/1 arithmetic, any dimension) ────────────────
 !helpdef shape.union union of two masks (a OR b): a + b - a*b.
