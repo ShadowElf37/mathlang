@@ -35,6 +35,34 @@ exchangeField(m, Aex, Msat, dx, dy) = (2*Aex/Msat) * lap(m, dx, dy)
 !helpdef mag.bcast broadcast a constant 3-vector B to a uniform [nx,ny,3] field (e.g. a Zeeman field B_ext). mathlang has no trailing-axis broadcast, so uniform fields are built explicitly.
 bcast(B, nx, ny) = tensor((i, j, c) -> B[c], nx, ny, 3)
 
+# --- multiply a scalar field s [nx,ny] by a vector field v [nx,ny,3] (per cell) ---
+!helpdef mag.scaleVec multiply a scalar field s [nx,ny] by a vector field v [nx,ny,3] componentwise (per cell). Fills the trailing-axis-broadcast gap.
+scaleVec(s, v) = tensor((i, j, c) -> s[i,j] * v[i,j,c], shape(v)[0], shape(v)[1], 3)
+
+# --- uniaxial anisotropy field (Tesla) ---
+# B = (2 Ku1 (m·u) + 4 Ku2 (m·u)^3) u / Msat, u = normalized easy axis.
+!helpdef mag.anisField uniaxial anisotropy field (Tesla): (2 Ku1 (m.u) + 4 Ku2 (m.u)^3) u / Msat. Args (m, Ku1, Ku2, u, Msat); u is the [3] easy axis (normalized internally).
+anisField(m, Ku1, Ku2, u, Msat) = {
+    nx = shape(m)[0]; ny = shape(m)[1];
+    uf = bcast(vec.normalize(u), nx, ny);
+    mu = vec.vdot(m, uf);                       # (m·u) per cell, [nx,ny]
+    scaleVec((2*Ku1*mu + 4*Ku2*mu^3) / Msat, uf)
+}
+
+# --- magnetoelastic field (Tesla) from strain tensor (exx..ezz) ---
+# Bx = -2/Msat [B1 mx exx + B2(my exy + mz exz)], and cyclic (Gurevich&Melkov 12.18).
+!helpdef mag.melField magnetoelastic field (Tesla) from a uniform strain tensor. Args (m, B1, B2, strain, Msat) where strain=(exx,eyy,ezz,exy,exz,eyz). Bx=-2/Msat[B1 mx exx + B2(my exy + mz exz)], cyclic.
+melField(m, B1, B2, strain, Msat) = {
+    nx = shape(m)[0]; ny = shape(m)[1];
+    exx = strain[0]; eyy = strain[1]; ezz = strain[2];
+    exy = strain[3]; exz = strain[4]; eyz = strain[5];
+    mx = m[.., .., 0]; my = m[.., .., 1]; mz = m[.., .., 2];
+    bx = -2/Msat * (B1*mx*exx + B2*(my*exy + mz*exz));
+    by = -2/Msat * (B1*my*eyy + B2*(mx*exy + mz*eyz));
+    bz = -2/Msat * (B1*mz*ezz + B2*(mx*exz + my*eyz));
+    cat(2, unsqueeze(bx,2), unsqueeze(by,2), unsqueeze(bz,2))
+}
+
 # --- demag field (Tesla): mu0*Msat*(N ⊛ m), via the compiled `demagfield` builtin ---
 # FFT convolution of the demag tensor with m; the geometry-only kernel FFTs are
 # cached, so it is cheap to call every step. Matches mumax to ~1e-7.
