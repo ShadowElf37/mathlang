@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::cell::{Cell as StdCell, RefCell};
-use crate::ast::{Expr, BlockStmt, Op, Def, TypeHint};
+use crate::ast::{Expr, BlockStmt, Op, Def, TypeHint, Assign, PathSeg};
 use crate::vm::{Instruction, LoopForm};
 
 // ── Recursion guard ───────────────────────────────────────────────────────────
@@ -227,8 +227,12 @@ impl Tup {
         (0..self.items.len()).filter_map(|i| self.name_of(i)).collect()
     }
     pub fn lookup(&self, field: &str) -> Option<&Val> {
-        let names = self.names.as_ref()?;
-        names.iter().position(|n| n.as_deref() == Some(field)).map(|i| &self.items[i])
+        self.position(field).map(|i| &self.items[i])
+    }
+    /// Slot index of a named field. Callers that need `&mut` to the slot go
+    /// through this, since a mutable `lookup` would borrow the whole tuple.
+    pub fn position(&self, field: &str) -> Option<usize> {
+        self.names.as_ref()?.iter().position(|n| n.as_deref() == Some(field))
     }
     /// Do two tuples have the same field names in the same order? Positional
     /// slots must line up too, so `(x=1, 2)` and `(x=1, y=2)` do not match.
@@ -431,7 +435,7 @@ impl Env {
             "fft", "ifft",
             "sum", "prod", "integral", "deriv", "map",
             "iterate", "scan",
-            "cell", "get", "set",
+            "cell", "get", "set", "update",
             "field",
             // Tensor ops
             "tensor", "matrix", "zeros", "ones", "eye", "diag",
@@ -588,6 +592,10 @@ pub fn infer_type(expr: &Expr, params: &HashMap<String, TypeHint>, env: &Env) ->
                 match s {
                     BlockStmt::Def(Def::Var(n, e))   => { let t = infer_type(e, &p, env); p.insert(n.clone(), t); }
                     BlockStmt::Def(Def::Func(n, ..)) => { p.insert(n.clone(), Fn); }
+                    // An assignment rebinds an existing name; a path write can
+                    // change the type (a real tensor promotes to complex), so
+                    // the safe static answer is Any.
+                    BlockStmt::Assign(a)             => { p.insert(a.lvalue.root.clone(), Any); }
                     BlockStmt::Expr(e)               => last = infer_type(e, &p, env),
                 }
             }
@@ -692,7 +700,8 @@ pub fn builtin_sig(name: &str) -> Option<&'static str> {
         "ifft"   => Some("ifft(T: complex tensor) -> complex tensor"),
         "cell"   => Some("cell(init: any) -> cell"),
         "get"    => Some("get(c: cell) -> any"),
-        "set"    => Some("set(c: cell, val: any) -> any"),
+        "set"    => Some("set(c: cell, val: any) -> any | set(c[i]/c.f, val) -> any"),
+        "update" => Some("update(c: cell, f: fn) -> any | update(c[i]/c.f, f) -> any"),
         "rand"   => Some("rand() -> real | rand(n: nat) -> tensor | rand(n1: nat, n2: nat, …) -> tensor"),
         "tensordot" => Some("tensordot(T1: tensor, T2: tensor, n: nat) | tensordot(T1, T2, (a, b)) | tensordot(T1, T2, ((a1,…),(b1,…)))"),
         // trig aliases / specials
@@ -846,7 +855,7 @@ pub fn is_protected(name: &str) -> bool {
         | "fft" | "ifft"
         | "sum" | "prod" | "integral" | "deriv" | "map"
         | "iterate" | "scan"
-        | "cell" | "get" | "set"
+        | "cell" | "get" | "set" | "update"
         | "field"
         | "tensor" | "matrix" | "zeros" | "ones" | "eye" | "diag"
         | "shape" | "rows" | "cols" | "transpose" | "trace" | "norm"
@@ -1619,7 +1628,7 @@ pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, St
     // out above with their fields intact. Container/identity builtins are
     // field-transparent — they must store and return the field untouched, not its
     // raw data (otherwise `cell(field)`/`get`/`set` would silently lose the type).
-    if !matches!(name, "cell" | "get" | "set" | "id") {
+    if !matches!(name, "cell" | "get" | "set" | "update" | "id") {
         for i in 0..vals.len() {
             if let Val::Field(f) = &vals[i] {
                 let t = field_data_as_tensor(f);
@@ -2179,16 +2188,36 @@ pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, St
                 other => Err(format!("get: expected a cell, got {}", fmt_val(&other))),
             }
         }
+        // The whole-cell forms. `set(c[i], v)` / `update(c[i], f)` are handled
+        // as special forms in `Expr::Apply` (they need the unevaluated path);
+        // these arms are what runs when `set`/`update` is used as a first-class
+        // value, e.g. passed to `compose`, where there is no syntax to inspect.
         "set" => {
             arity("set", 2, vals.len())?;
             let mut it = vals.into_iter();
             match it.next().unwrap() {
                 Val::Cell(c) => {
                     let v = it.next().unwrap();
-                    *c.borrow_mut() = v.clone();
+                    *c.try_borrow_mut().map_err(|_| busy_cell("set"))? = v.clone();
                     Ok(v)
                 }
                 other => Err(format!("set: first arg must be a cell, got {}", fmt_val(&other))),
+            }
+        }
+        "update" => {
+            arity("update", 2, vals.len())?;
+            let mut it = vals.into_iter();
+            match it.next().unwrap() {
+                Val::Cell(c) => {
+                    let f = it.next().unwrap();
+                    // Read, release the borrow, apply, then store: `f` may read
+                    // the same cell without deadlocking against this update.
+                    let cur = c.try_borrow().map_err(|_| busy_cell("update"))?.clone();
+                    let new = apply_val(f, vec![cur], env)?;
+                    *c.try_borrow_mut().map_err(|_| busy_cell("update"))? = new.clone();
+                    Ok(new)
+                }
+                other => Err(format!("update: first arg must be a cell, got {}", fmt_val(&other))),
             }
         }
 
@@ -3602,6 +3631,19 @@ fn cfv(
                         fn_inner.extend(ps.iter().map(|p| p.name.clone()));
                         cfv(body, &fn_inner, outer_params, outer_locals, outer_captured, vars, seen);
                     }
+                    BlockStmt::Assign(a) => {
+                        cfv(&a.value, &ext, outer_params, outer_locals, outer_captured, vars, seen);
+                        for seg in &a.lvalue.path {
+                            if let PathSeg::Index(i) = seg {
+                                cfv(i, &ext, outer_params, outer_locals, outer_captured, vars, seen);
+                            }
+                        }
+                        // The root is read (compound assignment) as well as
+                        // written, so it must be captured before it is shadowed.
+                        cfv(&Expr::Var(a.lvalue.root.clone()), &ext,
+                            outer_params, outer_locals, outer_captured, vars, seen);
+                        ext.push(a.lvalue.root.clone());
+                    }
                     BlockStmt::Expr(e) => cfv(e, &ext, outer_params, outer_locals, outer_captured, vars, seen),
                 }
             }
@@ -3646,6 +3688,16 @@ fn expr_contains_var(expr: &Expr, target: &str) -> bool {
                     BlockStmt::Def(Def::Func(name, ps, _, body)) => {
                         if name == target { return false; } // shadowed from here on
                         if !ps.iter().any(|p| p.name == target) && expr_contains_var(body, target) { return true; }
+                    }
+                    BlockStmt::Assign(a) => {
+                        // An assignment reads its root as well as writing it,
+                        // so it is a use, not a shadowing definition.
+                        if a.lvalue.root == target || expr_contains_var(&a.value, target) { return true; }
+                        for seg in &a.lvalue.path {
+                            if let PathSeg::Index(i) = seg {
+                                if expr_contains_var(i, target) { return true; }
+                            }
+                        }
                     }
                     BlockStmt::Expr(e) => if expr_contains_var(e, target) { return true; },
                 }
@@ -3730,6 +3782,15 @@ impl<'a> Compiler<'a> {
                             self.code[jmp_pos]  = Instruction::Jump(end_pc);
                             return Ok(());
                         }
+                        // `set(c[i], v)` / `update(c.f, g)` reach *into* a cell
+                        // and so need the path unevaluated. The VM has no such
+                        // instruction, and compiling the call would evaluate
+                        // `c[i]` into a detached copy, so the body falls back to
+                        // the tree-walk evaluator. The whole-cell forms
+                        // `set(c, v)` / `update(c, f)` still compile.
+                        "set" | "update"
+                            if matches!(arg_exprs.first(), Some(Expr::Index(..) | Expr::Member(..)))
+                            => return Err(()),
                         // Bounded-iteration special forms compile to a flat VM Loop:
                         // push the operands (function + bounds/seed/count), then a
                         // single Loop instruction runs the iteration with no native-
@@ -3792,6 +3853,10 @@ impl<'a> Compiler<'a> {
                 for (i, stmt) in stmts.iter().enumerate() {
                     let is_last = i + 1 == n;
                     match stmt {
+                        // Path assignment mutates a binding; the VM has no
+                        // instruction for that, so the whole body falls back to
+                        // the tree-walk evaluator.
+                        BlockStmt::Assign(_) => return Err(()),
                         BlockStmt::Def(Def::Var(name, body)) => {
                             self.compile(body)?;
                             // Reuse the existing slot if this name was already defined in
@@ -4834,6 +4899,9 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                             child.define(name.clone(), Val::make_fn_with_sig(names, sig, body.clone(), Arc::new(captured)));
                         }
                     },
+                    // Rebinds in the block's own scope, so an enclosing scope
+                    // never sees the write.
+                    BlockStmt::Assign(a) => eval_assign(a, &mut child)?,
                     BlockStmt::Expr(e) => { last_val = eval(e, &child)?; }
                 }
             }
@@ -4857,6 +4925,13 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                     "deriv"    => return eval_deriv(arg_exprs, env),
                     "iterate"  => return eval_iterate(arg_exprs, env),
                     "scan"     => return eval_scan(arg_exprs, env),
+                    // `set(c[i], v)` / `update(c.f, g)` need the path
+                    // unevaluated; anything else falls through to the builtin.
+                    "set" | "update" if arg_exprs.len() == 2 => {
+                        if let Some(v) = eval_cell_write(name, &arg_exprs[0], &arg_exprs[1], env)? {
+                            return Ok(v);
+                        }
+                    }
                     "map" => {
                         if arg_exprs.len() != 2 {
                             return Err("map(f, tuple) expects 2 args".into());
@@ -5018,6 +5093,299 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
             binop_val(lv, op, rv)
         }
     }
+}
+
+// ── Paths: `T[i] = v`, `w.f = v`, `set(c[i], v)` ──────────────────────────────
+//
+// One path representation and one writer serve both update axes. `=` rebinds a
+// name (value semantics, never observable outside the scope); `set`/`update`
+// address a cell (reference semantics). Which axis you are on is fixed by the
+// syntax, not by a runtime type, so the two never dispatch into each other.
+
+/// An assignment path with every index expression already evaluated.
+pub(crate) enum Step {
+    Field(String),
+    Index(Vec<IdxItem>),
+}
+
+/// Evaluate the index expressions of an lvalue's path, left to right. Must run
+/// before the root binding is taken or a cell is borrowed.
+pub(crate) fn resolve_path(path: &[PathSeg], env: &Env) -> Result<Vec<Step>, String> {
+    path.iter().map(|seg| Ok(match seg {
+        PathSeg::Field(n)   => Step::Field(n.clone()),
+        PathSeg::Index(idx) => Step::Index(match idx {
+            Expr::Tuple(es) => es.iter().map(|e| eval_index_item(e, env)).collect::<Result<_, _>>()?,
+            single          => vec![eval_index_item(single, env)?],
+        }),
+    })).collect()
+}
+
+/// The flat offsets a resolved index designates in a tensor of `shape`, plus
+/// the shape of the selection (empty = a single element). Mirrors
+/// `eval_tensor_index_ast`, including its "one scalar index selects a whole
+/// sub-tensor" rule.
+fn index_offsets(shape: &[usize], items: &[IdxItem]) -> Result<(Vec<usize>, Vec<usize>), String> {
+    if items.len() == 1 && !matches!(items[0], IdxItem::Slice(..)) {
+        let raw = match items[0] { IdxItem::Point(n) => n, _ => unreachable!() };
+        let i = norm_index(raw, shape[0], "tensor")?;
+        let sub: usize = shape[1..].iter().product();
+        let start = i * sub;
+        return Ok(((start..start + sub).collect(), shape[1..].to_vec()));
+    }
+    if items.len() != shape.len() {
+        return Err(format!("tensor: expected {} index/slice items, got {}", shape.len(), items.len()));
+    }
+    let resolved: Vec<(bool, Vec<usize>)> = items.iter().zip(shape.iter()).enumerate()
+        .map(|(k, (item, &dim))| resolve_idx_item(*item, dim, k))
+        .collect::<Result<_, _>>()?;
+    let sel_shape: Vec<usize> = resolved.iter().filter(|(keep, _)| *keep).map(|(_, ix)| ix.len()).collect();
+    let sizes: Vec<usize> = resolved.iter().map(|(_, ix)| ix.len()).collect();
+    let total: usize = sizes.iter().product();
+    let in_strides = strides(shape);
+    let offs = (0..total).map(|flat| {
+        unravel(flat, &sizes).iter().zip(&resolved).zip(&in_strides)
+            .map(|((&ci, (_, ix)), &st)| ix[ci] * st).sum()
+    }).collect();
+    Ok((offs, sel_shape))
+}
+
+/// A cell reached mid-path would make `=` write through a reference, which is
+/// the one thing the binding axis never does.
+fn cell_in_path(what: &str) -> String {
+    format!("{what} is a cell; assignment never writes through a reference — \
+             use set(…) / update(…) to reach into a cell")
+}
+
+/// Read the value at a resolved path. Used by compound assignment (`+=`) so the
+/// index expressions are evaluated exactly once for the read and the write.
+fn read_steps(target: &Val, steps: &[Step]) -> Result<Val, String> {
+    let (step, rest) = match steps.split_first() {
+        None => return Ok(target.clone()),
+        Some(x) => x,
+    };
+    match (step, target) {
+        (Step::Field(name), Val::Tuple(t)) => {
+            let v = t.lookup(name).ok_or_else(|| no_field(name, t))?;
+            read_steps(v, rest)
+        }
+        (Step::Index(items), Val::Tuple(t)) => {
+            let i = tuple_step_index(items, t.len())?;
+            read_steps(&t[i], rest)
+        }
+        (Step::Index(items), Val::Tensor { data, shape }) => {
+            let (offs, sel) = index_offsets(shape, items)?;
+            no_rest(rest)?;
+            Ok(if sel.is_empty() { Val::Num(data[offs[0]]) }
+               else { Val::Tensor { data: TData::new(offs.iter().map(|&o| data[o]).collect()), shape: sel } })
+        }
+        (Step::Index(items), Val::ComplexTensor { re, im, shape }) => {
+            let (offs, sel) = index_offsets(shape, items)?;
+            no_rest(rest)?;
+            Ok(if sel.is_empty() { make_complex(re[offs[0]], im[offs[0]]) }
+               else { maybe_real(offs.iter().map(|&o| re[o]).collect(),
+                                 offs.iter().map(|&o| im[o]).collect(), sel) })
+        }
+        (_, Val::Cell(_)) => Err(cell_in_path("a value on the path")),
+        (Step::Field(name), other) => Err(format!("cannot read field '{name}' of {}", fmt_val(other))),
+        (Step::Index(_), other)    => Err(format!("cannot index into {}", fmt_val(other))),
+    }
+}
+
+fn no_field(name: &str, t: &Tup) -> String {
+    format!("no field '{name}' in {} — a record has a fixed set of fields \
+             (use a splat, `(..r, {name} = …)`, to add one)", t.name_sig())
+}
+
+/// A tensor element is not itself addressable, so `T[i][j]` cannot continue.
+fn no_rest(rest: &[Step]) -> Result<(), String> {
+    if rest.is_empty() { Ok(()) }
+    else { Err("a tensor element cannot be indexed further; use one multi-index, T[i, j]".into()) }
+}
+
+fn tuple_step_index(items: &[IdxItem], len: usize) -> Result<usize, String> {
+    match items {
+        [IdxItem::Point(raw)] => norm_index(*raw, len, "tuple"),
+        _ => Err("a tuple path step takes one scalar index".into()),
+    }
+}
+
+/// Store `new` at a resolved path. The only mutation point in the language:
+/// tensor stores go through `TData`'s `Arc::make_mut`, so they are in place
+/// whenever the buffer is unshared and copy exactly once when it is not.
+pub(crate) fn write_steps(target: &mut Val, steps: &[Step], new: Val) -> Result<(), String> {
+    let (step, rest) = match steps.split_first() {
+        None => { *target = new; return Ok(()); }
+        Some(x) => x,
+    };
+    if let Val::Cell(_) = target { return Err(cell_in_path("a value on the path")); }
+    match step {
+        Step::Field(name) => {
+            let slot = match target {
+                Val::Tuple(t) => {
+                    let i = t.position(name).ok_or_else(|| no_field(name, t))?;
+                    &mut t[i]
+                }
+                other => return Err(format!("cannot set field '{name}' on {}", fmt_val(other))),
+            };
+            write_steps(slot, rest, new)
+        }
+        Step::Index(items) => match target {
+            Val::Tuple(t) => {
+                let i = tuple_step_index(items, t.len())?;
+                write_steps(&mut t[i], rest, new)
+            }
+            Val::Tensor { .. } | Val::ComplexTensor { .. } => {
+                no_rest(rest)?;
+                write_tensor(target, items, new)
+            }
+            other => Err(format!("cannot index into {}", fmt_val(other))),
+        },
+    }
+}
+
+/// Store into a tensor selection. A scalar fills every selected element; a
+/// tensor must supply exactly one element per selected position. Storing a
+/// complex value into a real tensor promotes the whole tensor, matching how
+/// the rest of the language promotes.
+fn write_tensor(target: &mut Val, items: &[IdxItem], new: Val) -> Result<(), String> {
+    let shape = match target {
+        Val::Tensor { shape, .. } | Val::ComplexTensor { shape, .. } => shape.clone(),
+        _ => unreachable!("caller matched a tensor"),
+    };
+    let (offs, sel) = index_offsets(&shape, items)?;
+    let describe = |n: usize| if sel.is_empty() {
+        format!("1 element")
+    } else {
+        format!("{n} elements (selection shape {sel:?})")
+    };
+    let vals: Vec<(f64, f64)> = match new {
+        Val::Num(x)        => vec![(x, 0.0); offs.len()],
+        Val::Complex(a, b) => vec![(a, b); offs.len()],
+        Val::Tensor { data, .. } => {
+            if data.len() != offs.len() {
+                return Err(format!("cannot store {} values into {}", data.len(), describe(offs.len())));
+            }
+            data.iter().map(|&x| (x, 0.0)).collect()
+        }
+        Val::ComplexTensor { re, im, .. } => {
+            if re.len() != offs.len() {
+                return Err(format!("cannot store {} values into {}", re.len(), describe(offs.len())));
+            }
+            re.iter().zip(im.iter()).map(|(&a, &b)| (a, b)).collect()
+        }
+        other => return Err(format!("cannot store {} in a tensor", fmt_val(&other))),
+    };
+    // Promote a real tensor once, up front, if any incoming value is complex.
+    if matches!(target, Val::Tensor { .. }) && vals.iter().any(|&(_, b)| b != 0.0) {
+        if let Val::Tensor { data, shape } = target {
+            let n = data.len();
+            *target = Val::ComplexTensor {
+                re: data.clone(), im: TData::new(vec![0.0; n]), shape: std::mem::take(shape),
+            };
+        }
+    }
+    match target {
+        // One `deref_mut` for the whole store: the copy-on-write check happens
+        // once, not once per element.
+        Val::Tensor { data, .. } => {
+            let d = &mut **data;
+            for (&o, &(x, _)) in offs.iter().zip(&vals) { d[o] = x; }
+        }
+        Val::ComplexTensor { re, im, .. } => {
+            let (r, i) = (&mut **re, &mut **im);
+            for (&o, &(x, y)) in offs.iter().zip(&vals) { r[o] = x; i[o] = y; }
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
+pub(crate) fn busy_cell(what: &str) -> String {
+    format!("{what}: this cell is already being read or written — a cell cannot \
+             be updated from inside its own update")
+}
+
+/// Read an expression back as a path: a root name plus `[…]` / `.name` steps.
+/// This is what lets `set`/`update` reach *into* a cell — `set(c[i,j], v)`
+/// would otherwise evaluate `c[i,j]` to a detached copy before `set` ever ran.
+fn expr_as_path(e: &Expr) -> Option<(&str, Vec<PathSeg>)> {
+    match e {
+        Expr::Var(n) => Some((n.as_str(), vec![])),
+        Expr::Index(b, i) => {
+            let (root, mut p) = expr_as_path(b)?;
+            p.push(PathSeg::Index((**i).clone()));
+            Some((root, p))
+        }
+        Expr::Member(b, f) => {
+            let (root, mut p) = expr_as_path(b)?;
+            p.push(PathSeg::Field(f.clone()));
+            Some((root, p))
+        }
+        _ => None,
+    }
+}
+
+/// `set(c[i], v)` / `update(c.f, g)` — the cell axis. Writes through the
+/// reference, in place, visible to every holder of the cell.
+///
+/// Returns `Ok(None)` when the first argument is not a path rooted at a cell,
+/// so the call falls through to the ordinary builtin and reports its own error.
+fn eval_cell_write(name: &str, target: &Expr, arg: &Expr, env: &Env)
+    -> Result<Option<Val>, String>
+{
+    let Some((root, path)) = expr_as_path(target) else { return Ok(None) };
+    let Some(Val::Cell(cell)) = env.vars.get(root) else { return Ok(None) };
+    let cell = Arc::clone(cell);
+    // Everything is evaluated before the cell is borrowed — the argument, then
+    // the path's indices, then (for `update`) the function applied to the
+    // current value with the borrow already released. So a cell can be read
+    // from inside the very expression that writes it.
+    let arg_val = eval(arg, env)?;
+    let steps = resolve_path(&path, env)?;
+    let stored = if name == "update" {
+        let cur = {
+            let guard = cell.try_borrow().map_err(|_| busy_cell(name))?;
+            read_steps(&guard, &steps)?
+        };
+        apply_val(arg_val, vec![cur], env)?
+    } else {
+        arg_val
+    };
+    let mut guard = cell.try_borrow_mut().map_err(|_| busy_cell(name))?;
+    write_steps(&mut guard, &steps, stored.clone())?;
+    Ok(Some(stored))
+}
+
+/// `T[i] = v` / `w.f += 1` — the binding axis. Rebinds `root` in this scope;
+/// nothing outside it can observe the write.
+pub fn eval_assign(a: &Assign, env: &mut Env) -> Result<(), String> {
+    let name = &a.lvalue.root;
+    if is_protected(name) {
+        return Err(format!("cannot redefine built-in '{name}'"));
+    }
+    // Everything is evaluated before the binding is touched: the right-hand
+    // side, then the path's indices, then (for `+=`) the current slot.
+    let value = eval(&a.value, env)?;
+    let steps = resolve_path(&a.lvalue.path, env)?;
+    if !env.vars.contains_key(name) {
+        return Err(format!("undefined: {name}"));
+    }
+    if let Some(Val::Cell(_)) = env.vars.get(name) {
+        return Err(format!(
+            "'{name}' is a cell; `=` rebinds a name and never writes through a \
+             reference — use set({name}{}, v)",
+            if a.lvalue.path.is_empty() { "" } else { "[…]" }));
+    }
+    let value = match &a.op {
+        None     => value,
+        Some(op) => binop_val(read_steps(env.vars.get(name).unwrap(), &steps)?, op, value)?,
+    };
+    // Take the root out of the map so the buffer has one owner where it can:
+    // this is what makes repeated writes in a scope O(1) instead of O(N).
+    let mut root = Arc::make_mut(&mut env.vars).remove(name).unwrap();
+    let res = write_steps(&mut root, &steps, value);
+    Arc::make_mut(&mut env.vars).insert(name.clone(), root);
+    res
 }
 
 // ── Index resolution ──────────────────────────────────────────────────────────
@@ -5205,6 +5573,33 @@ fn eval_complex_tensor_index_ast(re: &[f64], im: &[f64], shape: &[usize], idx: &
 ///   is_range = true  → this dimension is kept in the output
 ///   is_range = false → this dimension is collapsed (scalar index)
 fn resolve_index_item(item: &Expr, dim: usize, k: usize, env: &Env) -> Result<(bool, Vec<usize>), String> {
+    resolve_idx_item(eval_index_item(item, env)?, dim, k)
+}
+
+/// One index item with its sub-expressions already evaluated.
+///
+/// Splitting evaluation out of resolution is what lets an assignment resolve
+/// its whole path *before* it takes the root binding out of the environment:
+/// `T[T[0]] = 1` still sees `T`, and no index expression runs while a value is
+/// half-written.
+#[derive(Clone, Copy)]
+pub(crate) enum IdxItem {
+    Point(i64),
+    Slice(Option<i64>, Option<i64>),
+}
+
+fn eval_index_item(item: &Expr, env: &Env) -> Result<IdxItem, String> {
+    let num = |e: &Expr, what: &str| -> Result<i64, String> { Ok(eval(e, env)?.num(what)? as i64) };
+    Ok(match item {
+        Expr::Slice(lo, hi) => IdxItem::Slice(
+            lo.as_ref().map(|e| num(e, "slice lo")).transpose()?,
+            hi.as_ref().map(|e| num(e, "slice hi")).transpose()?,
+        ),
+        other => IdxItem::Point(num(other, "tensor index")?),
+    })
+}
+
+fn resolve_idx_item(item: IdxItem, dim: usize, k: usize) -> Result<(bool, Vec<usize>), String> {
     // Resolve a signed scalar index to [0, dim), erroring on out-of-range either way.
     let clamp = |raw: i64| -> Result<usize, String> {
         let i = if raw < 0 { raw + dim as i64 } else { raw };
@@ -5213,35 +5608,23 @@ fn resolve_index_item(item: &Expr, dim: usize, k: usize, env: &Env) -> Result<(b
     };
     match item {
         // T[..] — all indices
-        Expr::Slice(None, None) => Ok((true, (0..dim).collect())),
+        IdxItem::Slice(None, None) => Ok((true, (0..dim).collect())),
         // T[lo..] — from lo to end
-        Expr::Slice(Some(lo_expr), None) => {
-            let lo = eval(lo_expr, env)?.num("slice lo")? as i64;
+        IdxItem::Slice(Some(lo), None) => {
             let lo = if lo < 0 { (dim as i64 + lo).max(0) as usize } else { lo as usize };
             Ok((true, (lo..dim).collect()))
         }
         // T[..hi] — from start to hi (inclusive)
-        Expr::Slice(None, Some(hi_expr)) => {
-            let hi = eval(hi_expr, env)?.num("slice hi")? as i64;
-            let hi = clamp(hi)?;
-            Ok((true, (0..=hi).collect()))
-        }
+        IdxItem::Slice(None, Some(hi)) => Ok((true, (0..=clamp(hi)?).collect())),
         // T[lo..hi] — bounded slice (inclusive on both ends)
-        Expr::Slice(Some(lo_expr), Some(hi_expr)) => {
-            let lo = eval(lo_expr, env)?.num("slice lo")? as i64;
-            let hi = eval(hi_expr, env)?.num("slice hi")? as i64;
+        IdxItem::Slice(Some(lo), Some(hi)) => {
             let lo = if lo < 0 { (dim as i64 + lo).max(0) as usize } else { lo as usize };
             let hi = clamp(hi)?;
             if lo > hi { return Ok((true, vec![])); }
             Ok((true, (lo..=hi).collect()))
         }
-        // Anything else: evaluate, must be a scalar index.
-        other => {
-            let val = eval(other, env)?;
-            let raw = val.num("tensor index")? as i64;
-            let i = clamp(raw)?;
-            Ok((false, vec![i]))
-        }
+        // A plain scalar index.
+        IdxItem::Point(raw) => Ok((false, vec![clamp(raw)?])),
     }
 }
 

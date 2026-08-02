@@ -535,6 +535,142 @@ Blocks can appear anywhere an expression is expected — inside function bodies,
 
 ---
 
+## Assignment
+
+`=` binds a name. It also reaches **into** a value, so one element of a tensor or
+one field of a record can be replaced without rebuilding the whole thing:
+
+```
+> T = zeros(3)
+> T[1] = 5
+> T
+result = [0, 5, 0]
+> A = zeros(2, 2); A[1, 0] = 7
+> T[0..1] = [9, 8]          # a slice; the shapes must match
+> T[2] += 1                 # also -=  *=  /=
+> w = (nx = 128, alpha = 0.02)
+> w.alpha = 0.05
+> s = (q = [1, 2, 3]); s.q[1] = 7      # paths nest
+```
+
+The left side is a **name followed by a path** of `[…]` and `.field` steps.
+Indices behave exactly as they do when reading — negative indices count from the
+end, slices are inclusive, and out-of-range is an error.
+
+### `=` rebinds; it never writes through a reference
+
+An assignment rebinds the name **in the scope where it is written**. A caller, an
+enclosing scope, and any closure that captured the value are all unaffected:
+
+```
+> f(A) = { A[0] = 9; A }     # modifies f's own binding…
+> B = [1, 2]
+> f(B)
+result = [9, 2]
+> B                          # …not the caller's
+result = [1, 2]
+```
+
+This is what makes assignment safe to use inside a function: there is no aliasing
+to reason about, and no way to reach into someone else's data. When you *want*
+shared mutable state, that is what a [cell](#cells) is for — and it is spelled
+differently, so a line of code always tells you which one it is.
+
+Assignment is a statement: it is legal at the top level and inside `{…}`, but not
+as a record field (a field must be a name) and not inside a `GPU { … }` block.
+
+### What it costs
+
+A tensor's storage is shared copy-on-write, so a path write mutates in place
+whenever the buffer has a single owner, and copies exactly once when it does not.
+In practice:
+
+| | cost of *m* writes |
+|---|---|
+| `T[i] = v` repeatedly in one scope | **O(N + m)** — at most one copy on the first write |
+| `T[i] = v` in a function body called *n* times | one copy per call (the caller's binding aliases the buffer) |
+| `set(c[i], v)` through a cell | **no copies at all** |
+
+Rebuilding a tensor per element — the only option before — is O(m·N). For a hot
+in-place loop, use a cell.
+
+One caveat worth knowing: a function body containing a path write does not
+compile to bytecode and falls back to the tree-walk evaluator, which costs
+roughly 20 µs per call regardless of tensor size. That is the same fallback
+slices, ranges and `map`/`filter`/`reduce` already take — it is interpreter
+overhead, not copying — but it means a tight loop of single-element writes is
+currently dominated by it.
+
+---
+
+## Cells
+
+A **cell** is the one value with reference semantics: copying a cell shares it,
+so a write through one name is visible through every other. It is what you reach
+for when state genuinely has to outlive an expression — a stepper that an
+animation calls once per frame, an accumulator, a preallocated buffer.
+
+```
+> c = cell(0)
+> d = c                     # d and c are the same cell
+> set(c, 5)
+> get(d)
+result = 5
+```
+
+`get` reads, `set` writes, `update` applies a function to what is there:
+
+```
+> c = cell(3)
+> update(c, x -> x * 10)    # returns the new value
+result = 30
+```
+
+All three reach **into** the cell with the same path syntax assignment uses, so
+whole-value and part-of-value updates look the same:
+
+```
+> c = cell(zeros(3))
+> set(c[1], 7)              # in place — no copy, whatever the tensor's size
+> get(c)
+result = [0, 7, 0]
+> c = cell((q = [1, 2, 3], n = 0))
+> set(c.q[2], 8)
+> update(c.n, x -> x + 1)
+> get(c)
+result = (q = [1, 2, 8], n = 1)
+> get(c).q[0]               # reading a part needs nothing new
+result = 1
+```
+
+The function passed to `update` runs with no borrow held, so it may read the very
+cell it is updating — `update(c, x -> x + get(c))` is fine.
+
+**The two axes never mix.** `=` binds a name and its effect stops at the enclosing
+scope; `get`/`set`/`update` address a cell and their effect is seen by every
+holder. Neither changes meaning based on what a value turns out to be at runtime,
+so `c[0] = 1` is an error that points you at `set(c[0], 1)` rather than quietly
+doing something different from what the same line does one scope over. Rebinding
+a cell-valued *name* is still just a definition: `c = 2` replaces the binding, it
+does not write into the cell.
+
+Passed around as a value — to `compose`, `map`, or bound to another name —
+`set` and `update` only have their whole-cell two-argument form, since there is
+no longer any path syntax to look at.
+
+This is the pattern the animation examples use: a closure over a cell becomes a
+generator that advances one step per call.
+
+```
+# libraries/heat.math
+solver(T0, alpha, r) = {
+  state = cell(T0);
+  _ -> { T = get(state); set(state, heatStep(T, alpha, r)); T }
+}
+```
+
+---
+
 ## Multi-line syntax
 
 A newline is a separator. Which separator it means depends only on the bracket you are inside:

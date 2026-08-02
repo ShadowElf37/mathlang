@@ -1,11 +1,21 @@
 [1;4mset[0m
 
-Updates the value in a mutable cell and returns the new value.
+Updates a mutable cell and returns the stored value. The first argument may be
+the cell itself, or a path into it — set(c[i]), set(c.field), set(c.q[i]) — in
+which case only that slot is written, in place and with no copy whatever the
+tensor's size. Every holder of the cell sees the write.
+
+`=` is the other axis: it rebinds a name and never writes through a reference,
+so c[0] = 1 is an error that points here.
 
 [1mExamples:[0m
 [0m> c = cell(5)
 > set(c, 20)
 result = 20
-> get(c)
-result = 20
+> c = cell(zeros(3))
+> set(c[1], 7); get(c)
+result = [0, 7, 0]
+> c = cell((q = [1,2,3]))
+> set(c.q[2], 8); get(c)
+result = (q = [1, 2, 8])
 [0m

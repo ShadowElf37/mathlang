@@ -4,6 +4,9 @@ pub enum Token {
     Plus, Minus, Star, Slash, SlashSlash, Percent, Caret, StarStar,
     LParen, RParen, LBrace, RBrace, LBracket, RBracket,
     Comma, Colon, Semicolon, Eq, Arrow, DotDot, Dot,
+    /// Compound assignment: `+= -= *= /=`. Only meaningful at the head of an
+    /// assignment statement; anywhere else the parser rejects them.
+    PlusEq, MinusEq, StarEq, SlashEq,
     Lt, Gt, LtEq, GtEq, EqEq, Bang, BangEq,
     Amp, Pipe, At, Tilde,
     /// A source line break. Only ever present in the *raw* token stream:
@@ -77,20 +80,27 @@ impl<'a> Lexer<'a> {
                     out.push(Token::Newline);
                 }
                 Some(b) => match b {
-                    b'+' => { self.bump(); out.push(Token::Plus); }
+                    b'+' => {
+                        self.bump();
+                        if self.peek() == Some(b'=') { self.bump(); out.push(Token::PlusEq); }
+                        else { out.push(Token::Plus); }
+                    }
                     b'-' => {
                         self.bump();
                         if self.peek() == Some(b'>') { self.bump(); out.push(Token::Arrow); }
+                        else if self.peek() == Some(b'=') { self.bump(); out.push(Token::MinusEq); }
                         else { out.push(Token::Minus); }
                     }
                     b'*' => {
                         self.bump();
                         if self.peek() == Some(b'*') { self.bump(); out.push(Token::StarStar); }
+                        else if self.peek() == Some(b'=') { self.bump(); out.push(Token::StarEq); }
                         else { out.push(Token::Star); }
                     }
                     b'/' => {
                         self.bump();
                         if self.peek() == Some(b'/') { self.bump(); out.push(Token::SlashSlash); }
+                        else if self.peek() == Some(b'=') { self.bump(); out.push(Token::SlashEq); }
                         else { out.push(Token::Slash); }
                     }
                     b'%' => { self.bump(); out.push(Token::Percent); }

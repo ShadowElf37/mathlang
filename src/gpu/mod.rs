@@ -140,6 +140,14 @@ fn hoist_gets(
             return Err("GPU: record literals are not supported inside a GPU block".into()),
         Expr::Apply(f, args) => {
             if let Expr::Var(name) = &**f {
+                // `get` is the one host helper that crosses into a block, and
+                // only as a read resolved up front. Writing a cell from inside
+                // a block would mutate host state mid-kernel.
+                if name == "set" || name == "update" {
+                    return Err(format!(
+                        "GPU: {name}() writes host state and is not allowed inside a GPU \
+                         block; read with get(cell) and store the block's result outside"));
+                }
                 if name == "get" {
                     // Host read of the cell, resolved now and captured.
                     let v = crate::eval::eval(e, env)
@@ -183,6 +191,12 @@ fn hoist_gets(
                 BlockStmt::Def(Def::Var(n, x)) => BlockStmt::Def(Def::Var(n.clone(), rec(x, scope, counter)?)),
                 BlockStmt::Def(Def::Func(n, ps, ret, x)) =>
                     BlockStmt::Def(Def::Func(n.clone(), ps.clone(), ret.clone(), rec(x, scope, counter)?)),
+                // Mutation is host-side by construction: this backend has no
+                // scatter, and a write mid-kernel would break the "host state
+                // crosses the boundary up front" rule that `get` hoisting keeps.
+                BlockStmt::Assign(_) =>
+                    return Err("GPU: assignment is not supported inside a GPU block \
+                                (build the value functionally, or write on the host)".into()),
             })).collect::<Result<Vec<_>, String>>()?;
             Expr::Block(nstmts)
         }
@@ -277,6 +291,8 @@ fn eval_gpu(
             let mut saw_expr = false;
             for stmt in stmts {
                 match stmt {
+                    BlockStmt::Assign(_) =>
+                        return Err("GPU: assignment is not supported inside a GPU block".into()),
                     BlockStmt::Def(Def::Var(name, expr)) => {
                         let v = eval_gpu(expr, env, ctx, scope)?;
                         scope.insert(name.clone(), v);
@@ -1423,7 +1439,7 @@ fn collect_lambda_tensors(
                 match s {
                     BlockStmt::Expr(x) => collect_lambda_tensors(x, params, env, scope, out),
                     BlockStmt::Def(Def::Var(_, x)) => collect_lambda_tensors(x, params, env, scope, out),
-                    BlockStmt::Def(Def::Func(..)) => {}
+                    BlockStmt::Def(Def::Func(..)) | BlockStmt::Assign(_) => {}
                 }
             }
         }
@@ -1495,6 +1511,8 @@ fn emit_expr(e: &Expr, ctx: &LamCtx) -> Result<String, String> {
                     BlockStmt::Expr(x) => last = Some(emit_expr(x, ctx)?),
                     BlockStmt::Def(_) => return Err(
                         "GPU: local bindings inside a tensor lambda are not supported; inline the expression".into()),
+                    BlockStmt::Assign(_) => return Err(
+                        "GPU: assignment inside a tensor lambda is not supported".into()),
                 }
             }
             last.ok_or_else(|| "GPU: tensor lambda block has no result expression".to_string())

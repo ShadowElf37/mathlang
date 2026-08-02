@@ -1,9 +1,13 @@
 [1;4mget[0m
 
-Reads the current value stored in a mutable cell.
+Reads the current value stored in a mutable cell. Index or reach into the result
+as usual — get(c)[i], get(c).field — no special form is needed for reads.
 
 [1mExamples:[0m
 [0m> c = cell(42)
 > get(c)
 result = 42
+> c = cell([1,2,3])
+> get(c)[1]
+result = 2
 [0m

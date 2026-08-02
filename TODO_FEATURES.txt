@@ -19,6 +19,27 @@
        it without pulling in eval.rs. run_vm/Compiler stay in eval.rs (they need Val).
    1g. LoadBuffer instruction: GPU-side tensor indexing for captured buffers inside
        GPU lambda bodies (v2 GPU feature, see CONSIDERATIONS.md §15)
+   1h. Path writes in compiled bodies (v0.45.2): `T[i] = v` and `set(c[i], v)` both
+       force a tree-walk fallback for the whole lambda body — the compiler has no
+       instruction that mutates a binding or reaches into a cell. Measured on
+       100k iterations of `iterate(i -> {set(c[i], …); i+1}, …)`: 2.2 s, vs 0.05 s
+       for the same loop whose body compiles. The write itself is O(1) and
+       size-independent (10x10 and 1000x1000 tensors time identically), so this is
+       pure interpreter overhead, not copying — the same ~20 us/call the existing
+       slice/range/map fallbacks pay, which `make_local`'s three-layer env merge
+       dominates. Two ways out, either of which fixes all the fallbacks at once:
+       (a) a CellWrite/StorePath instruction pair, or (b) making the tree-walk call
+       path cheap (see 2.6 — narrowing closure capture shrinks exactly the map that
+       `make_local` merges).
+
+2.6. Narrow closure capture to free variables. `Def::Func` deep-clones the whole
+   environment into `captured` (src/eval.rs Expr::Block arm, src/repl.rs eval_line),
+   so every closure retains a full copy of the environment and every tensor in scope
+   gains an Arc reference that never goes away. Two consequences: closure memory is
+   O(env) each, and a path write to a tensor that any later-defined closure captured
+   copies the buffer every time instead of mutating in place. The `cfv` free-variable
+   analysis (src/eval.rs) already computes the right set for the VM. Needs its own
+   test pass: a miss in that analysis breaks closures rather than just slowing them.
 
 2. [SEPARATE BRANCH] GPU backend (see CONSIDERATIONS.md) + PDE solvers
 

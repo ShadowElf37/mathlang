@@ -1933,6 +1933,108 @@ run_err "splat.err.2d"        "T=[1,2;3,4]; (..T,)"
 # Two names both written out literally stay a duplicate-field error.
 run_err "splat.err.dup"       "(x=1, x=2)"
 
+# ── Assignment `T[i] = v` (the binding axis) ─────────────────────────────────
+section "ASSIGN"
+
+run "assign.elem"          "T=zeros(3); T[1]=5; T"                  "[0, 5, 0]"
+run "assign.elem.expr"     "T=zeros(3); k=2; T[k]=9; T"             "[0, 0, 9]"
+run "assign.matrix"        "T=zeros(2,2); T[1,0]=7; T"              "⎡ 0  0 ⎤ ⎣ 7  0 ⎦"
+run "assign.row"           "T=zeros(2,3); T[0]=[1,2,3]; T"          "⎡ 1  2  3 ⎤ ⎣ 0  0  0 ⎦"
+run "assign.neg"           "T=[1,2,3]; T[-1]=9; T"                  "[1, 2, 9]"
+run "assign.slice.scalar"  "T=zeros(5); T[1..3]=1; T"               "[0, 1, 1, 1, 0]"
+run "assign.slice.vec"     "T=zeros(4); T[0..1]=[9,8]; T"           "[9, 8, 0, 0]"
+run "assign.slice.open"    "T=zeros(4); T[2..]=5; T"                "[0, 0, 5, 5]"
+run "assign.slice.all"     "T=zeros(3); T[..]=2; T"                 "[2, 2, 2]"
+run "assign.slice.2d"      "T=zeros(2,2); T[..,0]=1; T"             "⎡ 1  0 ⎤ ⎣ 1  0 ⎦"
+run "assign.whole"         "T=[1,2]; T=[3,4]; T"                    "[3, 4]"
+run "assign.self.index"    "T=[2,0,0]; T[T[0]]=9; T"                "[2, 0, 9]"
+
+# Compound forms read the slot, combine, and store.
+run "assign.add"           "T=[1,2,3]; T[0]+=10; T"                 "[11, 2, 3]"
+run "assign.sub"           "T=[10,2]; T[0]-=4; T"                   "[6, 2]"
+run "assign.mul"           "T=[3,2]; T[1]*=5; T"                    "[3, 10]"
+run "assign.div"           "T=[8,2]; T[0]/=4; T"                    "[2, 2]"
+run "assign.bare.compound" "x=5; x*=3; x"                           "15"
+run "assign.compound.slice" "T=[1,1,1]; T[0..1]+=10; T"             "[11, 11, 1]"
+
+# Records and nested paths.
+run "assign.field"         "w=(nx=1,ny=2); w.ny=99; w"              "(nx = 1, ny = 99)"
+run "assign.field.compound" "w=(a=5); w.a+=1; w"                    "(a = 6)"
+run "assign.nested"        "s=(q=[1,2,3]); s.q[1]=7; s"             "(q = [1, 7, 3])"
+run "assign.deep"          "r=(a=(b=[1,2])); r.a.b[0]=9; r.a.b"     "[9, 2]"
+run "assign.tuple.index"   "t=(1,2,3); t[1]=8; t"                   "(1, 8, 3)"
+
+# Complex: storing a complex value promotes the whole tensor.
+run "assign.promote"       "T=zeros(3); T[0]=1+2i; T"               "[1 + 2i, 0, 0]"
+run "assign.cplx.real"     "Z=[2+3i,2]; Z[1]=5; Z[1]"               "5"
+
+# Value semantics: a write is never visible outside the scope that made it.
+run "assign.not.caller"    "f(A)={A[0]=9; A[0]}; B=[1,2]; f(B); B"  "[1, 2]"
+run "assign.fn.sees.own"   "f(A)={A[0]=9; A}; f([1,2])"             "[9, 2]"
+run "assign.block.scoped"  "T=[1,2]; {T[0]=99; 0}; T"               "[1, 2]"
+run "assign.block.local"   "{T=[1,2]; T[0]=5; T}"                   "[5, 2]"
+run "assign.closure.frozen" "T=[1,2]; f=()->T[0]; T[0]=99; f()"     "1"
+
+run_err "assign.err.undef"     "Q[0]=1"
+run_err "assign.err.protected" "sin[0]=1"
+run_err "assign.err.range"     "T=[1,2]; T[5]=1"
+run_err "assign.err.negrange"  "T=[1,2]; T[-3]=1"
+run_err "assign.err.count"     "T=zeros(4); T[0..1]=[1,2,3]"
+run_err "assign.err.nofield"   "w=(x=1); w.z=2"
+run_err "assign.err.posfield"  "t=(1,2); t.x=3"
+run_err "assign.err.fnroot"    "f=x->x; f[0]=1"
+run_err "assign.err.chain"     "T=zeros(2,2); T[0][1]=5"
+run_err "assign.err.in.record" "(T[0] = 1)"
+# A cell is the other axis: `=` never writes through a reference.
+run_err "assign.err.cell"      "c=cell([1,2]); c[0]=5"
+run_err "assign.err.cell.mid"  "r=(c=cell([1,2])); r.c[0]=5"
+# `==` is one token, so a comparison is untouched.
+run "assign.reg.eqeq"      "T=[1,2]; T[0]==1"                       "1"
+run "assign.reg.call"      "f(x)=x+1; f(2)"                         "3"
+run "assign.reg.member"    "bits.xor(3,5)"                          "6"
+# Rebinding a cell-valued name is a definition, not a write-through.
+run "assign.cell.rebind"   "c=cell(1); c=2; c"                      "2"
+
+# ── set / update on cell paths (the cell axis) ────────────────────────────────
+section "CELL PATHS"
+
+run "cell.set.whole"       "c=cell(1); set(c,5); get(c)"            "5"
+run "cell.set.elem"        "c=cell(zeros(3)); set(c[1],7); get(c)"  "[0, 7, 0]"
+run "cell.set.2d"          "c=cell(zeros(2,2)); set(c[1,1],4); get(c)[1,1]" "4"
+run "cell.set.slice"       "c=cell(zeros(4)); set(c[1..2],3); get(c)" "[0, 3, 3, 0]"
+run "cell.set.field"       "c=cell((x=1,y=2)); set(c.y,9); get(c)"  "(x = 1, y = 9)"
+run "cell.set.nested"      "c=cell((q=[1,2,3])); set(c.q[2],8); get(c)" "(q = [1, 2, 8])"
+run "cell.set.returns"     "c=cell([0,0]); set(c[0],9)"             "9"
+# The point of a cell: the write is visible to every holder.
+run "cell.shared"          "c=cell([0,0]); d=c; set(c[0],7); get(d)" "[7, 0]"
+run "cell.shared.field"    "c=cell((x=0)); d=c; set(c.x,5); get(d).x" "5"
+
+run "cell.update.whole"    "c=cell(3); update(c, x->x*10); get(c)"  "30"
+run "cell.update.path"     "c=cell([1,2,3]); update(c[1], x->x+100); get(c)" "[1, 102, 3]"
+run "cell.update.field"    "c=cell((n=2)); update(c.n, x->x^3); get(c)" "(n = 8)"
+run "cell.update.returns"  "c=cell(2); update(c, x->x^3)"           "8"
+# `f` runs with no borrow held, so it may read the very cell being written.
+run "cell.update.reentrant" "c=cell(5); update(c, x -> x + get(c)); get(c)" "10"
+run "cell.set.reentrant"   "c=cell([9,0]); set(c[1], get(c)[0]); get(c)" "[9, 9]"
+
+# Loops: writes land in place, and the body still runs.
+run "cell.loop.iterate"    "c=cell(zeros(4)); iterate(i->{set(c[i],i+10); i+1},0,4); get(c)" "[10, 11, 12, 13]"
+run "cell.loop.scan"       "c=cell(zeros(4)); scan(i->{set(c[i],i*i); i+1},0,4); get(c)" "[0, 1, 4, 9]"
+run "cell.loop.update"     "c=cell(0); iterate(_->update(c,x->x+1),0,5); get(c)" "5"
+run "cell.in.fn"           "c=cell([0,0]); f(i)=set(c[i],9); f(1); get(c)" "[0, 9]"
+
+# As first-class values only the whole-cell form exists — there is no syntax to
+# inspect once `set` has been passed as a value.
+run "cell.firstclass.set"  "c=cell(1); f=set; f(c,42); get(c)"      "42"
+run "cell.firstclass.upd"  "c=cell(2); g=update; g(c,x->x+1); get(c)" "3"
+run "cell.temp"            "set(cell(1), 7)"                        "7"
+
+run_err "cell.err.noncell"    "x=5; set(x,1)"
+run_err "cell.err.noncell.u"  "x=5; update(x,y->y)"
+run_err "cell.err.range"      "c=cell([1,2]); set(c[5],1)"
+run_err "cell.err.nofield"    "c=cell((x=1)); set(c.z,1)"
+run_err "cell.err.arity"      "c=cell(1); set(c)"
+
 # ── GPU compute backend (only when built with --features gpu + a GPU present) ──
 section "GPU BACKEND"
 gpu_probe=$("$M" 'GPU { 1 + 1 }' 2>&1)

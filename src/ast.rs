@@ -88,9 +88,40 @@ pub enum Expr {
     GpuBlock(Box<Expr>),
 }
 
+/// One step of an assignment path: `T[i]` or `w.alpha`.
+#[derive(Debug, Clone)]
+pub enum PathSeg {
+    /// The index expression exactly as the reader builds it — `T[i,j]` is a
+    /// `Tuple`, `T[a..b]` a `Slice` — so writes resolve indices through the
+    /// same code as reads and inherit its negative-index and slice rules.
+    Index(Expr),
+    Field(String),
+}
+
+/// The left-hand side of an assignment: a root name and a path into it.
+/// An empty path is a plain `x = …` rebinding of the whole value.
+#[derive(Debug, Clone)]
+pub struct LValue {
+    pub root: String,
+    pub path: Vec<PathSeg>,
+}
+
+/// `T[i] = v`, `w.alpha += 1`. `op` is `None` for a plain `=` and `Some(op)`
+/// for a compound assignment, which reads the slot and combines before storing.
+///
+/// Deliberately *not* a `Def`: an assignment introduces no name, and `Def` also
+/// appears in record fields and namespace files where an assignment is invalid.
+#[derive(Debug, Clone)]
+pub struct Assign {
+    pub lvalue: LValue,
+    pub op:     Option<Op>,
+    pub value:  Expr,
+}
+
 #[derive(Debug, Clone)]
 pub enum BlockStmt {
     Def(Def),
+    Assign(Assign),
     Expr(Expr),
 }
 

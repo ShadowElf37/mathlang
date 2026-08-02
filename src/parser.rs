@@ -1,5 +1,5 @@
 use crate::lexer::Token;
-use crate::ast::{Expr, BlockStmt, Op, Def, TypeHint, Param, Field};
+use crate::ast::{Expr, BlockStmt, Op, Def, TypeHint, Param, Field, Assign, LValue, PathSeg};
 
 pub struct Parser { toks: Vec<Token>, pos: usize }
 
@@ -185,6 +185,8 @@ impl Parser {
             if *self.peek() == Token::Eof { break; }
             if self.is_def_start() {
                 stmts.push(BlockStmt::Def(self.parse_def()?));
+            } else if self.is_assign_start() {
+                stmts.push(BlockStmt::Assign(self.parse_assign()?));
             } else {
                 let exprs = self.parse_expr_list()?;
                 let e = if exprs.len() == 1 {
@@ -240,6 +242,8 @@ impl Parser {
             }
             if self.is_def_start() {
                 stmts.push(BlockStmt::Def(self.parse_def()?));
+            } else if self.is_assign_start() {
+                stmts.push(BlockStmt::Assign(self.parse_assign()?));
             } else {
                 stmts.push(BlockStmt::Expr(self.expr()?));
             }
@@ -270,6 +274,12 @@ impl Parser {
         if *self.peek() == Token::DotDot {
             return Ok(Field { name: None, value: self.parse_splat()? });
         }
+        // A record is a fixed set of named slots, so its fields are plain names.
+        // `(T[0] = 1)` would otherwise die on a confusing "expected '='".
+        if self.is_assign_start() {
+            return Err("a record field must be a name; \
+                        `T[i] = v` and `w.f = v` are statements, not fields".into());
+        }
         if self.is_def_start() {
             self.parse_record_field()
         } else {
@@ -291,6 +301,102 @@ impl Parser {
     fn parse_splat(&mut self) -> Result<Expr, String> {
         self.bump();
         Ok(Expr::Splat(Box::new(self.expr()?)))
+    }
+
+    /// Parse `[ … ]` into the index expression the evaluator resolves — cursor
+    /// is on the `[`. A single item stays bare; `T[i,j]` becomes a `Tuple`.
+    /// Shared by reads (`postfix`) and by assignment paths, so both resolve
+    /// indices identically.
+    fn parse_index_brackets(&mut self) -> Result<Expr, String> {
+        self.eat(&Token::LBracket)?;
+        let first = self.parse_index_item()?;
+        if *self.peek() != Token::Comma {
+            self.eat(&Token::RBracket)?;
+            return Ok(first);
+        }
+        let mut indices = vec![first];
+        while *self.peek() == Token::Comma {
+            self.bump();
+            if *self.peek() == Token::RBracket { break; }
+            indices.push(self.parse_index_item()?);
+        }
+        self.eat(&Token::RBracket)?;
+        Ok(Expr::Tuple(indices))
+    }
+
+    /// Does an assignment statement start here — `T[i] = v`, `w.alpha += 1`,
+    /// `x *= 2`? A bare `x = …` is a *definition*, so an empty path only counts
+    /// when the operator is compound. `T[0] == 1` is unaffected: `==` lexes as
+    /// one token.
+    fn is_assign_start(&self) -> bool {
+        let mut q = self.pos;
+        if !matches!(self.toks.get(q), Some(Token::Ident(_))) { return false; }
+        q += 1;
+        let mut segs = 0usize;
+        loop {
+            match self.toks.get(q) {
+                Some(Token::Dot) => {
+                    if !matches!(self.toks.get(q + 1), Some(Token::Ident(_))) { return false; }
+                    q += 2;
+                    segs += 1;
+                }
+                Some(Token::LBracket) => {
+                    let mut depth = 1usize;
+                    q += 1;
+                    while depth > 0 {
+                        match self.toks.get(q) {
+                            Some(Token::LBracket)      => depth += 1,
+                            Some(Token::RBracket)      => depth -= 1,
+                            Some(Token::Eof) | None    => return false,
+                            _ => {}
+                        }
+                        q += 1;
+                    }
+                    segs += 1;
+                }
+                // A call is not an lvalue, so `f(x) = …` stops here and is left
+                // to `is_def_start`.
+                _ => break,
+            }
+        }
+        match self.toks.get(q) {
+            Some(Token::Eq) => segs > 0,
+            Some(Token::PlusEq | Token::MinusEq | Token::StarEq | Token::SlashEq) => true,
+            _ => false,
+        }
+    }
+
+    /// Parse `root[i].f … = expr` (or a compound `+= -= *= /=`).
+    fn parse_assign(&mut self) -> Result<Assign, String> {
+        let root = match self.bump() {
+            Token::Ident(s) => s,
+            t => return Err(format!("expected name, got {:?}", t)),
+        };
+        let mut path = vec![];
+        loop {
+            match self.peek() {
+                Token::Dot => {
+                    self.bump();
+                    match self.bump() {
+                        Token::Ident(s) => path.push(PathSeg::Field(s)),
+                        t => return Err(format!("expected field name after '.', got {:?}", t)),
+                    }
+                }
+                Token::LBracket => path.push(PathSeg::Index(self.parse_index_brackets()?)),
+                _ => break,
+            }
+        }
+        let op = match self.peek() {
+            Token::Eq      => None,
+            Token::PlusEq  => Some(Op::Add),
+            Token::MinusEq => Some(Op::Sub),
+            Token::StarEq  => Some(Op::Mul),
+            Token::SlashEq => Some(Op::Div),
+            t => return Err(format!("expected '=' in assignment, got {:?}", t.clone())),
+        };
+        self.bump();
+        let value = if self.is_multi_lambda() { self.parse_multi_lambda()? } else { self.expr()? };
+        Ok(Assign { lvalue: LValue { root, path }, op, value })
     }
 
     /// Parse `name = expr` or `name(params) [: ret] = body` inside a record
@@ -488,21 +594,7 @@ impl Parser {
                 };
                 e = Expr::Member(Box::new(e), name);
             } else if *self.peek() == Token::LBracket {
-                self.bump();
-                let first = self.parse_index_item()?;
-                if *self.peek() == Token::Comma {
-                    let mut indices = vec![first];
-                    while *self.peek() == Token::Comma {
-                        self.bump();
-                        if *self.peek() == Token::RBracket { break; }
-                        indices.push(self.parse_index_item()?);
-                    }
-                    self.eat(&Token::RBracket)?;
-                    e = Expr::Index(Box::new(e), Box::new(Expr::Tuple(indices)));
-                } else {
-                    self.eat(&Token::RBracket)?;
-                    e = Expr::Index(Box::new(e), Box::new(first));
-                }
+                e = Expr::Index(Box::new(e), Box::new(self.parse_index_brackets()?));
             } else if *self.peek() == Token::LParen {
                 // Only treat as Apply if this is NOT an Ident (those are parsed as Call in primary)
                 // For all other expressions (lambdas, tuples, blocks, etc.) postfix () = Apply

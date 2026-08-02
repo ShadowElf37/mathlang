@@ -37,7 +37,7 @@ pub const BUILTIN_FNS: &[&str] = &[
     "fft", "ifft",
     "sum", "prod", "integral", "deriv", "map",
     "iterate", "scan",
-    "cell", "get", "set",
+    "cell", "get", "set", "update",
     "field",
     // Tensor ops
     "tensor", "matrix", "zeros", "ones", "eye", "diag",
@@ -389,6 +389,12 @@ pub fn eval_line(line: &str, env: &mut Env, repl: bool) -> bool {
                 let fn_val = Val::make_fn_with_sig(names.clone(), sig.clone(), body.clone(), std::sync::Arc::new(captured.clone()));
                 captured.insert(name.clone(), fn_val);
                 env.define(name.clone(), Val::make_fn_with_sig(names, sig, body.clone(), std::sync::Arc::new(captured)));
+            }
+            BlockStmt::Assign(a) => {
+                if let Err(e) = crate::eval::eval_assign(a, env) {
+                    eprintln!("error: {e}");
+                    return false;
+                }
             }
             BlockStmt::Expr(expr) => {
                 match eval(expr, env) {
@@ -1173,6 +1179,10 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     "Syntax:    x = 3           f(x) = x^2        f = x -> x^2\n",
                     "           g = n,r -> n+r  f(x:real) = ...   f(x:nat)->real = ...\n",
                     "           {{x=3; y=4; x^2+y^2}}  block (local scope)\n\n",
+                    "Assign:    T[i] = v  T[i,j] = v  T[a..b] = v  w.field = v  s.q[i] = v\n",
+                    "           += -= *= /=   rebinds the name in *this* scope — a caller, an\n",
+                    "           outer scope and any closure never see the write. For shared\n",
+                    "           mutable state use a cell: set(c[i], v) / update(c.f, g).\n\n",
                     "Multiline: a newline separates items — ',' inside (…) […], ';' inside {{…}}\n",
                     "           and at top level. ';' and ',' still work everywhere.\n",
                     "           A line ending in an operator, '=' or ',' continues, as does a\n",
@@ -1200,7 +1210,9 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     "HOF:       map filter reduce  sum(f,a,b)  prod(f,a,b)\n",
                     "           integral(f,a,b) deriv(f,x)  — box bounds / tensor point ⇒ multivar\n",
                     "           iterate(f,x0,n)  scan(f,x0,n)  cumsum cumprod diff\n\n",
-                    "Other:     mean std  fft ifft  rand  re im arg conj  cell get set\n",
+                    "Other:     mean std  fft ifft  rand  re im arg conj\n",
+                    "           cell(v) get(c) set(c,v) update(c,f)  — shared mutable state;\n",
+                    "           set/update also take a path: set(c[i,j], v)  update(c.n, f)\n",
                     "           field(data,lo,hi,bc) | field(f,lo,hi,counts,bc)  — scalar field (0-form)\n",
                     "           GPU {{ … }}  — GPU compute: elementwise/unary/reduce, stencils, tensor(...), iterate/scan (--features gpu)\n",
                     "           Constants: pi e phi inf i\n\n",

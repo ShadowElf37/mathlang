@@ -1,0 +1,19 @@
+[1;4mupdate[0m
+
+Applies a function to a cell's current value and stores the result, returning it.
+Like set, the first argument may be the cell or a path into it.
+
+The function runs with no borrow held, so it may read the same cell:
+update(c, x -> x + get(c)) is fine.
+
+[1mExamples:[0m
+[0m> c = cell(3)
+> update(c, x -> x * 10)
+result = 30
+> c = cell([1,2,3])
+> update(c[1], x -> x + 100); get(c)
+result = [1, 102, 3]
+> c = cell((n = 2))
+> update(c.n, x -> x^3); get(c)
+result = (n = 8)
+[0m

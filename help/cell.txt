@@ -1,11 +1,20 @@
 [1;4mcell[0m
 
-Creates a mutable cell that holds a value. Used with get and set for imperative updates.
+Creates a mutable cell holding a value. A cell is the one value with reference
+semantics: copying it shares it, so a write through one name is visible through
+every other. Read with get, write with set, transform with update — each of
+which also takes a path into the cell.
+
+Use a cell for state that must outlive an expression (a stepper called once per
+frame, an accumulator, a preallocated buffer). For everything else, plain values
+and `=` are cheaper and cannot alias.
 
 [1mExamples:[0m
 [0m> c = cell(5)
-> get(c)
-result = 5
-> set(c, 10); get(c)
+> d = c
+> set(c, 10); get(d)
 result = 10
+> c = cell(zeros(3))
+> set(c[1], 7); get(c)
+result = [0, 7, 0]
 [0m
