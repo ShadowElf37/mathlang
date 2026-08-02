@@ -1158,6 +1158,10 @@ run "llg.torque_perp_m"  "g=1.7595e11; B=[1,2,3]; a=0.1; m=[0.6,0,0.8]; round(ve
 run "llg.precession_planar" "g=1.7595e11; B=[0,0,0.1]; f=x->vec.normalize(x + 1e-13*(-g)*vec.cross(x,B)); round(iterate(f,[1,0,0],5000)[2],3)" "0"
 # damping (a=0.5) aligns m with the field (+z)
 run "llg.macrospin_damp" "g=1.7595e11; B=[0,0,0.1]; a=0.5; f=x->vec.normalize(x + 1e-13*(-g)/(1+a^2)*(vec.cross(x,B)+a*vec.cross(x,vec.cross(x,B)))); round(iterate(f,[1,0,0],20000)[2],3)" "1"
+# exchange field of a uniform magnetization is zero (componentwise ∇²=0), incl.
+# at Neumann (edge-replicating) boundaries. (Full field-vs-mumax parity ~1e-7 is
+# validated out-of-band with libraries/mag.math against a mumax reference run.)
+run "exch.uniform_zero" "m=tensor((i,j,c)->[1,0,0][c],4,4,3); round(max(abs(shift(m,1,0)+shift(m,-1,0)+shift(m,1,1)+shift(m,-1,1)-4*m)),9)" "0"
 
 # ── !savetensor / !loadtensor ─────────────────────────────────────────────────
 section "SAVETENSOR / LOADTENSOR"

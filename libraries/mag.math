@@ -19,11 +19,17 @@ mu0    = 4e-7 * pi          # vacuum permeability, T m/A
 #   dm/dt = -gamma0/(1+a^2) [ m×B + a m×(m×B) ]
 llg(m, B, a) = -gamma0/(1 + a^2) * (vec.cross(m, B) + a*vec.cross(m, vec.cross(m, B)))
 
-# --- exchange field (Tesla): (2 Aex/(mu0 Msat)) ∇²m ---
-# Componentwise spatial Laplacian (shift leaves the trailing component axis
-# untouched); edge-replicating (Neumann) boundaries via shift.
+# --- exchange field (Tesla): (2 Aex/Msat) ∇²m ---
+# Matches mumax's convention (B_exch in Tesla, no mu0). Componentwise spatial
+# Laplacian (shift leaves the trailing component axis untouched); edge-replicating
+# (Neumann) boundaries via shift.
 private lap(m, dx) = (shift(m,1,0) + shift(m,-1,0) + shift(m,1,1) + shift(m,-1,1) - 4*m) / dx^2
-exchangeField(m, Aex, Msat, dx) = (2*Aex/(mu0*Msat)) * lap(m, dx)
+exchangeField(m, Aex, Msat, dx) = (2*Aex/Msat) * lap(m, dx)
+
+# --- broadcast a constant 3-vector B to a uniform [nx,ny,3] field ---
+# (mathlang has no trailing-axis broadcast, so a uniform field, e.g. a Zeeman
+#  field B_ext, is built explicitly.)
+bcast(B, nx, ny) = tensor((i, j, c) -> B[c], nx, ny, 3)
 
 # --- one RK4 step of dm/dt = llg(m, heff(m), a), renormalized to |m|=1 ---
 #   heff : m -> effective field B (Tesla), a function of the current m.
