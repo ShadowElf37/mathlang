@@ -2113,6 +2113,60 @@ run "rfn.default.param"    "r = (g(a, b = 3) = a*b); r.g(2)"        "6"
 # Forward references do not resolve, in a literal or in a namespace file.
 run_err "rfn.err.forward"     "(a = b, b = 1)"
 
+# ── Bytecode VM coverage ──────────────────────────────────────────────────────
+#
+# The invariant under test throughout: a construct evaluated inside a function
+# body (compiled to bytecode) produces exactly what the same construct produces
+# at top level (tree-walked) — same value, and same error text. Where a body
+# used to fall back wholesale to the tree-walk evaluator, that was invisible
+# except as a 30-60x slowdown, so these are correctness tests standing in for a
+# performance property.
+section "VM COVERAGE"
+
+# `ns.member` inside a body: used to hit the compiler's catch-all and tree-walk.
+run "vm.member.call"       "f(x) = bits.and(x, 255); f(511)"          "255"
+run "vm.member.nested"     "a=(p=1,q=(r=7)); f(x) = a.q.r + x; f(1)"  "8"
+run "vm.member.field"      "w=(alpha=0.5,n=4); f(x) = w.alpha*x; f(4)" "2"
+run "vm.member.record.fn"  "r=(g(a)=a*3); f(x) = r.g(x); f(4)"        "12"
+# …and its errors must read the same as the tree-walked spelling.
+run "vm.member.err.field"  "f(x) = bits.nope(x); f(1)" \
+    "error: bits has no field 'nope' — has (and, or, xor, nand, nor, xnor, shl, shr, not)"
+run "vm.member.err.same"   "w=(a=1,b=2); w.zzz"    "error: w has no field 'zzz' — has (a, b)"
+run "vm.member.err.compiled" "w=(a=1,b=2); f(x) = w.zzz; f(1)" \
+    "error: w has no field 'zzz' — has (a, b)"
+run "vm.member.err.positional" "t=(1,2); f(x) = t.zzz; f(1)" \
+    "error: t is a positional tuple with no field 'zzz' (index it: [0])"
+run "vm.member.err.notrecord"  "f(x) = x.foo; f(3)" "error: '.foo': expected a record, got 3"
+
+# A name defined *after* the body that uses it. This used to compile to nothing
+# and stay tree-walked permanently, because the OnceLock cached the failure.
+run "vm.forward.ref"       "f(x) = g(x)+1; g(x) = x*2; f(5)"          "11"
+run "vm.mutual.rec"        "even(n) = if(n<=0,1,odd(n-1)); odd(n) = if(n<=0,0,even(n-1)); even(7)" "0"
+run_err "vm.undefined.still.errors" "f(x) = nosuchname(x); f(1)"
+
+# Recursion reaches itself by name (FnSig::self_name), so it works with no
+# global binding to fall back on, at any nesting depth.
+run "vm.rec.local"         "f(n) = { g(x) = if(x<=0,0,x+g(x-1)); g(n) }; f(4)" "10"
+run "vm.rec.local.nested"  "f(n) = { h(x) = { g(y) = if(y<=0,0,y+g(y-1)); g(x) }; h(n) }; f(4)" "10"
+run "vm.rec.toplevel"      "f(n) = if(n<=0,0,f(n-1)+1); f(1000)"      "1000"
+
+# Scope layering: a closure keeps the snapshot it captured, an assignment binds
+# in the scope that performs it, and neither leaks outward.
+run "vm.capture.snapshot"  "k=10; f(x) = x+k; k=99; f(1)"             "11"
+run "vm.capture.blocklocal" "f(x) = { y = x*2; z -> z + y }; f(3)(10)" "16"
+run "vm.capture.nested.param" "f(a) = { g(y) = { z -> z + a + y }; g(2) }; f(100)(1)" "103"
+run "vm.assign.no.leak"    "T=zeros(3); g(A) = { A[0]=9; A[0] }; g(T); T[0]" "0"
+run "vm.assign.block.scope" "n=3; f(x) = { n = x; n*2 }; f(5); n"     "3"
+# Assigning to a name that lives in an enclosing layer copies it out once and
+# rebinds it here; repeated writes then land in this scope's own frame.
+run "vm.assign.outer.copy" "T=zeros(4); f(x) = { T[0]=1; T[1]=2; T[2]=3; sum(T) }; f(0)" "6"
+run "vm.assign.outer.intact" "T=zeros(4); f(x) = { T[0]=1; sum(T) }; f(0); sum(T)" "0"
+
+# Env size must not affect call cost — the regression this section guards is
+# `make_local` rebuilding the whole environment per call. Correctness proxy:
+# a deep call chain with a large environment still resolves every name.
+run "vm.bigenv.resolves"   "a1=1;a2=2;a3=3;a4=4;a5=5; f(x) = a1+a2+a3+a4+a5+x; f(0)" "15"
+
 # ── GPU compute backend (only when built with --features gpu + a GPU present) ──
 section "GPU BACKEND"
 gpu_probe=$("$M" 'GPU { 1 + 1 }' 2>&1)

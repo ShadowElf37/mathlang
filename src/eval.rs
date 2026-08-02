@@ -104,6 +104,15 @@ pub struct FnSig {
     /// stays a zero-length vec.
     pub defaults: Vec<Option<Expr>>,
     pub ret:      Option<TypeHint>,
+    /// The name a `Def::Func` bound itself to, so the body can call itself.
+    ///
+    /// A recursive closure is genuinely cyclic, and `captured` is a plain
+    /// `Arc<HashMap>` that cannot contain itself. Naming the self-reference
+    /// instead keeps the value graph acyclic: the callee binds this name to the
+    /// function being applied, at call time, for free. This is what makes a
+    /// *local* recursive function work — a top-level one could also reach itself
+    /// through the globals, but a block-local one has nowhere else to look.
+    pub self_name: Option<String>,
 }
 
 impl FnSig {
@@ -114,7 +123,13 @@ impl FnSig {
             params: params.iter().map(|p| p.hint.clone()).collect(),
             defaults: if defaults.iter().all(Option::is_none) { vec![] } else { defaults },
             ret,
+            self_name: None,
         }
+    }
+    /// Mark this signature's function as reachable from its own body by `name`.
+    pub fn with_self(mut self, name: &str) -> Self {
+        self.self_name = Some(name.to_string());
+        self
     }
     /// Index of the first parameter with a default — i.e. how many arguments a
     /// call must supply.
@@ -407,21 +422,79 @@ impl Val {
 
 // ── Environment ───────────────────────────────────────────────────────────────
 //
-// vars is Arc-wrapped so env.clone() is O(1).  Mutations (variable definitions,
-// parameter binding) use Arc::make_mut() for copy-on-write semantics: the
-// HashMap is only cloned when there are multiple outstanding references to it,
-// which is rare in practice.
+// An Env is a *writable innermost frame* over a stack of read-only layers.
+// Both parts are Arc-wrapped, so env.clone() is O(1); writes (variable
+// definitions, parameter binding) use Arc::make_mut() on `vars` alone, which is
+// copy-on-write and — for a call frame — uniquely owned and tiny.
+//
+// The layering is what makes a function call cheap. It used to be one flat map,
+// so entering a function had to *build* the callee's scope by cloning the whole
+// global map and merging the closure's captured map into it (the old
+// `make_local`). That was O(env) per call and measured as ~100% of the tree-walk
+// call overhead: adding 300 trivial globals made a fallback body 3.4x slower
+// while compiled code was untouched. Now a call frame allocates a map sized to
+// the parameter count and *points* at the two outer layers.
+//
+// Lookup order — innermost frame, then each layer in order — reproduces exactly
+// what the old merged map resolved to: params/locals, then the closure's
+// captured snapshot, then globals.
 
 #[derive(Clone)]
 pub struct Env {
-    pub vars: Arc<HashMap<String, Val>>,
+    /// This scope's own bindings; the only part that is written.
+    pub vars:  Arc<HashMap<String, Val>>,
+    /// Enclosing read-only layers, innermost first. Empty for the global env.
+    pub outer: Arc<[Arc<HashMap<String, Val>>]>,
 }
 
 impl Env {
-    /// Insert a variable into this env, CoW-cloning the HashMap only if needed.
+    /// Insert a variable into this scope's own frame, CoW-cloning it only if
+    /// needed. Outer layers are never modified — a definition always binds here.
     #[inline]
     pub fn define(&mut self, k: String, v: Val) {
         Arc::make_mut(&mut self.vars).insert(k, v);
+    }
+
+    /// Resolve a name: own frame first, then each enclosing layer in order.
+    #[inline]
+    pub fn get(&self, k: &str) -> Option<&Val> {
+        if let Some(v) = self.vars.get(k) { return Some(v); }
+        self.outer.iter().find_map(|layer| layer.get(k))
+    }
+
+    #[inline]
+    pub fn contains_key(&self, k: &str) -> bool { self.get(k).is_some() }
+
+    /// Every binding visible here, innermost first. A name shadowed by an inner
+    /// frame is yielded only once, with its innermost value — so this agrees with
+    /// `get` for every key. Used by `!defs`, REPL completion and namespace
+    /// building, all of which run on the global env (no layers).
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Val)> {
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        self.vars.iter()
+            .chain(self.outer.iter().flat_map(|l| l.iter()))
+            .filter(move |(k, _)| seen.insert(k.as_str()))
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &String> { self.iter().map(|(k, _)| k) }
+
+    /// The scope a closure defined here should capture, flattened to one map.
+    ///
+    /// At the top level — every `.math` file, every REPL line, all of
+    /// `libraries/` — there are no layers and this is a refcount bump. Inside a
+    /// function body it flattens the visible chain, which is exactly the copy
+    /// closure creation already paid when `Env` was one flat map, so this is
+    /// never a regression. Phase 5 (narrowing capture to the body's free names)
+    /// removes the flatten altogether.
+    pub fn snapshot(&self) -> Arc<HashMap<String, Val>> {
+        if self.outer.is_empty() { return Arc::clone(&self.vars); }
+        // Outermost first so inner scopes shadow, matching `get`'s order.
+        let mut m: HashMap<String, Val> = HashMap::new();
+        for layer in self.outer.iter().rev() {
+            m.extend(layer.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        m.extend(self.vars.iter().map(|(k, v)| (k.clone(), v.clone())));
+        Arc::new(m)
     }
 }
 
@@ -481,7 +554,7 @@ impl Env {
         }
         // Standard namespaces (ops, solver, special, bits, …) — loaded by force.
         crate::ns::register_all(&mut vars);
-        Self { vars: Arc::new(vars) }
+        Self { vars: Arc::new(vars), outer: Arc::from(Vec::new()) }
     }
 }
 
@@ -579,7 +652,7 @@ pub fn infer_type(expr: &Expr, params: &HashMap<String, TypeHint>, env: &Env) ->
         Expr::ImagLit(_) => Complex,
         Expr::Var(name) => {
             if let Some(h) = params.get(name) { return h.clone(); }
-            if let Some(v) = env.vars.get(name) { return hint_of_val(v); }
+            if let Some(v) = env.get(name) { return hint_of_val(v); }
             if builtin_sig(name).is_some() { return Fn; }
             match name.as_str() {
                 "i"                                => Complex,
@@ -632,7 +705,7 @@ pub fn infer_type(expr: &Expr, params: &HashMap<String, TypeHint>, env: &Env) ->
         Expr::Apply(f, _args) => {
             if let Expr::Var(name) = &**f {
                 if params.get(name).is_none() {
-                    if let Some(Val::Fn(_, _, _, _, sig)) = env.vars.get(name) {
+                    if let Some(Val::Fn(_, _, _, _, sig)) = env.get(name) {
                         return sig.ret.clone().unwrap_or(Any);
                     }
                     if let Some(r) = builtin_ret_hint(name) { return r; }
@@ -2275,6 +2348,9 @@ pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, St
                         params:   sig.params.get(1..).unwrap_or(&[]).to_vec(),
                         defaults: sig.defaults.get(1..).unwrap_or(&[]).to_vec(),
                         ret:      sig.ret.clone(),
+                        // A partially applied function is a new value; the old
+                        // name no longer denotes it, so it has no self-reference.
+                        self_name: None,
                     });
                     Ok(Val::Fn(rest, body, Arc::new(new_cap), Arc::new(OnceLock::new()), new_sig))
                 }
@@ -3759,6 +3835,18 @@ impl<'a> Compiler<'a> {
         self.locals.iter().position(|l| l == name)
     }
 
+    /// Resolve `ns.field` against the captured snapshot, when `ns` is a plain
+    /// captured record not shadowed by a parameter or local. Returns None when
+    /// the base is anything the compiler cannot pin down at compile time.
+    fn static_member(&self, base: &Expr, field: &str) -> Option<Val> {
+        let Expr::Var(ns) = base else { return None };
+        if self.param_index(ns).is_some() || self.local_index(ns).is_some() { return None; }
+        match self.captured.get(ns.as_str())? {
+            Val::Tuple(t) => t.lookup(field).cloned(),
+            _ => None,
+        }
+    }
+
     fn compile(&mut self, expr: &Expr) -> Result<(), ()> {
         match expr {
             Expr::Num(n)     => self.code.push(Instruction::PushNum(*n)),
@@ -3781,7 +3869,14 @@ impl<'a> Compiler<'a> {
                         _                  => self.code.push(Instruction::LoadCaptured(name.clone())),
                     }
                 } else {
-                    return Err(());
+                    // Not in the captured snapshot — a forward reference, a
+                    // mutually recursive callee, or the function's own name.
+                    // `LoadCaptured` resolves it live at call time and errors
+                    // cleanly if it is genuinely undefined, so there is no reason
+                    // to abandon the body. Giving up here used to be permanent:
+                    // the `OnceLock` cached `None`, so `f(x) = g(x)` written above
+                    // `g` tree-walked forever — 33x slower, decided by line order.
+                    self.code.push(Instruction::LoadCaptured(name.clone()));
                 }
             }
 
@@ -3862,6 +3957,17 @@ impl<'a> Compiler<'a> {
                         self.code.push(Instruction::CallVal(arg_exprs.len()));
                     }
                 } else {
+                    // `ns.f(x)` where `ns.f` is a builtin resolves to the very
+                    // same CallBuiltin a flat builtin call compiles to — no
+                    // record lookup and no apply_val dispatch at run time. This
+                    // is how `libraries/` spells almost every call.
+                    if let Expr::Member(base, field) = f_expr.as_ref() {
+                        if let Some(Val::Builtin(bname)) = self.static_member(base, field) {
+                            for a in arg_exprs { self.compile(a)?; }
+                            self.code.push(Instruction::CallBuiltin(bname, arg_exprs.len()));
+                            return Ok(());
+                        }
+                    }
                     // Non-name callee (e.g. result of an expression).
                     self.compile(f_expr)?;
                     for a in arg_exprs { self.compile(a)?; }
@@ -3922,6 +4028,24 @@ impl<'a> Compiler<'a> {
                         }
                     }
                 }
+            }
+
+            // `ns.member` / `record.field`. Statically resolvable scalars are
+            // inlined for the same reason `Expr::Var` inlines them: `captured` is
+            // a snapshot, so the value cannot change under us.
+            Expr::Member(base, field) => {
+                if let Some(v) = self.static_member(base, field) {
+                    match v {
+                        Val::Num(x)        => { self.code.push(Instruction::PushNum(x)); return Ok(()); }
+                        Val::Complex(a, b) => { self.code.push(Instruction::PushComplex(a, b)); return Ok(()); }
+                        _ => {}
+                    }
+                }
+                self.compile(base)?;
+                self.code.push(Instruction::Member {
+                    field: field.clone(),
+                    who:   match base.as_ref() { Expr::Var(n) => n.clone(), _ => "value".to_string() },
+                });
             }
 
             Expr::Index(base, idx) => {
@@ -4076,10 +4200,11 @@ fn run_vm(
     args:     &[Val],
     captured: &Arc<HashMap<String, Val>>,
     env:      &Env,
+    me:       Option<(&str, &Val)>,
 ) -> Result<Val, String> {
     let mut stack:  Vec<Val> = Vec::with_capacity(16);
     let mut locals: Vec<Val> = Vec::new();
-    run_vm_reuse(code, args, captured, env, &mut stack, &mut locals)
+    run_vm_reuse(code, args, captured, env, &mut stack, &mut locals, me)
 }
 
 // Same as `run_vm` but reuses caller-owned `stack`/`locals` buffers, so a tight
@@ -4092,6 +4217,7 @@ fn run_vm_reuse(
     env:      &Env,
     stack:    &mut Vec<Val>,
     locals:   &mut Vec<Val>,
+    me:       Option<(&str, &Val)>,
 ) -> Result<Val, String> {
     stack.clear();
     locals.clear();
@@ -4103,10 +4229,15 @@ fn run_vm_reuse(
             Instruction::PushComplex(a, b)  => stack.push(make_complex(*a, *b)),
             Instruction::LoadParam(i)       => stack.push(args[*i].clone()),
             Instruction::LoadCaptured(name) => {
-                let v = captured.get(name.as_str())
-                    .or_else(|| env.vars.get(name.as_str()))
-                    .cloned()
-                    .ok_or_else(|| format!("vm: undefined: {name}"))?;
+                // The self-reference wins: it is the only binding that cannot be
+                // in `captured` (a map cannot contain the function that owns it).
+                let v = match me {
+                    Some((n, v)) if n == name.as_str() => v.clone(),
+                    _ => captured.get(name.as_str())
+                            .or_else(|| env.get(name.as_str()))
+                            .cloned()
+                            .ok_or_else(|| format!("vm: undefined: {name}"))?,
+                };
                 stack.push(v);
             }
             Instruction::BinOp(op) => {
@@ -4122,6 +4253,21 @@ fn run_vm_reuse(
                 let start = stack.len() - argc;
                 let call_args: Vec<Val> = stack.drain(start..).collect();
                 stack.push(eval_builtin(name, call_args, env)?);
+            }
+            Instruction::Member { field, who } => {
+                // Mirrors the tree-walk `Expr::Member` arm, messages included.
+                let base = stack.pop().unwrap();
+                let v = match base {
+                    Val::Tuple(t) => t.lookup(field).cloned().ok_or_else(|| {
+                        if t.is_named() {
+                            format!("{who} has no field '{field}' — has {}", t.name_sig())
+                        } else {
+                            format!("{who} is a positional tuple with no field '{field}' (index it: [0])")
+                        }
+                    })?,
+                    other => return Err(format!("'.{field}': expected a record, got {}", fmt_val(&other))),
+                };
+                stack.push(v);
             }
             Instruction::CallVal(argc) => {
                 let start  = stack.len() - argc;
@@ -4251,7 +4397,8 @@ fn eval_tensor_cells(f: &Val, shape: &[usize], ndim: usize, total: usize, env: &
                 let mut cell_args: Vec<Val> = vec![Val::Num(0.0); ndim];
                 for _ in 0..total {
                     for k in 0..ndim { cell_args[k] = Val::Num(indices[k] as f64); }
-                    let v = run_vm_reuse(code, &cell_args, captured, env, &mut stack, &mut locals)?;
+                    let v = run_vm_reuse(code, &cell_args, captured, env, &mut stack, &mut locals,
+                                         sig.self_name.as_deref().map(|n| (n, f)))?;
                     match &v {
                         Val::Complex(..) => has_complex = true,
                         Val::Num(_) => {}
@@ -4359,6 +4506,7 @@ fn apply_fn_direct(
     cache:    &Arc<OnceLock<Option<Vec<Instruction>>>>,
     args:     Vec<Val>,
     env:      &Env,
+    me:       &Val,
 ) -> Result<Val, String> {
     // Guard against runaway recursion (catchable error, not a stack overflow).
     let _depth = DepthGuard::enter()?;
@@ -4380,11 +4528,15 @@ fn apply_fn_direct(
         }).collect::<Result<Vec<_>, _>>()?
     };
 
+    // A recursive function reaches itself by name (see FnSig::self_name); bind it
+    // in the frame the body runs in.
+    let me_ref = sig.self_name.as_deref().map(|n| (n, me));
     let code = cache.get_or_init(|| compile_fn(params, body, captured));
     let result = match code {
-        Some(code) => run_vm(code, &args, captured, env),
+        Some(code) => run_vm(code, &args, captured, env, me_ref),
         None => {
             let mut local = make_local(env, captured);
+            if let Some((n, v)) = me_ref { local.define(n.to_string(), v.clone()); }
             for (p, v) in params.iter().zip(args) { local.define(p.clone(), v); }
             eval(body, &local)
         }
@@ -4408,7 +4560,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
             // and `apply_fn_direct` fills them in.
             let req = sig.required(n);
             if k >= req && k < n {
-                return apply_fn_direct(params, sig, body, captured, cache, args, env);
+                return apply_fn_direct(params, sig, body, captured, cache, args, env, &f);
             }
             // BUG-6: a zero-arg call to an arity>0 function previously fell through
             // to the mapping branch and vacuously returned an empty tensor. Error
@@ -4427,19 +4579,19 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                 // "several arguments" and had no GPU-block counterpart.)
                 if let Val::Tuple(items) = &args[0] {
                     if items.len() == n {
-                        return apply_fn_direct(params, sig, body, captured, cache, items.to_vec(), env);
+                        return apply_fn_direct(params, sig, body, captured, cache, items.to_vec(), env, &f);
                     }
                 }
                 // Single scalar/complex arg with 1-param fn → direct apply
                 if n == 1 {
-                    return apply_fn_direct(params, sig, body, captured, cache, args, env);
+                    return apply_fn_direct(params, sig, body, captured, cache, args, env, &f);
                 }
                 return Err(format!("function expects {n} args, got 1"));
             }
             // k == n: direct apply (catches the zero-arg case k==n==0 before the
             // vacuous all_n_seqs branch below would produce an empty tensor).
             if k == n {
-                return apply_fn_direct(params, sig, body, captured, cache, args, env);
+                return apply_fn_direct(params, sig, body, captured, cache, args, env, &f);
             }
             // k args, all n-Tuples → map with destructuring (apply f to each).
             // (1-D tensors are not splat into params; see the single-arg note.)
@@ -4453,7 +4605,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
                         Val::Tuple(v) => v.into_items(),
                         _ => unreachable!(),
                     };
-                    apply_fn_direct(params, sig, body, captured, cache, items, env)
+                    apply_fn_direct(params, sig, body, captured, cache, items, env, &f)
                 }).collect();
                 // Promote result to Tensor if all-numeric
                 let res = results?;
@@ -4476,7 +4628,7 @@ pub fn apply_val(f: Val, args: Vec<Val>, env: &Env) -> Result<Val, String> {
             // k scalar args, 1-param fn → map → Tensor if all-numeric
             if n == 1 {
                 let results: Result<Vec<Val>, _> = args.into_iter()
-                    .map(|a| apply_fn_direct(params, sig, body, captured, cache, vec![a], env))
+                    .map(|a| apply_fn_direct(params, sig, body, captured, cache, vec![a], env, &f))
                     .collect();
                 let res = results?;
                 let all_num = res.iter().all(|v| matches!(v, Val::Num(_)));
@@ -4656,10 +4808,27 @@ fn bind_named_args(f: &Val, args: Vec<(Option<String>, Val, bool)>, env: &Env) -
     Ok(out)
 }
 
+/// Build the scope a function body runs in: an empty frame for the parameters,
+/// layered over the closure's captured snapshot, then over the caller's scope.
+///
+/// This is O(params). It used to clone the whole global map and merge `captured`
+/// into it, which is where essentially all of the tree-walk call overhead lived —
+/// for a top-level lambda `captured` *is* the globals map, so it rebuilt an equal
+/// map from scratch on every single call.
 fn make_local(global: &Env, captured: &Arc<HashMap<String, Val>>) -> Env {
-    let mut vars = (*global.vars).clone();
-    vars.extend(captured.iter().map(|(k, v)| (k.clone(), v.clone())));
-    Env { vars: Arc::new(vars) }
+    // Always exactly two layers, never the caller's chain: a callee sees its own
+    // parameters, its closure's captured scope, and the globals — nothing of
+    // whoever happened to call it. Splicing in the caller's layers instead would
+    // make recursion depth *n* build *n* layers, which is both dynamic scoping
+    // and quadratic (it broke 90 000-deep recursion outright).
+    //
+    // The global frame is the last layer by construction, or `vars` itself at the
+    // top level where there are no layers yet.
+    let globals = global.outer.last().cloned().unwrap_or_else(|| Arc::clone(&global.vars));
+    Env {
+        vars:  Arc::new(HashMap::new()),
+        outer: Arc::from(vec![Arc::clone(captured), globals]),
+    }
 }
 
 fn compose_fns(f: Val, g: Val) -> Val {
@@ -4909,7 +5078,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
         Expr::Lambda(params, ret_hint, body) => {
             let names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
             let sig = FnSig::from_params(params, ret_hint.clone());
-            Ok(Val::make_fn_with_sig(names, sig, *body.clone(), Arc::clone(&env.vars)))
+            Ok(Val::make_fn_with_sig(names, sig, *body.clone(), env.snapshot()))
         }
         Expr::Tuple(exprs) => {
             // `(a, b, c)` is always a tuple (a tree node). No autopromotion to a
@@ -4947,11 +5116,8 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                     (Expr::Lambda(ps, ret, body), true, Some(fname)) => {
                         let pnames: Vec<String> = ps.iter().map(|p| p.name.clone()).collect();
                         let sig = FnSig::from_params(ps, ret.clone());
-                        let mut captured = (*child.vars).clone();
-                        let self_val = Val::make_fn_with_sig(
-                            pnames.clone(), sig.clone(), (**body).clone(), Arc::new(captured.clone()));
-                        captured.insert(fname.clone(), self_val);
-                        Val::make_fn_with_sig(pnames, sig, (**body).clone(), Arc::new(captured))
+                        Val::make_fn_with_sig(
+                            pnames, sig.with_self(fname), (**body).clone(), child.snapshot())
                     }
                     _ => eval(&f.value, &child)?,
                 };
@@ -5056,10 +5222,8 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
                             }
                             let names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
                             let sig = FnSig::from_params(params, ret_hint.clone());
-                            let mut captured = (*child.vars).clone();
-                            let fn_val = Val::make_fn_with_sig(names.clone(), sig.clone(), body.clone(), Arc::new(captured.clone()));
-                            captured.insert(name.clone(), fn_val);
-                            child.define(name.clone(), Val::make_fn_with_sig(names, sig, body.clone(), Arc::new(captured)));
+                            child.define(name.clone(), Val::make_fn_with_sig(
+                                names, sig.with_self(name), body.clone(), child.snapshot()));
                         }
                     },
                     // Rebinds in the block's own scope, so an enclosing scope
@@ -5217,7 +5381,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
             let n = data.len();
             Ok(Val::Tensor { data: TData::new(data), shape: vec![n] })
         }
-        Expr::Var(n) => env.vars.get(n).cloned()
+        Expr::Var(n) => env.get(n).cloned()
             .ok_or_else(|| format!("undefined: {n}")),
         Expr::GpuBlock(body) => {
             #[cfg(feature = "gpu")]
@@ -5509,7 +5673,7 @@ fn eval_cell_write(name: &str, target: &Expr, arg: &Expr, env: &Env)
     -> Result<Option<Val>, String>
 {
     let Some((root, path)) = expr_as_path(target) else { return Ok(None) };
-    let Some(Val::Cell(cell)) = env.vars.get(root) else { return Ok(None) };
+    let Some(Val::Cell(cell)) = env.get(root) else { return Ok(None) };
     let cell = Arc::clone(cell);
     // Everything is evaluated before the cell is borrowed — the argument, then
     // the path's indices, then (for `update`) the function applied to the
@@ -5542,10 +5706,10 @@ pub fn eval_assign(a: &Assign, env: &mut Env) -> Result<(), String> {
     // side, then the path's indices, then (for `+=`) the current slot.
     let value = eval(&a.value, env)?;
     let steps = resolve_path(&a.lvalue.path, env)?;
-    if !env.vars.contains_key(name) {
+    if !env.contains_key(name) {
         return Err(format!("undefined: {name}"));
     }
-    if let Some(Val::Cell(_)) = env.vars.get(name) {
+    if let Some(Val::Cell(_)) = env.get(name) {
         return Err(format!(
             "'{name}' is a cell; `=` rebinds a name and never writes through a \
              reference — use set({name}{}, v)",
@@ -5553,11 +5717,17 @@ pub fn eval_assign(a: &Assign, env: &mut Env) -> Result<(), String> {
     }
     let value = match &a.op {
         None     => value,
-        Some(op) => binop_val(read_steps(env.vars.get(name).unwrap(), &steps)?, op, value)?,
+        Some(op) => binop_val(read_steps(env.get(name).unwrap(), &steps)?, op, value)?,
     };
-    // Take the root out of the map so the buffer has one owner where it can:
-    // this is what makes repeated writes in a scope O(1) instead of O(N).
-    let mut root = Arc::make_mut(&mut env.vars).remove(name).unwrap();
+    // Take the root out of this scope's own frame so the buffer has one owner
+    // where it can: this is what makes repeated writes in a scope O(1) instead
+    // of O(N). When the root is still in an enclosing layer it is copied out
+    // once — the write rebinds it *here*, so an outer scope must not see it —
+    // and every later write in this scope then hits the in-place path above.
+    let mut root = match Arc::make_mut(&mut env.vars).remove(name) {
+        Some(v) => v,
+        None    => env.get(name).unwrap().clone(),
+    };
     let res = write_steps(&mut root, &steps, value);
     Arc::make_mut(&mut env.vars).insert(name.clone(), root);
     res

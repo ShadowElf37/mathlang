@@ -1,11 +1,32 @@
 1. [PARTIAL] bytecode VM — lazy OnceLock compilation, stack-based interpreter, tensor
-   indexing (Index), nested lambdas (MakeClosure), non-recursive Def::Func in blocks.
+   indexing (Index), nested lambdas (MakeClosure), Def::Func in blocks, namespace
+   members, forward references.
+
+   1.0 [DONE v0.46.1] The Env is layered: a writable innermost frame over read-only
+       layers, so entering a function costs one small allocation instead of cloning
+       the globals and merging the closure's captured map into them (the old
+       make_local). That merge was ~100% of the tree-walk call overhead — adding 300
+       trivial globals made a fallback body 3.4x slower (2.1 s -> 7.1 s) while
+       compiled code was untouched, and the cost/entry slope extrapolated to zero at
+       ~126 entries against a base env of 135. Fallback bodies went 2.1 s -> 91 ms
+       and no longer care how big the environment is. Consequence to preserve: a
+       call frame layers [captured, globals] and deliberately NOT the caller's
+       chain — splicing that in is both dynamic scoping and quadratic in recursion
+       depth (it broke 90 000-deep recursion outright).
 
    Still possible to add to the bytecode VM:
    1a. Slices in compiled bodies: T[lo..hi] currently falls back; add a Slice instruction
    1b. Ranges in compiled bodies: lo..hi currently falls back; produces a 1-D tensor
    1c. Tensor literals: (1,2; 3,4) currently falls back; straightforward to compile
-   1d. Recursive local functions: needs MakeRecFn or a Cell-based two-pass trick
+   1d. [DONE v0.46.1] Recursive local functions. A recursive closure is genuinely
+       cyclic and `captured` is a plain Arc<HashMap> that cannot contain itself, so
+       the old code did a two-step dance (build the fn, insert it into a *second*
+       copy of the map) that only reached one level deep — deeper recursion
+       silently resolved through the flat call-site env, i.e. dynamic scoping.
+       Replaced by FnSig::self_name: the callee binds its own name at call time, in
+       both the VM (LoadCaptured checks it first) and the tree-walk path. Acyclic,
+       depth-independent, and it deleted one of the two whole-env clones per
+       definition.
    1e. [DONE v0.21.1] Loop instruction: bounded iteration (sum/prod/iterate/scan)
        compiled to a flat loop in the VM (Instruction::Loop(LoopForm, argc)) — the
        only recursion-analogue that is GPU-safe. The compiler pushes the operands
@@ -19,27 +40,46 @@
        it without pulling in eval.rs. run_vm/Compiler stay in eval.rs (they need Val).
    1g. LoadBuffer instruction: GPU-side tensor indexing for captured buffers inside
        GPU lambda bodies (v2 GPU feature, see CONSIDERATIONS.md §15)
-   1h. Path writes in compiled bodies (v0.45.2): `T[i] = v` and `set(c[i], v)` both
-       force a tree-walk fallback for the whole lambda body — the compiler has no
-       instruction that mutates a binding or reaches into a cell. Measured on
-       100k iterations of `iterate(i -> {set(c[i], …); i+1}, …)`: 2.2 s, vs 0.05 s
-       for the same loop whose body compiles. The write itself is O(1) and
-       size-independent (10x10 and 1000x1000 tensors time identically), so this is
-       pure interpreter overhead, not copying — the same ~20 us/call the existing
-       slice/range/map fallbacks pay, which `make_local`'s three-layer env merge
-       dominates. Two ways out, either of which fixes all the fallbacks at once:
-       (a) a CellWrite/StorePath instruction pair, or (b) making the tree-walk call
-       path cheap (see 2.6 — narrowing closure capture shrinks exactly the map that
-       `make_local` merges).
+   1h. Path writes in compiled bodies: `T[i] = v` and `set(c[i], v)` still fall
+       back for the whole body — the compiler has no instruction that mutates a
+       binding or reaches into a cell. Route (b) below was taken in v0.46.1, so the
+       fallback now costs ~1 us/call instead of ~21: 100k iterations of
+       `iterate(i -> {set(c[i], …); i+1}, …)` went 2.2 s -> 91 ms. Route (a), a
+       StoreIndex/CellStore instruction pair, is still worth it — it is the one
+       case an EvalSub escape hatch cannot serve, because copying the binding out
+       to a sub-frame detaches it from the thing being written.
 
-2.6. Narrow closure capture to free variables. `Def::Func` deep-clones the whole
-   environment into `captured` (src/eval.rs Expr::Block arm, src/repl.rs eval_line),
-   so every closure retains a full copy of the environment and every tensor in scope
-   gains an Arc reference that never goes away. Two consequences: closure memory is
-   O(env) each, and a path write to a tensor that any later-defined closure captured
-   copies the buffer every time instead of mutating in place. The `cfv` free-variable
-   analysis (src/eval.rs) already computes the right set for the VM. Needs its own
-   test pass: a miss in that analysis breaks closures rather than just slowing them.
+   1i. [DONE v0.46.1] Expr::Member in compiled bodies. `ns.member` fell into the
+       compiler's catch-all, so every body calling vec.normalize(...) / bits.and(...)
+       — the entire namespaced library style, 31 call sites in libraries/mag.math
+       alone — tree-walked. Measured: 1994 ms vs 34 ms for the same loop with the
+       member hoisted to a plain name first, a 59x penalty with an invisible
+       workaround. Now Instruction::Member{field,who} (`who` carried from compile
+       time so error text matches the tree-walk arm exactly), plus static
+       resolution of `ns.f(x)` straight to CallBuiltin. Now 37 ms.
+
+   1j. [DONE v0.46.1] Forward references no longer disable compilation. Expr::Var
+       returned Err(()) for a name absent from the captured snapshot, and the
+       OnceLock cached that failure permanently — so `f(x) = g(x)+1` written above
+       `g` tree-walked forever, 2260 ms vs 68 ms for the same pair in the other
+       order. A 33x difference decided by line order alone. Unknown names now emit
+       LoadCaptured, which resolves live and errors cleanly if truly undefined.
+
+2.6. Narrow closure capture to free variables. Defining a closure snapshots the
+   whole visible environment (Env::snapshot). At the top level that is an Arc bump,
+   but it pins env.vars at refcount >= 2, so the *next* Env::define deep-clones the
+   globals via Arc::make_mut — and so does every definition after it. Top-level
+   definition is therefore O(n^2): 500 defs 147 ms, 1000 529, 2000 2005, 4000 8119
+   (halved in v0.46.1 by deleting the self-insert clone, still quadratic). Two more
+   consequences: closure memory is O(env) each, and every tensor in scope gains an
+   Arc reference that never goes away, which is what defeats the in-place fast path
+   for `T[i] = v` at top level.
+   The fix is a free_names walker capturing only what the body can read — sound here
+   because mathlang has no string type and no dynamic name lookup, so that set is
+   statically complete. Note this is NOT the existing `cfv`, which deliberately
+   ignores outer_captured because it answers a different question (which VM slots
+   MakeClosure must push). Needs its own test pass: a miss breaks closures rather
+   than just slowing them.
 
 2. [SEPARATE BRANCH] GPU backend (see CONSIDERATIONS.md) + PDE solvers
 

@@ -31,6 +31,13 @@ pub enum Instruction {
     Pop,                        // discard top of stack
     Return,                     // result is top of stack
     Index,                      // pop idx then base → element (scalar indices only, no slices)
+    /// Pop a record/namespace → its field. Without this, every body calling
+    /// `vec.normalize(…)` or `bits.and(…)` — i.e. the whole namespaced library
+    /// style — fell into the compiler's catch-all and tree-walked (TODO 1i).
+    ///
+    /// `who` is the base's source spelling, captured at compile time purely so a
+    /// missing field reports the same message the tree-walk evaluator does.
+    Member { field: String, who: String },
     Loop(LoopForm, usize),      // pop `usize` already-evaluated args, run a flat
                                 // bounded-iteration loop (sum/prod/iterate/scan),
                                 // push result. The only GPU-safe recursion analogue

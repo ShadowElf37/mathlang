@@ -256,7 +256,7 @@ fn eval_gpu(
             // Capture from the enclosing CPU scope, uploading tensors on demand.
             // Uploaded tensors are memoized into `scope` so repeated references
             // (and loop bodies) don't re-upload.
-            match env.vars.get(name) {
+            match env.get(name) {
                 Some(Val::Num(f)) => Ok(GpuVal::Scalar(*f)),
                 Some(Val::Complex(r, i)) => Ok(GpuVal::CScalar(*r, *i)),
                 Some(Val::Tensor { data, shape }) => {
@@ -528,7 +528,7 @@ fn eval_apply(
 
         // A user function from the enclosing CPU scope, applied by inlining.
         _ => {
-            if let Some(Val::Fn(params, body, _, _, _)) = env.vars.get(name) {
+            if let Some(Val::Fn(params, body, _, _, _)) = env.get(name) {
                 let params = params.clone();
                 let body = body.clone();
                 let argvals = args.iter()
@@ -1384,7 +1384,7 @@ fn resolve_lambda(f: &Expr, env: &Env) -> Result<(Vec<String>, Expr), String> {
         Expr::Lambda(ps, _, body) => {
             Ok((ps.iter().map(|p| p.name.clone()).collect(), (**body).clone()))
         }
-        Expr::Var(name) => match env.vars.get(name) {
+        Expr::Var(name) => match env.get(name) {
             Some(Val::Fn(ps, body, _, _, _)) => Ok((ps.clone(), body.clone())),
             Some(other) => Err(format!("GPU: tensor: `{name}` is not a function ({})", fmt_val(other))),
             None => Err(format!("GPU: undefined function `{name}`")),
@@ -1397,7 +1397,7 @@ fn resolve_lambda(f: &Expr, env: &Env) -> Result<(Vec<String>, Expr), String> {
 /// tensor in the enclosing scope)?
 fn is_tensor_capture(name: &str, env: &Env, scope: &HashMap<String, GpuVal>) -> bool {
     matches!(scope.get(name), Some(GpuVal::Buffer { .. }) | Some(GpuVal::Host { .. }))
-        || matches!(env.vars.get(name), Some(Val::Tensor { .. }))
+        || matches!(env.get(name), Some(Val::Tensor { .. }))
 }
 
 /// Walk a lambda body collecting the names of captured tensors it references
@@ -1467,7 +1467,7 @@ fn int_lit(e: &Expr) -> Option<i64> {
 /// block-local) so it can be baked into the kernel as a literal.
 fn lookup_scalar(name: &str, ctx: &LamCtx) -> Option<f64> {
     if let Some(GpuVal::Scalar(s)) = ctx.scope.get(name) { return Some(*s); }
-    if let Some(Val::Num(f)) = ctx.env.vars.get(name) { return Some(*f); }
+    if let Some(Val::Num(f)) = ctx.env.get(name) { return Some(*f); }
     None
 }
 
@@ -1749,7 +1749,7 @@ fn resolve_step(f: &Expr, env: &Env) -> Result<Step, String> {
             }
             Ok(Step::Body { params: params.iter().map(|p| p.name.clone()).collect(), body: (**body).clone() })
         }
-        Expr::Var(name) => match env.vars.get(name) {
+        Expr::Var(name) => match env.get(name) {
             Some(Val::Fn(params, body, _, _, _)) => {
                 if params.is_empty() {
                     return Err(format!("GPU: step function `{name}` must take at least 1 argument"));

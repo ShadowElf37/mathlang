@@ -82,7 +82,7 @@ impl MathHelper {
         let mut vars = self.user_vars.borrow_mut();
         let mut nss  = self.namespaces.borrow_mut();
         fns.clear(); vars.clear(); nss.clear();
-        for (k, v) in env.vars.iter() {
+        for (k, v) in env.iter() {
             match v {
                 Val::Tuple(t) if t.is_named() => {
                     let mut members: Vec<String> =
@@ -385,10 +385,8 @@ pub fn eval_line(line: &str, env: &mut Env, repl: bool) -> bool {
                 }
                 let names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
                 let sig = FnSig::from_params(params, ret_hint.clone());
-                let mut captured = (*env.vars).clone();
-                let fn_val = Val::make_fn_with_sig(names.clone(), sig.clone(), body.clone(), std::sync::Arc::new(captured.clone()));
-                captured.insert(name.clone(), fn_val);
-                env.define(name.clone(), Val::make_fn_with_sig(names, sig, body.clone(), std::sync::Arc::new(captured)));
+                env.define(name.clone(), Val::make_fn_with_sig(
+                    names, sig.with_self(name), body.clone(), env.snapshot()));
             }
             BlockStmt::Assign(a) => {
                 if let Err(e) = crate::eval::eval_assign(a, env) {
@@ -422,7 +420,7 @@ pub fn eval_line(line: &str, env: &mut Env, repl: bool) -> bool {
 
 pub fn show_defs(env: &Env) {
     let mut items: Vec<(String, String)> = vec![];
-    for (k, v) in env.vars.iter() {
+    for (k, v) in env.iter() {
         if BUILTIN_CONSTS.contains(&k.as_str()) || BUILTIN_FNS.contains(&k.as_str()) || k == "result" { continue; }
         let display = match v {
             Val::Fn(params, _, _, _, sig) => {
@@ -502,9 +500,9 @@ impl NsBuild {
         NsBuild { name, env: global.clone(), private: Default::default(), public: Vec::new() }
     }
     fn eval_stmt(&mut self, code: &str, is_private: bool) {
-        let before: std::collections::HashSet<String> = self.env.vars.keys().cloned().collect();
+        let before: std::collections::HashSet<String> = self.env.keys().cloned().collect();
         eval_line(code, &mut self.env, false);
-        for k in self.env.vars.keys() {
+        for k in self.env.keys() {
             if before.contains(k) { continue; }
             if is_private { self.private.insert(k.clone()); }
             else if k != "result" { self.public.push(k.clone()); }
@@ -514,7 +512,7 @@ impl NsBuild {
         let mut members: std::collections::HashMap<String, Val> = Default::default();
         for k in &self.public {
             if self.private.contains(k) { continue; }
-            if let Some(v) = self.env.vars.get(k) { members.insert(k.clone(), v.clone()); }
+            if let Some(v) = self.env.get(k) { members.insert(k.clone(), v.clone()); }
         }
         let mut names: Vec<Option<String>> = Vec::with_capacity(members.len());
         let mut items: Vec<Val> = Vec::with_capacity(members.len());
@@ -1239,7 +1237,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
                 if let Some(dot) = topic.find('.') {
                     let ns_name = &topic[..dot];
                     let member  = &topic[dot+1..];
-                    if let Some(Val::Tuple(t)) = env.vars.get(ns_name) {
+                    if let Some(Val::Tuple(t)) = env.get(ns_name) {
                         if t.lookup(member).is_some() {
                             let sig = builtin_sig(member)
                                 .map(|s| format!("\x1b[33m{s}\x1b[0m"))
@@ -1260,7 +1258,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
                 }
 
                 // Namespace? Show description + member list.
-                if let Some(Val::Tuple(t)) = env.vars.get(topic).filter(|v| matches!(v, Val::Tuple(t) if t.is_named())) {
+                if let Some(Val::Tuple(t)) = env.get(topic).filter(|v| matches!(v, Val::Tuple(t) if t.is_named())) {
                     let user_desc = NS_HELP.with(|h| h.borrow().get(topic).cloned());
                     let desc = user_desc.as_deref().or_else(|| ns_builtin_desc(topic));
                     if let Some(d) = desc {
@@ -1295,7 +1293,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     }
                 } else if let Some(sig) = builtin_sig(topic) {
                     // No help file but we have a signature — find which namespace owns it.
-                    let owner = env.vars.iter().find_map(|(ns, v)| {
+                    let owner = env.iter().find_map(|(ns, v)| {
                         if let Val::Tuple(t) = v {
                             if t.lookup(topic).is_some() { Some(ns.clone()) } else { None }
                         } else { None }
@@ -1306,7 +1304,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     println!("\x1b[33m{prefix}{sig}\x1b[0m");
                 } else {
                     // Last resort: check if it's a member of any namespace.
-                    let owner = env.vars.iter().find_map(|(ns, v)| {
+                    let owner = env.iter().find_map(|(ns, v)| {
                         if let Val::Tuple(t) = v {
                             if t.lookup(topic).is_some() { Some(ns.clone()) } else { None }
                         } else { None }
@@ -1488,7 +1486,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
             if var.is_empty() || fp.is_empty() {
                 eprintln!("usage: !savetensor <var> <file>"); return;
             }
-            match env.vars.get(var) {
+            match env.get(var) {
                 Some(v @ Val::Tensor { data, .. }) => {
                     let (n, v) = (data.len(), v.clone());
                     match save_tensor_val(&expand_path(fp), &v) {
@@ -1547,7 +1545,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
             if var.is_empty() || fp.is_empty() {
                 eprintln!("usage: !savenpy <var> <file.npy>"); return;
             }
-            match env.vars.get(var) {
+            match env.get(var) {
                 Some(v @ Val::Tensor { data, .. }) => {
                     let (n, v) = (data.len(), v.clone());
                     match save_npy(&expand_path(fp), &v) {
@@ -1617,7 +1615,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
                         Some(s) => { eprintln!("savehdf5: unknown option {s}"); return; }
                     }
                 }
-                let val = match env.vars.get(var) {
+                let val = match env.get(var) {
                     Some(v @ Val::Tensor { .. }) | Some(v @ Val::ComplexTensor { .. }) => v.clone(),
                     Some(_) => { eprintln!("savehdf5: {var} is not a tensor"); return; }
                     None    => { eprintln!("savehdf5: {var} not defined"); return; }
@@ -1677,7 +1675,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
             }
             // A name bound in the environment: functions show their fused
             // signature `(t1, t2) -> ret`; values show their type.
-            if let Some(val) = env.vars.get(name) {
+            if let Some(val) = env.get(name) {
                 match val {
                     Val::Fn(params, body, _, _, sig) => {
                         // A parameter with a default shows as `name: type = …`,
@@ -1728,7 +1726,7 @@ fn bang_command(cmd: &str, env: &mut Env) {
         }
         "defs" | "vars" | "fns" => show_defs(env),
         "clear" => {
-            let n = env.vars.iter().filter(|(k,_)| {
+            let n = env.iter().filter(|(k,_)| {
                 !BUILTIN_CONSTS.contains(&k.as_str()) && !BUILTIN_FNS.contains(&k.as_str())
             }).count();
             *env = Env::new();
