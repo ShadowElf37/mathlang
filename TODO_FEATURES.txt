@@ -65,6 +65,30 @@
    1f. [DONE v0.21.1] Moved the Instruction enum (+ new LoopForm) to src/vm.rs; it
        depends only on crate::ast (Op, Expr), never on Val, so src/gpu/ can import
        it without pulling in eval.rs. run_vm/Compiler stay in eval.rs (they need Val).
+   1k. LoadCapturedSlot — resolve a captured name to an index into a constant
+       pool at compile time, instead of hashing the string on every access.
+       The cost is real and measured: a body doing 8 captured *non-scalar* reads
+       per iteration costs 193 ms per 100k vs 81 ms for the same body with all
+       operands inlined — ~140 ns per LoadCaptured, of which the hash is perhaps
+       half (the rest is the Val clone's atomic refcount bump, which no scheme
+       avoids). Scalars are already inlined as literals by the compiler, so this
+       only affects captured tensors, functions and cells.
+       Deliberately NOT done in v0.46.2, because it needs three separate
+       "do not slot this name" rules and each one silently produces a *wrong
+       value* rather than an error if missed:
+         (a) FnSig::self_name — the executor checks `me` before `captured`, so a
+             redefinition like `f(x) = f(x)+1` must keep resolving to the new f,
+             not the old one the pool snapshotted.
+         (b) MakeClosure's free_vars — the inner body is compiled against a hint
+             map holding placeholders, with the real values supplied at run time
+             from the stack. A compile-time pool entry would be the placeholder.
+         (c) names absent from captured, which must stay LoadCaptured(String) so
+             forward references keep resolving live (see 1j).
+       Shape if picked up: OnceLock<Option<CompiledFn>> where
+       CompiledFn { code: Vec<Instruction>, pool: Vec<Val> }, compile_fn taking
+       self_name, and run_vm taking &[Val]. Worth its own change and its own test
+       pass, not a tail-end addition to a large one.
+
    1g. LoadBuffer instruction: GPU-side tensor indexing for captured buffers inside
        GPU lambda bodies (v2 GPU feature, see CONSIDERATIONS.md §15)
    1h. [DONE v0.46.2] Path writes in compiled bodies. Two different problems:
