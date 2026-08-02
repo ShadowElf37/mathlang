@@ -1,14 +1,18 @@
 # Micromagnetics — Landau–Lifshitz–Gilbert dynamics on a tensor magnetization field.
 #
-# The magnetization m is a unit-vector field stored as a plain tensor:
-#   [nx, ny, 3]  for a 2-D sample   (or a single [3] vector for a macrospin).
-# Effective fields are in Tesla. Constants follow mumax3's conventions, so results
-# can be validated against mumax outputs (loaded with !loadovf).
+# The magnetization m is a unit-vector field stored as a plain tensor [nx,ny,3]
+# (2-D), or a single [3] vector for a macrospin. Effective fields are in Tesla;
+# constants follow mumax3, so results validate against mumax outputs (!loadovf).
 #
-# Usage:
-#   !include examples/mag.math
-#   heff = m -> mag.exchangeField(m, Aex, Msat, dx) + Bext   # effective field
-#   mf   = mag.run(m0, heff, alpha, dt, nsteps)              # evolve
+# Two levels of API:
+#   * High-level, bundling geometry+material into a `world` record (like a mumax
+#     script, but the world is an explicit value, not hidden global state):
+#         w = mag.world((nx=128, ny=32, cell=(3.9e-9,3.9e-9,3e-9),
+#                        Msat=800e3, Aex=13e-12, alpha=0.02))
+#         relaxed = mag.relax(w, m0)                    # damped LLG to equilibrium
+#         final   = mag.reverse(w, relaxed, Bext, 1e-9) # adaptive RK45 to t_end
+#   * Low-level building blocks (exchangeField, demagField, llg, step, run,
+#     adaptive) for full control.
 !namespace mag
 
 # --- physical constants (SI) ---
@@ -17,33 +21,32 @@ mu0    = 4e-7 * pi          # vacuum permeability, T m/A
 
 # --- LLG torque: dm/dt for magnetization m in effective field B (Tesla) ---
 #   dm/dt = -gamma0/(1+a^2) [ m×B + a m×(m×B) ]
+!helpdef mag.llg LLG torque dm/dt for magnetization m in effective field B (Tesla), damping a: -gamma0/(1+a^2)[ m×B + a m×(m×B) ]. m,B are [3] or [nx,ny,3].
 llg(m, B, a) = -gamma0/(1 + a^2) * (vec.cross(m, B) + a*vec.cross(m, vec.cross(m, B)))
 
 # --- exchange field (Tesla): (2 Aex/Msat) ∇²m ---
-# Matches mumax's convention (B_exch in Tesla, no mu0). Componentwise spatial
-# Laplacian (shift leaves the trailing component axis untouched); edge-replicating
-# (Neumann) boundaries via shift.
-private lap(m, dx) = (shift(m,1,0) + shift(m,-1,0) + shift(m,1,1) + shift(m,-1,1) - 4*m) / dx^2
-exchangeField(m, Aex, Msat, dx) = (2*Aex/Msat) * lap(m, dx)
+# mumax convention (no mu0). Componentwise, per-axis (dx,dy) Laplacian; shift leaves
+# the trailing component axis untouched and gives edge-replicating (Neumann) BCs.
+private lap(m, dx, dy) = (shift(m,1,0) + shift(m,-1,0) - 2*m)/dx^2 + (shift(m,1,1) + shift(m,-1,1) - 2*m)/dy^2
+!helpdef mag.exchangeField exchange field (Tesla) = (2 Aex/Msat) grad^2 m. Args (m, Aex, Msat, dx, dy); Neumann boundaries. m is [nx,ny,3].
+exchangeField(m, Aex, Msat, dx, dy) = (2*Aex/Msat) * lap(m, dx, dy)
 
 # --- broadcast a constant 3-vector B to a uniform [nx,ny,3] field ---
-# (mathlang has no trailing-axis broadcast, so a uniform field, e.g. a Zeeman
-#  field B_ext, is built explicitly.)
+!helpdef mag.bcast broadcast a constant 3-vector B to a uniform [nx,ny,3] field (e.g. a Zeeman field B_ext). mathlang has no trailing-axis broadcast, so uniform fields are built explicitly.
 bcast(B, nx, ny) = tensor((i, j, c) -> B[c], nx, ny, 3)
 
-# --- demag field (Tesla): mu0*Msat*(N ⊛ m) ---
-# The demagnetizing (magnetostatic) field, via the compiled `demagfield` builtin
-# (FFT convolution of the demag tensor with m; the geometry-only kernel FFTs are
-# cached, so calling it every time step is cheap). m is [nx,ny,3] (2-D); dx,dy the
-# in-plane cell size, dz the film thickness. Matches mumax to ~1e-7.
+# --- demag field (Tesla): mu0*Msat*(N ⊛ m), via the compiled `demagfield` builtin ---
+# FFT convolution of the demag tensor with m; the geometry-only kernel FFTs are
+# cached, so it is cheap to call every step. Matches mumax to ~1e-7.
+!helpdef mag.demagField demagnetizing field (Tesla) mu0*Msat*(N conv m), via the compiled FFT convolution. Args (m, Msat, dx, dy, dz); m is [nx,ny,3], dz the film thickness. Matches mumax ~1e-7.
 demagField(m, Msat, dx, dy, dz) = demagfield(m, Msat, dx, dy, dz)
 
-# demag operator: a closure m -> B_demag for a fixed geometry (nx,ny carried for
-# API symmetry; the builtin caches the kernel internally).
+!helpdef mag.demagOp returns a closure m -> B_demag for fixed geometry (the demag kernel is cached by the builtin). Args (nx, ny, Msat, dx, dy, dz).
 demagOp(nx, ny, Msat, dx, dy, dz) = m -> demagfield(m, Msat, dx, dy, dz)
 
 # --- one RK4 step of dm/dt = llg(m, heff(m), a), renormalized to |m|=1 ---
 #   heff : m -> effective field B (Tesla), a function of the current m.
+!helpdef mag.step one RK4 step of dm/dt = llg(m, heff(m), a), renormalized to unit length. Args (m, heff, a, dt); heff is a function m -> B (Tesla).
 step(m, heff, a, dt) = {
     k1 = llg(m, heff(m), a);
     m2 = m + dt/2*k1; k2 = llg(m2, heff(m2), a);
@@ -53,13 +56,8 @@ step(m, heff, a, dt) = {
 }
 
 # --- run n fixed-step RK4 steps, returning the final magnetization ---
+!helpdef mag.run run n fixed-step RK4 steps of the LLG equation. Args (m0, heff, a, dt, n); heff is a function m -> B (Tesla). Returns the final magnetization.
 run(m0, heff, a, dt, n) = iterate(m -> step(m, heff, a, dt), m0, n)
-
-# --- relaxation to equilibrium via strongly-damped LLG (alpha = 1) ---
-# Robust: precession helps the state settle into the true minimum. A pure gradient
-# (no-precession) descent can stick in a near-uniform metastable state, so we run
-# the actual damped dynamics. `dt` is a real time step, `n` the number of steps.
-relax(m0, heff, dt, n) = iterate(m -> step(m, heff, 1.0, dt), m0, n)
 
 # --- adaptive Dormand-Prince RK45 (mumax's default solver) ---
 # One DP45 step from m over time h; returns (5th-order solution, embedded error).
@@ -75,8 +73,8 @@ private dp45(m, heff, a, h) = {
     y4 = m + h*(5179/57600*k1 + 7571/16695*q3 + 393/640*q4 - 92097/339200*q5 + 187/2100*q6 + 1/40*q7);
     (y5, max(abs(y5 - y4)))
 }
-# One adaptive step of state (m, t, dt): step to at most t_end, accept if the error
-# is within tol (then grow dt), otherwise reject and retry with a smaller dt.
+# One adaptive step of (m, t, dt): step to at most t_end; accept if the error is
+# within tol (then grow dt), else reject and retry smaller.
 private adaptiveStep(s, heff, a, t_end, tol) = {
     m = s[0]; t = s[1]; dt = s[2];
     if(t >= t_end, s, {
@@ -89,7 +87,33 @@ private adaptiveStep(s, heff, a, t_end, tol) = {
            (m, t, dt * vec.clamp(fac, 0.2, 0.9)))
     })
 }
-# Integrate adaptively from m0 to t_end with error-per-step `tol` (like mumax
-# MaxErr). `dt0` is the initial step, `maxsteps` an upper bound on iterations.
+!helpdef mag.adaptive adaptive Dormand-Prince RK45 (mumax's default). Integrate m0 to t_end with error-per-step tol (like mumax MaxErr). Args (m0, heff, a, dt0, t_end, tol, maxsteps).
 adaptive(m0, heff, a, dt0, t_end, tol, maxsteps) =
     iterate(s -> adaptiveStep(s, heff, a, t_end, tol), (m0, 0.0, dt0), maxsteps)[0]
+
+# ── High-level `world` API ──────────────────────────────────────────────────────
+
+# --- world: bundle geometry + material into an explicit record ---
+# cfg is a record with fields: nx, ny, cell=(dx,dy,dz), Msat, Aex, alpha.
+!helpdef mag.world bundle geometry+material into a world record. Pass a record cfg=(nx=, ny=, cell=(dx,dy,dz), Msat=, Aex=, alpha=); returns a world with dx,dy,dz unpacked, read by relax/reverse/effField.
+world(cfg) = (nx = cfg.nx, ny = cfg.ny,
+              dx = cfg.cell[0], dy = cfg.cell[1], dz = cfg.cell[2],
+              Msat = cfg.Msat, Aex = cfg.Aex, alpha = cfg.alpha)
+
+# --- effective field (Tesla) for a world: exchange + demag + applied field Bext ---
+!helpdef mag.effField effective field (Tesla) for a world w: exchange + demag + the applied field Bext ([nx,ny,3]). Args (w, m, Bext).
+effField(w, m, Bext) = exchangeField(m, w.Aex, w.Msat, w.dx, w.dy)
+                     + demagfield(m, w.Msat, w.dx, w.dy, w.dz)
+                     + Bext
+
+private zero(w) = bcast([0, 0, 0], w.nx, w.ny)
+private evolveTo(w, m0, Bext, a, t_end) =
+    adaptive(m0, m -> effField(w, m, Bext), a, 1e-13, t_end, 1e-5, 200000)
+
+# --- relax to equilibrium (strongly-damped LLG, no applied field) ---
+!helpdef mag.relax relax a world's magnetization to equilibrium via strongly-damped LLG (adaptive RK45, alpha=1, no applied field). Args (w, m0). Returns the relaxed magnetization.
+relax(w, m0) = evolveTo(w, m0, zero(w), 1.0, 2e-9)
+
+# --- reverse / drive: evolve under an applied field to t_end (world's damping) ---
+!helpdef mag.reverse evolve a world's magnetization under a uniform applied field Bext ([3]) to time t_end, using the world's own damping (adaptive RK45). Args (w, m0, Bext, t_end).
+reverse(w, m0, Bext, t_end) = evolveTo(w, m0, bcast(Bext, w.nx, w.ny), w.alpha, t_end)

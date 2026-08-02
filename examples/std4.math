@@ -1,35 +1,24 @@
-# Micromagnetic Standard Problem 4 in mathlang — reproduces the muMAG / mumax3
-# reference: reversal of a 500 x 125 x 3 nm permalloy film.
+# Micromagnetic Standard Problem 4 in mathlang — reversal of a 500 x 125 x 3 nm
+# permalloy film, reproducing the muMAG / mumax3 reference.
 #
-#   Stage 1 relaxes an almost-uniform state to the S-state (no applied field).
-#   Stage 2 applies the reversal field and evolves 1 ns with adaptive RK45.
+# Reference: relaxed  m.avg = ( 0.9670,  0.1253, 0)
+#            t = 1 ns  m.avg = (-0.9846,  0.1260, 0.0433)
 #
-# Reference (mumax3): relaxed  m.avg = ( 0.9670,  0.1253, 0)
-#                     t = 1 ns  m.avg = (-0.9846,  0.1260, 0.0433)
-#
-# Built on libraries/mag.math (exchange + demag + Zeeman + Dormand-Prince RK45).
-# Runs in a few minutes on CPU. View the result live with:  !animateField final
+# Uses the high-level `world` API from libraries/mag.math — the world is an
+# explicit record (not hidden global state). Runs in a few minutes on CPU.
+# View the result live with:  !animateField final
 !include mag
 
-# --- geometry & material (permalloy) ---
-nx = 128
-ny = 32
-dx = 500e-9/nx
-dy = 125e-9/ny
-dz = 3e-9
-Msat  = 800e3
-Aex   = 13e-12
-alpha = 0.02
+# geometry + material bundled into a world record
+w = mag.world((nx = 128, ny = 32,
+               cell = (500e-9/128, 125e-9/32, 3e-9),
+               Msat = 800e3, Aex = 13e-12, alpha = 0.02))
 
-demag = mag.demagOp(nx, ny, Msat, dx, dy, dz)
-
-# --- Stage 1: relax to the S-state (strongly-damped LLG, no applied field) ---
-heff0   = m -> mag.exchangeField(m, Aex, Msat, dx) + demag(m)
-relaxed = mag.relax(vec.normalize(mag.bcast([1, 0.1, 0], nx, ny)), heff0, 5e-13, 3000)
+# relax an almost-uniform state to the S-state
+m0      = vec.normalize(mag.bcast([1, 0.1, 0], w.nx, w.ny))
+relaxed = mag.relax(w, m0)
 !print relaxed  m.avg = {round(mean(relaxed[.., .., 0]),4)}, {round(mean(relaxed[.., .., 1]),4)}  (ref 0.9670, 0.1253)
 
-# --- Stage 2: apply the reversal field, evolve 1 ns with adaptive RK45 ---
-Bext  = mag.bcast([-24.6e-3, 4.3e-3, 0], nx, ny)
-heff  = m -> mag.exchangeField(m, Aex, Msat, dx) + demag(m) + Bext
-final = mag.adaptive(relaxed, heff, alpha, 1e-13, 1e-9, 1e-5, 40000)
+# apply the reversal field and evolve 1 ns (adaptive RK45)
+final = mag.reverse(w, relaxed, [-24.6e-3, 4.3e-3, 0], 1e-9)
 !print final 1ns m.avg = {round(mean(final[.., .., 0]),4)}, {round(mean(final[.., .., 1]),4)}, {round(mean(final[.., .., 2]),4)}  (ref -0.9846, 0.1260, 0.0433)

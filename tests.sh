@@ -1178,6 +1178,10 @@ run "demag.2d_xz_zero"     "round(max(abs(demagkernel(4,4,1,4e-9,4e-9,1e-9)[2]))
 # is antisymmetric in y, so it sums to zero. Guards the kernel+FFT+conv wiring.
 # (Full field-vs-mumax parity ~5e-8 is validated out-of-band with mag.demagField.)
 run "demag.conv_by_sym" "m=tensor((i,j,c)->[1,0,0][c],4,4,3); K=demagkernel(4,4,1,4e-9,4e-9,4e-9); Kxy=fft(K[1,0,..,..]); Kyy=fft(K[3,0,..,..]); pad=t->tensor((i,j)->if((i<4)&(j<4),t[i,j],0.0),8,8); mxh=fft(pad(transpose(m[..,..,0]))); myh=fft(pad(transpose(m[..,..,1]))); By=re(ifft(Kxy*mxh+Kyy*myh)); round(sum(tensor((x,y)->By[y,x],4,4)),6)" "0"
+# separable (dx != dy) exchange Laplacian of a uniform field is still zero
+run "exch.separable_lap" "m=tensor((i,j,c)->[1,0,0][c],4,4,3); round(max(abs((shift(m,1,0)+shift(m,-1,0)-2*m)/9 + (shift(m,1,1)+shift(m,-1,1)-2*m)/16)),9)" "0"
+# the mag.world construction pattern: enrich a config record (unpack cell -> dx)
+run "world.record_enrich" "f(c) = (nx=c.nx, dx=c.cell[0], dy=c.cell[1]); w = f((nx=8, cell=(0.5,0.7,0.9))); (w.nx, w.dx, w.dy)" "(8, 0.5, 0.7)"
 
 # ── !savetensor / !loadtensor ─────────────────────────────────────────────────
 section "SAVETENSOR / LOADTENSOR"
