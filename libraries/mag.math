@@ -1,0 +1,39 @@
+# Micromagnetics — Landau–Lifshitz–Gilbert dynamics on a tensor magnetization field.
+#
+# The magnetization m is a unit-vector field stored as a plain tensor:
+#   [nx, ny, 3]  for a 2-D sample   (or a single [3] vector for a macrospin).
+# Effective fields are in Tesla. Constants follow mumax3's conventions, so results
+# can be validated against mumax outputs (loaded with !loadovf).
+#
+# Usage:
+#   !include examples/mag.math
+#   heff = m -> mag.exchangeField(m, Aex, Msat, dx) + Bext   # effective field
+#   mf   = mag.run(m0, heff, alpha, dt, nsteps)              # evolve
+!namespace mag
+
+# --- physical constants (SI) ---
+gamma0 = 1.7595e11          # gyromagnetic ratio, rad/(T s)  (mumax GammaLL)
+mu0    = 4e-7 * pi          # vacuum permeability, T m/A
+
+# --- LLG torque: dm/dt for magnetization m in effective field B (Tesla) ---
+#   dm/dt = -gamma0/(1+a^2) [ m×B + a m×(m×B) ]
+llg(m, B, a) = -gamma0/(1 + a^2) * (vec.cross(m, B) + a*vec.cross(m, vec.cross(m, B)))
+
+# --- exchange field (Tesla): (2 Aex/(mu0 Msat)) ∇²m ---
+# Componentwise spatial Laplacian (shift leaves the trailing component axis
+# untouched); edge-replicating (Neumann) boundaries via shift.
+private lap(m, dx) = (shift(m,1,0) + shift(m,-1,0) + shift(m,1,1) + shift(m,-1,1) - 4*m) / dx^2
+exchangeField(m, Aex, Msat, dx) = (2*Aex/(mu0*Msat)) * lap(m, dx)
+
+# --- one RK4 step of dm/dt = llg(m, heff(m), a), renormalized to |m|=1 ---
+#   heff : m -> effective field B (Tesla), a function of the current m.
+step(m, heff, a, dt) = {
+    k1 = llg(m, heff(m), a);
+    m2 = m + dt/2*k1; k2 = llg(m2, heff(m2), a);
+    m3 = m + dt/2*k2; k3 = llg(m3, heff(m3), a);
+    m4 = m + dt*k3;   k4 = llg(m4, heff(m4), a);
+    vec.normalize(m + dt/6 * (k1 + 2*k2 + 2*k3 + k4))
+}
+
+# --- run n RK4 steps, returning the final magnetization ---
+run(m0, heff, a, dt, n) = iterate(m -> step(m, heff, a, dt), m0, n)

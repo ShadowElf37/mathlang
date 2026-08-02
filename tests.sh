@@ -1150,6 +1150,15 @@ run "vdot.shape"        "shape(vec.vdot(reshape(range(0,12),2,2,3), reshape(rang
 run "vdot.mcrossperp"   "m=[0.6,0.8,0]; vec.vdot(m, vec.cross(m,[0.1,0.2,0.3]))" "0"
 run_err "vdot.mismatch" "vec.vdot([1,2,3],[1,2])"
 
+# ── LLG (Landau–Lifshitz–Gilbert) macrospin dynamics ──────────────────────────
+section "LLG MACROSPIN"
+# torque is perpendicular to m, so |m| is conserved: m·(dm/dt) = 0
+run "llg.torque_perp_m"  "g=1.7595e11; B=[1,2,3]; a=0.1; m=[0.6,0,0.8]; round(vec.vdot(m, -g/(1+a^2)*(vec.cross(m,B)+a*vec.cross(m,vec.cross(m,B)))),3)" "0"
+# pure precession (a=0) about +z keeps a perpendicular spin in the plane (mz=0)
+run "llg.precession_planar" "g=1.7595e11; B=[0,0,0.1]; f=x->vec.normalize(x + 1e-13*(-g)*vec.cross(x,B)); round(iterate(f,[1,0,0],5000)[2],3)" "0"
+# damping (a=0.5) aligns m with the field (+z)
+run "llg.macrospin_damp" "g=1.7595e11; B=[0,0,0.1]; a=0.5; f=x->vec.normalize(x + 1e-13*(-g)/(1+a^2)*(vec.cross(x,B)+a*vec.cross(x,vec.cross(x,B)))); round(iterate(f,[1,0,0],20000)[2],3)" "1"
+
 # ── !savetensor / !loadtensor ─────────────────────────────────────────────────
 section "SAVETENSOR / LOADTENSOR"
 _TMLT=$(mktemp /tmp/mlt_test_XXXXXX.mlt)
