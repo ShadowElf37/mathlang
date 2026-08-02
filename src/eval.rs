@@ -777,6 +777,9 @@ pub fn builtin_sig(name: &str) -> Option<&'static str> {
         // elementwise
         "lerp"  => Some("lerp(a: any, b: any, t: any) -> any"),
         "clamp" => Some("clamp(x: any, lo: real, hi: real) -> any"),
+        "cross"     => Some("cross(a: tensor, b: tensor) -> tensor"),
+        "normalize" => Some("normalize(v: tensor) -> tensor"),
+        "vdot"      => Some("vdot(a: tensor, b: tensor) -> tensor"),
         "shift" => Some("shift(T: tensor, n: int, axis: nat) -> tensor"),
         "roll"  => Some("roll(T: tensor, n: int, axis: nat) -> tensor"),
         // n-D grid
@@ -1567,6 +1570,22 @@ pub(crate) fn fft_axis_inplace(re: &mut [f64], im: &mut [f64], shape: &[usize], 
 }
 
 // ── Builtin dispatch ──────────────────────────────────────────────────────────
+
+// Coerce a value into (flat data, shape) for the pointwise vector-field ops
+// (vec.cross / normalize / vdot). Accepts a tensor, a numeric tuple (→ 1-D), or
+// a scalar (→ length-1). The trailing axis is the vector-component axis.
+fn as_component_tensor(v: Val, who: &str) -> Result<(Vec<f64>, Vec<usize>), String> {
+    match v {
+        Val::Tensor { data, shape } => Ok((data.into_vec(), shape)),
+        Val::Tuple(t) => {
+            let n = t.len();
+            let d = t.into_iter().map(|x| x.num(who)).collect::<Result<Vec<f64>, _>>()?;
+            Ok((d, vec![n]))
+        }
+        Val::Num(x) => Ok((vec![x], vec![1])),
+        other => Err(format!("{who}: expected a tensor or vector, got {}", fmt_val(&other))),
+    }
+}
 
 pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, String> {
     macro_rules! b1 {
@@ -3122,6 +3141,69 @@ pub fn eval_builtin(name: &str, mut vals: Vec<Val>, env: &Env) -> Result<Val, St
                     shape,
                 }),
                 other => Err(format!("clamp: expected number or tensor, got {}", fmt_val(&other))),
+            }
+        }
+
+        // ── vec.cross(a, b) — pointwise 3-vector cross over the trailing axis ─
+        // a, b: [..., 3] of matching shape → [..., 3]. One cross product per cell.
+        "cross" => {
+            arity("cross", 2, vals.len())?;
+            let mut it = vals.into_iter();
+            let (a, ash) = as_component_tensor(it.next().unwrap(), "cross")?;
+            let (b, bsh) = as_component_tensor(it.next().unwrap(), "cross")?;
+            if ash != bsh { return Err(format!("cross: shape mismatch ({ash:?} vs {bsh:?})")); }
+            if ash.last() != Some(&3) {
+                return Err(format!("cross: trailing axis must be 3, got shape {ash:?}"));
+            }
+            let p = a.len() / 3;
+            let mut out = vec![0f64; a.len()];
+            for i in 0..p {
+                let (a0, a1, a2) = (a[i*3], a[i*3+1], a[i*3+2]);
+                let (b0, b1, b2) = (b[i*3], b[i*3+1], b[i*3+2]);
+                out[i*3]   = a1*b2 - a2*b1;
+                out[i*3+1] = a2*b0 - a0*b2;
+                out[i*3+2] = a0*b1 - a1*b0;
+            }
+            Ok(Val::Tensor { data: TData::new(out), shape: ash })
+        }
+
+        // ── vec.normalize(v) — divide each trailing-axis vector by its L2 norm ─
+        // [..., d] → [..., d]; a zero vector stays zero.
+        "normalize" => {
+            arity("normalize", 1, vals.len())?;
+            let (v, sh) = as_component_tensor(vals.into_iter().next().unwrap(), "normalize")?;
+            let d = *sh.last().ok_or("normalize: expected a trailing component axis")?;
+            if d == 0 { return Err("normalize: trailing axis is 0".into()); }
+            let p = v.len() / d;
+            let mut out = vec![0f64; v.len()];
+            for i in 0..p {
+                let s = &v[i*d .. i*d + d];
+                let n = s.iter().map(|x| x * x).sum::<f64>().sqrt();
+                if n > 0.0 { for c in 0..d { out[i*d + c] = s[c] / n; } }
+            }
+            Ok(Val::Tensor { data: TData::new(out), shape: sh })
+        }
+
+        // ── vec.vdot(a, b) — pointwise dot over the trailing axis (reduces it) ─
+        // [..., d] · [..., d] → [...]. A 1-D input gives a scalar.
+        "vdot" => {
+            arity("vdot", 2, vals.len())?;
+            let mut it = vals.into_iter();
+            let (a, ash) = as_component_tensor(it.next().unwrap(), "vdot")?;
+            let (b, bsh) = as_component_tensor(it.next().unwrap(), "vdot")?;
+            if ash != bsh { return Err(format!("vdot: shape mismatch ({ash:?} vs {bsh:?})")); }
+            let d = *ash.last().ok_or("vdot: expected a trailing component axis")?;
+            if d == 0 { return Err("vdot: trailing axis is 0".into()); }
+            let p = a.len() / d;
+            let mut out = vec![0f64; p];
+            for i in 0..p {
+                out[i] = (0..d).map(|c| a[i*d + c] * b[i*d + c]).sum();
+            }
+            let outshape = ash[..ash.len() - 1].to_vec();
+            if outshape.is_empty() {
+                Ok(Val::Num(out[0]))
+            } else {
+                Ok(Val::Tensor { data: TData::new(out), shape: outshape })
             }
         }
 

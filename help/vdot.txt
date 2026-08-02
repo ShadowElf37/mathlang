@@ -1,0 +1,17 @@
+[1;4mvec.vdot[0m
+
+Pointwise dot product over the trailing axis, reducing it. Both arguments have
+shape [..., d] (of matching shape); the result has shape [...] (one scalar per
+cell). A 1-D input gives a plain scalar.
+
+Distinct from [33mdot[0m, which contracts two whole 1-D tensors into a single number.
+
+[1mExamples:[0m
+[0m> vec.vdot([1,2,3], [4,5,6])
+result = 32
+> shape(vec.vdot(reshape(range(0,12),2,2,3), reshape(range(0,12),2,2,3)))
+result = [2, 2]
+> m = [0.6,0.8,0]; vec.vdot(m, vec.cross(m, [0.1,0.2,0.3]))
+result = 0        (m is perpendicular to m×H)
+[0m
+[1mSee also:[0m  vec.cross  vec.normalize  dot

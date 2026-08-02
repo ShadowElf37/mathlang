@@ -1132,6 +1132,24 @@ run "clamp.vec_lo"      "vec.clamp([-5,-3,-1], -2, 0)"             "[-2, -2, -1]
 run "clamp.negrange"    "vec.clamp(-1.5, -2, -1)"                  "-1.5"
 run_err "clamp.bad_range"   "vec.clamp(1, 5, 0)"
 
+# ── vec.cross / normalize / vdot (pointwise over trailing axis) ────────────────
+section "VEC CROSS / NORMALIZE / VDOT"
+run "cross.xy"          "vec.cross([1,0,0],[0,1,0])"                "[0, 0, 1]"
+run "cross.yz"          "vec.cross([0,1,0],[0,0,1])"                "[1, 0, 0]"
+run "cross.zx"          "vec.cross([0,0,1],[1,0,0])"                "[0, 1, 0]"
+run "cross.parallel"    "vec.cross([2,0,0],[5,0,0])"                "[0, 0, 0]"
+run "cross.anti"        "vec.cross([1,2,3],[4,5,6])"                "[-3, 6, -3]"
+run "cross.percell"     "flatten(vec.cross(reshape([1,0,0, 0,1,0],2,1,3), reshape([0,1,0, 0,0,1],2,1,3)))" "[0, 0, 1, 1, 0, 0]"
+run_err "cross.bad_dim" "vec.cross([1,0],[0,1])"
+run "normalize.345"     "vec.normalize([3,4,0])"                    "[0.6, 0.8, 0]"
+run "normalize.zero"    "vec.normalize([0,0,0])"                    "[0, 0, 0]"
+run "normalize.unit"    "round(norm(vec.normalize([1,2,3,4])),6)"  "1"
+run "vdot.scalar"       "vec.vdot([1,2,3],[4,5,6])"                 "32"
+run "vdot.orthogonal"   "vec.vdot([1,0,0],[0,1,0])"                 "0"
+run "vdot.shape"        "shape(vec.vdot(reshape(range(0,12),2,2,3), reshape(range(0,12),2,2,3)))" "[2, 2]"
+run "vdot.mcrossperp"   "m=[0.6,0.8,0]; vec.vdot(m, vec.cross(m,[0.1,0.2,0.3]))" "0"
+run_err "vdot.mismatch" "vec.vdot([1,2,3],[1,2])"
+
 # ── !savetensor / !loadtensor ─────────────────────────────────────────────────
 section "SAVETENSOR / LOADTENSOR"
 _TMLT=$(mktemp /tmp/mlt_test_XXXXXX.mlt)

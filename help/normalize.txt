@@ -1,0 +1,15 @@
+[1;4mvec.normalize[0m
+
+Divides each vector along the trailing axis by its L2 norm, giving unit vectors.
+Shape [..., d] → [..., d]; a zero vector is left as zero. Useful to re-impose a
+unit-length constraint on a vector field (e.g. magnetization).
+
+[1mExamples:[0m
+[0m> vec.normalize([3,4,0])
+result = [0.6, 0.8, 0]
+> vec.normalize([0,0,0])
+result = [0, 0, 0]
+> norm(vec.normalize([1,2,3,4]))
+result = 1
+[0m
+[1mSee also:[0m  vec.cross  vec.vdot  norm
