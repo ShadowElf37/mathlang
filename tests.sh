@@ -2075,6 +2075,34 @@ run_err "def.err.arity"       "f(a,b)=a+b; f(1)"
 # A record argument still needs its own parens, and is not a named argument.
 run "def.record.arg"       "f(r) = r.x + r.y; f((x = 1, y = 2))"    "3"
 
+# ── Record literals are scopes; `private` ────────────────────────────────────
+section "RECORD SCOPE"
+
+run "rscope.later.sees"    "(nx = 128, ny = nx/4, area = nx*ny)"    "(nx = 128, ny = 32, area = 4096)"
+run "rscope.chain"         "(a = 1, b = a+1, c = b+1).c"            "3"
+run "rscope.outer"         "k = 7; (a = k, b = a+k)"                "(a = 7, b = 14)"
+run "rscope.shadow"        "x = 1; (x = 100, y = x)"                "(x = 100, y = 100)"
+run "rscope.after.splat"   "d=(nx=8); (..d, area = nx*2)"           "(nx = 8, area = 16)"
+run "rscope.nested"        "(a = 2, inner = (b = a*3)).inner.b"     "6"
+
+run "priv.hidden"          "(private n = 128, nx = n, ny = n/4)"    "(nx = 128, ny = 32)"
+run "priv.len"             "len((private n = 4, a = n, b = n))"     "2"
+run "priv.index"           "(private n = 4, a = n)[0]"              "4"
+run "priv.fn"              "v = (private eps = 10, f(x) = x + eps); v.f(1)" "11"
+run "priv.only"            "len((private n = 1))"                   "0"
+run "priv.as.name"         "(private = 5)"                          "(private = 5)"
+run "priv.name.field"      "(private = 5).private"                  "5"
+run_err "priv.err.access"     "c = (private n = 4, a = n); c.n"
+
+# Function fields: mutually referring (backwards) and self-recursive.
+run "rfn.mutual"           "v = (mag(u) = norm(u), unit(u) = u/mag(u)); v.unit([3,4])[0]" "0.6"
+run "rfn.recursive"        "r = (fact(n) = if(n<2, 1, n*fact(n-1))); r.fact(5)" "120"
+# `f = x -> …` is a value field, so it does NOT self-bind — same as at top level.
+run "rfn.lambda.not.self"  "f = x -> 100; r = (f = x -> f(x)); r.f(1)" "100"
+run "rfn.default.param"    "r = (g(a, b = 3) = a*b); r.g(2)"        "6"
+# Forward references do not resolve, in a literal or in a namespace file.
+run_err "rfn.err.forward"     "(a = b, b = 1)"
+
 # ── GPU compute backend (only when built with --features gpu + a GPU present) ──
 section "GPU BACKEND"
 gpu_probe=$("$M" 'GPU { 1 + 1 }' 2>&1)

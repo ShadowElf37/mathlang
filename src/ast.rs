@@ -44,12 +44,24 @@ pub struct Param {
 }
 
 /// One item of a record literal. `name: None` is a positional item.
-/// A function field (`mag(v) = norm(v)`) is just a field whose value is a
-/// `Lambda`, so it needs no separate representation.
 #[derive(Debug, Clone)]
 pub struct Field {
     pub name:  Option<String>,
     pub value: Expr,
+    /// `private x = 1` — in scope for the fields that follow, but not a slot of
+    /// the finished record. The same rule a `!namespace` file already applies.
+    pub private: bool,
+    /// Written as a function definition (`mag(v) = norm(v)`) rather than a
+    /// field whose value happens to be a lambda. Only the former is bound in
+    /// its own captured scope, so only it can recurse — exactly the
+    /// `f(x) = …` vs `f = x -> …` distinction at the top level.
+    pub func: bool,
+}
+
+impl Field {
+    pub fn positional(value: Expr) -> Self {
+        Field { name: None, value, private: false, func: false }
+    }
 }
 
 #[derive(Debug, Clone)]

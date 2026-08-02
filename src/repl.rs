@@ -224,6 +224,9 @@ fn highlight_line(line: &str, user_fns: &[String], user_vars: &[String],
             if name == "GPU" {
                 // GPU compute block keyword — bold red to flag a different context.
                 out.push_str(&format!("\x1b[1;31m{name}\x1b[0m"));
+            } else if name == "private" {
+                // Visibility marker in a record literal / namespace file.
+                out.push_str(&format!("\x1b[3;32m{name}\x1b[0m"));
             } else if BUILTIN_CONSTS.contains(&name) {
                 out.push_str(&format!("\x1b[36m{name}\x1b[0m"));
             } else if BUILTIN_FNS.contains(&name) || user_fns.iter().any(|u| u == name) {
@@ -1192,7 +1195,9 @@ fn bang_command(cmd: &str, env: &mut Env) {
                     "           lt leq gt geq eq neq  — comparison fns for map/filter\n\n",
                     "Tuples:    (1,2,3)  t[0]  t[-1]  t[1..3]  t[0,2,4]  (x,)  (singleton)\n",
                     "Records:   (x=1, y=2)  p.x  p[0]  len(p)   named tuples; fields may be\n",
-                    "           functions: (unit(v) = v/norm(v))  — that is all a namespace is\n",
+                    "           functions: (unit(v) = v/norm(v))  — that is all a namespace is.\n",
+                    "           A literal is a scope: each field sees the ones before it, and\n",
+                    "           `private n = …` is visible to them but is not a field.\n",
                     "           (0..10) inclusive  range(a,b) exclusive  linspace(a,b,n)\n",
                     "Splat:     ..x splices a tuple/record's slots or an array's elements into\n",
                     "           the enclosing list: (..w, alpha=0.05) vary one field  (..a, ..b)\n",

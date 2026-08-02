@@ -460,6 +460,57 @@ all a namespace is:
 result = [0.6, 0.8]
 ```
 
+### A record literal is a scope
+
+Fields are evaluated **in order, each seeing the ones before it** — so a record
+literal is exactly what a `!namespace` file is: a block whose result is its
+bindings.
+
+```
+> (nx = 128, ny = nx / 4, area = nx * ny)
+result = (nx = 128, ny = 32, area = 4096)
+```
+
+`private` marks a binding that later fields can use but that is **not** a field
+of the result — the same rule a `!namespace` file applies:
+
+```
+> cfg = (
+    private n = 128
+    nx = n
+    ny = n / 4
+  )
+> cfg
+result = (nx = 128, ny = 32)
+> len(cfg)
+result = 2
+> cfg.n
+error: cfg has no field 'n' — has (nx, ny)
+```
+
+This is what makes a self-contained namespace writable as a literal — function
+fields can call each other and close over private state:
+
+```
+> v = (
+    private eps = 1e-12
+    mag(u)  = norm(u)
+    unit(u) = u / (mag(u) + eps)
+  )
+> v.unit([3, 4])[0]
+result = 0.59999999999988
+```
+
+Two rules carry over unchanged from the top level:
+
+- `f(x) = …` is bound inside its own scope and so may **recurse**;
+  `f = x -> …` is an ordinary value field and does not.
+- **Forward references do not resolve.** `(a = b, b = 1)` is an error, exactly as
+  the same two lines would be in a namespace file.
+
+`private` is contextual: it only marks a definition that follows it, so
+`(private = 5)` is still an ordinary field named `private`.
+
 Combined with [multi-line syntax](#multi-line-syntax), this gives a
 configuration-file-like form:
 
@@ -1391,9 +1442,10 @@ geo.area(2)                # 12.566
 ```
 
 For a whole file, put `!namespace <name>` at the top of a `.math` file and its
-definitions become members of `<name>` when you `!include` it. This form also
-supports `private`, which a record literal does not — prefix a definition to keep
-it internal (usable by the file's other definitions, but not exported):
+definitions become members of `<name>` when you `!include` it. `private` works
+here exactly as it does in [a record literal](#a-record-literal-is-a-scope) —
+prefix a definition to keep it internal (usable by the file's other definitions,
+but not exported):
 
 ```
 # geo.math

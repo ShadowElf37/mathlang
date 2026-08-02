@@ -119,8 +119,9 @@ impl Parser {
     }
 
     // Ident '=' ...  or  Ident '(' params ')' ['-> type] '=' ...
-    fn is_def_start(&self) -> bool {
-        let p = self.pos;
+    fn is_def_start(&self) -> bool { self.is_def_start_at(self.pos) }
+
+    fn is_def_start_at(&self, p: usize) -> bool {
         if !matches!(self.toks.get(p), Some(Token::Ident(_))) { return false; }
         if matches!(self.toks.get(p + 1), Some(Token::Eq)) { return true; }
         if !matches!(self.toks.get(p + 1), Some(Token::LParen)) { return false; }
@@ -308,18 +309,27 @@ impl Parser {
     /// expression.
     fn parse_paren_item(&mut self) -> Result<Field, String> {
         if *self.peek() == Token::DotDot {
-            return Ok(Field { name: None, value: self.parse_splat()? });
+            return Ok(Field::positional(self.parse_splat()?));
         }
+        // `private x = 1` / `private f(v) = …`. Contextual: `private` is only a
+        // marker when a definition follows it, so `(private = 5)` is still an
+        // ordinary field named `private`.
+        let private = matches!(self.peek(), Token::Ident(s) if s == "private")
+            && self.is_def_start_at(self.pos + 1);
+        if private { self.bump(); }
         // A record is a fixed set of named slots, so its fields are plain names.
         // `(T[0] = 1)` would otherwise die on a confusing "expected '='".
         if self.is_assign_start() {
             return Err("a record field must be a name; \
                         `T[i] = v` and `w.f = v` are statements, not fields".into());
         }
+        // `private` is only set when a definition follows, so this is exhaustive.
         if self.is_def_start() {
-            self.parse_record_field()
+            let mut f = self.parse_record_field()?;
+            f.private = private;
+            Ok(f)
         } else {
-            Ok(Field { name: None, value: self.expr()? })
+            Ok(Field::positional(self.expr()?))
         }
     }
 
@@ -463,10 +473,11 @@ impl Parser {
             };
             self.eat(&Token::Eq)?;
             let body = self.expr()?;
-            Ok(Field { name: Some(name), value: Expr::Lambda(params, ret_hint, body.into()) })
+            Ok(Field { name: Some(name), value: Expr::Lambda(params, ret_hint, body.into()),
+                       private: false, func: true })
         } else {
             self.eat(&Token::Eq)?;
-            Ok(Field { name: Some(name), value: self.expr()? })
+            Ok(Field { name: Some(name), value: self.expr()?, private: false, func: false })
         }
     }
 

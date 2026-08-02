@@ -4922,18 +4922,44 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Val, String> {
             // with `.x` as well as `[0]`. Duplicate names are rejected: `.x`
             // could only ever return the first, so the second is dead weight.
             // A `..x` splat contributes its slots here, names and all.
+            //
+            // Fields evaluate **in sequence in a child scope**, so a field sees
+            // the ones before it. That makes a record literal exactly what a
+            // `!namespace` file is — a block whose result is its bindings — and
+            // it is what gives `private` something to mean. (Forward references
+            // do not resolve, in a literal or in a namespace file.)
+            let mut child = env.clone();
             let mut names:   Vec<Option<String>> = Vec::with_capacity(fields.len());
             let mut vals:    Vec<Val>            = Vec::with_capacity(fields.len());
             let mut spliced: Vec<bool>           = Vec::with_capacity(fields.len());
             for f in fields {
                 if let Expr::Splat(inner) = &f.value {
-                    for (n, v) in splat_slots(eval(inner, env)?)? {
+                    for (n, v) in splat_slots(eval(inner, &child)?)? {
+                        // A spliced field is in scope for later fields too.
+                        if let Some(nm) = &n { child.define(nm.clone(), v.clone()); }
                         push_slot(&mut names, &mut vals, &mut spliced, n, v, true)?;
                     }
-                } else {
-                    let v = eval(&f.value, env)?;
-                    push_slot(&mut names, &mut vals, &mut spliced, f.name.clone(), v, false)?;
+                    continue;
                 }
+                let v = match (&f.value, f.func, &f.name) {
+                    // `f(x) = …` is bound inside its own captured scope so it
+                    // can recurse, matching `Def::Func` at the top level.
+                    (Expr::Lambda(ps, ret, body), true, Some(fname)) => {
+                        let pnames: Vec<String> = ps.iter().map(|p| p.name.clone()).collect();
+                        let sig = FnSig::from_params(ps, ret.clone());
+                        let mut captured = (*child.vars).clone();
+                        let self_val = Val::make_fn_with_sig(
+                            pnames.clone(), sig.clone(), (**body).clone(), Arc::new(captured.clone()));
+                        captured.insert(fname.clone(), self_val);
+                        Val::make_fn_with_sig(pnames, sig, (**body).clone(), Arc::new(captured))
+                    }
+                    _ => eval(&f.value, &child)?,
+                };
+                if let Some(nm) = &f.name { child.define(nm.clone(), v.clone()); }
+                // A private binding is in scope for later fields and captured by
+                // their closures, but is not a slot of the finished record.
+                if f.private { continue; }
+                push_slot(&mut names, &mut vals, &mut spliced, f.name.clone(), v, false)?;
             }
             Ok(Val::Tuple(Tup::named(vals, names)))
         }
