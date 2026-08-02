@@ -52,13 +52,44 @@ step(m, heff, a, dt) = {
     vec.normalize(m + dt/6 * (k1 + 2*k2 + 2*k3 + k4))
 }
 
-# --- run n RK4 steps, returning the final magnetization ---
+# --- run n fixed-step RK4 steps, returning the final magnetization ---
 run(m0, heff, a, dt, n) = iterate(m -> step(m, heff, a, dt), m0, n)
 
-# --- relaxation to an energy minimum (no precession) ---
-# Damping-only descent using the torque m×(m×H) (alpha-independent, like mumax's
-# relax()): dm ∝ H - m(m·H) rotates m toward the effective field, lowering energy.
-# `rate` is a pseudo-time step (tune for stability); n is the number of steps.
-private dampTorque(m, B) = vec.cross(m, vec.cross(m, B))
-relaxStep(m, heff, rate) = vec.normalize(m - rate * dampTorque(m, heff(m)))
-relax(m0, heff, rate, n) = iterate(m -> relaxStep(m, heff, rate), m0, n)
+# --- relaxation to equilibrium via strongly-damped LLG (alpha = 1) ---
+# Robust: precession helps the state settle into the true minimum. A pure gradient
+# (no-precession) descent can stick in a near-uniform metastable state, so we run
+# the actual damped dynamics. `dt` is a real time step, `n` the number of steps.
+relax(m0, heff, dt, n) = iterate(m -> step(m, heff, 1.0, dt), m0, n)
+
+# --- adaptive Dormand-Prince RK45 (mumax's default solver) ---
+# One DP45 step from m over time h; returns (5th-order solution, embedded error).
+private dp45(m, heff, a, h) = {
+    k1 = llg(m, heff(m), a);
+    z2 = m + h*(1/5*k1);                                            q2 = llg(z2, heff(z2), a);
+    z3 = m + h*(3/40*k1 + 9/40*q2);                                 q3 = llg(z3, heff(z3), a);
+    z4 = m + h*(44/45*k1 - 56/15*q2 + 32/9*q3);                     q4 = llg(z4, heff(z4), a);
+    z5 = m + h*(19372/6561*k1 - 25360/2187*q2 + 64448/6561*q3 - 212/729*q4);   q5 = llg(z5, heff(z5), a);
+    z6 = m + h*(9017/3168*k1 - 355/33*q2 + 46732/5247*q3 + 49/176*q4 - 5103/18656*q5); q6 = llg(z6, heff(z6), a);
+    y5 = m + h*(35/384*k1 + 500/1113*q3 + 125/192*q4 - 2187/6784*q5 + 11/84*q6);
+    q7 = llg(y5, heff(y5), a);
+    y4 = m + h*(5179/57600*k1 + 7571/16695*q3 + 393/640*q4 - 92097/339200*q5 + 187/2100*q6 + 1/40*q7);
+    (y5, max(abs(y5 - y4)))
+}
+# One adaptive step of state (m, t, dt): step to at most t_end, accept if the error
+# is within tol (then grow dt), otherwise reject and retry with a smaller dt.
+private adaptiveStep(s, heff, a, t_end, tol) = {
+    m = s[0]; t = s[1]; dt = s[2];
+    if(t >= t_end, s, {
+        h   = min(dt, t_end - t);
+        res = dp45(m, heff, a, h);
+        err = res[1] / tol;
+        fac = 0.9 * (1 / max(err, 1e-12))^0.2;
+        if(err <= 1,
+           (vec.normalize(res[0]), t + h, dt * vec.clamp(fac, 0.2, 5)),
+           (m, t, dt * vec.clamp(fac, 0.2, 0.9)))
+    })
+}
+# Integrate adaptively from m0 to t_end with error-per-step `tol` (like mumax
+# MaxErr). `dt0` is the initial step, `maxsteps` an upper bound on iterations.
+adaptive(m0, heff, a, dt0, t_end, tol, maxsteps) =
+    iterate(s -> adaptiveStep(s, heff, a, t_end, tol), (m0, 0.0, dt0), maxsteps)[0]
